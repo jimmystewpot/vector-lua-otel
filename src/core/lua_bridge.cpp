@@ -1,5 +1,8 @@
 #include "vector_otel/core/lua_bridge.hpp"
 
+#include <algorithm>
+#include <limits>
+
 namespace vector_otel {
 namespace core {
 
@@ -9,7 +12,7 @@ LuaEmitter::LuaEmitter(lua_State* L, int emit_index, size_t batch_size,
       initial_top_(0),
       emit_index_(0),
       emitted_count_(0),
-      batch_size_(batch_size < 1 ? 1 : batch_size),
+      batch_size_(std::clamp<size_t>(batch_size, 1, 65536)),
       record_field_name_(record_field_name),
       current_batch_count_(0),
       in_record_(false),
@@ -87,8 +90,11 @@ void LuaEmitter::SetUint64(std::string_view key, uint64_t val) {
   if (L_ == nullptr || !in_record_ || has_error_) [[unlikely]] {
     return;
   }
+  constexpr uint64_t kMaxLuaInt = static_cast<uint64_t>(std::numeric_limits<lua_Integer>::max());
+  const lua_Integer clamped =
+      val > kMaxLuaInt ? std::numeric_limits<lua_Integer>::max() : static_cast<lua_Integer>(val);
   lua_pushlstring(L_, key.data(), key.size());
-  lua_pushinteger(L_, static_cast<lua_Integer>(val));
+  lua_pushinteger(L_, clamped);
   lua_rawset(L_, record_index_);
 }
 

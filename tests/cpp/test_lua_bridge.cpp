@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "vector_otel/core/lua_bridge.hpp"
 
 extern "C" {
@@ -443,6 +445,35 @@ TEST_F(LuaBridgeTest, DestructorMoveSemanticsStackRestoration) {
     EXPECT_GT(lua_gettop(L_), initial_top);
   }
   EXPECT_EQ(lua_gettop(L_), initial_top);
+}
+
+TEST_F(LuaBridgeTest, SetUint64ClampsAboveInt64Max) {
+  LuaEmitter emitter(L_, 1, 1);
+  emitter.StartRecord();
+  emitter.SetUint64("Count", std::numeric_limits<uint64_t>::max());
+  emitter.EndRecord();
+  EXPECT_FALSE(emitter.HasError());
+
+  lua_getglobal(L_, "emitted");
+  lua_rawgeti(L_, -1, 1);
+  lua_getfield(L_, -1, "log");
+  lua_getfield(L_, -1, "Count");
+  EXPECT_EQ(lua_tointeger(L_, -1), std::numeric_limits<lua_Integer>::max());
+  lua_pop(L_, 4);
+}
+
+TEST_F(LuaBridgeTest, BatchSizeBoundsClamping) {
+  LuaEmitter emitter_zero(L_, 1, 0);
+  EXPECT_EQ(emitter_zero.BatchSize(), 1u);
+
+  LuaEmitter emitter_valid(L_, 1, 65536);
+  EXPECT_EQ(emitter_valid.BatchSize(), 65536u);
+
+  LuaEmitter emitter_overflow(L_, 1, 100000);
+  EXPECT_EQ(emitter_overflow.BatchSize(), 65536u);
+
+  LuaEmitter emitter_max(L_, 1, std::numeric_limits<size_t>::max());
+  EXPECT_EQ(emitter_max.BatchSize(), 65536u);
 }
 
 }  // namespace
