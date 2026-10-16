@@ -26,6 +26,11 @@ simdjson::simdjson_result<simdjson::ondemand::document> IterateWithThreadLocalPa
 
 }  // namespace
 
+OtelParser& OtelParser::Instance() {
+  static thread_local OtelParser instance;
+  return instance;
+}
+
 simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
     std::string_view json_str) {
   return IterateWithThreadLocalPadding(parser_, json_str);
@@ -42,18 +47,23 @@ simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
   return IterateWithThreadLocalPadding(parser_, json_str);
 }
 
+void OtelParser::TrimCapacity() noexcept {
+  if (parser_.capacity() > kMaxRetainedBufferCapacity) [[unlikely]] {
+    parser_ = simdjson::ondemand::parser(kMaxPayloadSize);
+  }
+}
+
 size_t OtelParser::ThreadLocalBufferCapacity() noexcept { return tls_padded_buffer.capacity(); }
 
 const char* OtelParser::ThreadLocalBufferData() noexcept {
   return tls_padded_buffer.empty() ? nullptr : tls_padded_buffer.data();
 }
 
-constexpr size_t kMaxRetainedBufferCapacity = 16 * 1024 * 1024;  // 16 MB
-
 void OtelParser::TrimThreadLocalBuffer() noexcept {
   if (tls_padded_buffer.capacity() > kMaxRetainedBufferCapacity) [[unlikely]] {
     std::string().swap(tls_padded_buffer);
   }
+  Instance().TrimCapacity();
 }
 
 }  // namespace core
