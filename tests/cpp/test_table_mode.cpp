@@ -260,8 +260,7 @@ TEST_F(TableModeTest, SerializeTableWithNumericKeysDoesNotCorruptIterator) {
   lua_pop(L_, 1);
 }
 
-TEST_F(TableModeTest,
-       PushTableAttributesWithNumericKeysDoesNotCorruptIterator) {
+TEST_F(TableModeTest, PushTableAttributesWithNumericKeysDoesNotCorruptIterator) {
   lua_newtable(L_);
   lua_pushstring(L_, "alpha");
   lua_rawseti(L_, -2, 1);
