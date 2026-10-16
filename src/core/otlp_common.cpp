@@ -1,7 +1,9 @@
 #include "vector_otel/core/otlp_common.hpp"
 
 #include <charconv>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -35,9 +37,15 @@ int64_t ParseInt64(simdjson::ondemand::value& val) {
       if (num.is_int64()) {
         return num.get_int64();
       } else if (num.is_uint64()) {
-        return static_cast<int64_t>(num.get_uint64());
+        uint64_t u = num.get_uint64();
+        return u > static_cast<uint64_t>(INT64_MAX) ? std::numeric_limits<int64_t>::max()
+                                                    : static_cast<int64_t>(u);
       } else if (num.is_double()) {
-        return static_cast<int64_t>(num.get_double());
+        double d = num.get_double();
+        if (std::isfinite(d) && d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
+          return static_cast<int64_t>(d);
+        }
+        return 0;
       }
     }
   } else if (type == simdjson::ondemand::json_type::string) {
@@ -55,13 +63,14 @@ int64_t ParseInt64(simdjson::ondemand::value& val) {
       if (!sv.empty()) {
         int64_t sval = 0;
         auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), sval);
-        if (ec == std::errc()) {
+        if (ec == std::errc() && ptr == sv.data() + sv.size()) {
           return sval;
         }
         uint64_t uval = 0;
         auto [uptr, uec] = std::from_chars(sv.data(), sv.data() + sv.size(), uval);
-        if (uec == std::errc()) {
-          return static_cast<int64_t>(uval);
+        if (uec == std::errc() && uptr == sv.data() + sv.size()) {
+          return uval > static_cast<uint64_t>(INT64_MAX) ? std::numeric_limits<int64_t>::max()
+                                                         : static_cast<int64_t>(uval);
         }
       }
     }
@@ -84,7 +93,11 @@ uint64_t ParseUint64(simdjson::ondemand::value& val) {
       } else if (num.is_int64()) {
         return static_cast<uint64_t>(num.get_int64());
       } else if (num.is_double()) {
-        return static_cast<uint64_t>(num.get_double());
+        double d = num.get_double();
+        if (std::isfinite(d) && d >= 0.0 && d < 18446744073709551616.0) {
+          return static_cast<uint64_t>(d);
+        }
+        return 0;
       }
     }
   } else if (type == simdjson::ondemand::json_type::string) {
@@ -102,12 +115,12 @@ uint64_t ParseUint64(simdjson::ondemand::value& val) {
       if (!sv.empty()) {
         uint64_t uval = 0;
         auto [uptr, uec] = std::from_chars(sv.data(), sv.data() + sv.size(), uval);
-        if (uec == std::errc()) {
+        if (uec == std::errc() && uptr == sv.data() + sv.size()) {
           return uval;
         }
         int64_t sval = 0;
         auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), sval);
-        if (ec == std::errc()) {
+        if (ec == std::errc() && ptr == sv.data() + sv.size()) {
           return static_cast<uint64_t>(sval);
         }
       }
@@ -246,7 +259,7 @@ bool TryParseDouble(simdjson::ondemand::value& val, double& out) {
       if (!sv.empty()) {
         double d = 0.0;
         auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), d);
-        if (ec == std::errc()) {
+        if (ec == std::errc() && ptr == sv.data() + sv.size()) {
           out = d;
           return true;
         }
@@ -301,6 +314,14 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& 
       } else if (k == "intValue" || k == "int_value") {
         int64_t i = ParseInt64(fv);
         lua_pushinteger(L, static_cast<lua_Integer>(i));
+        matched = true;
+        break;
+      } else if (k == "uintValue" || k == "uint_value") {
+        uint64_t u = ParseUint64(fv);
+        lua_Integer clamped = u > static_cast<uint64_t>(INT64_MAX)
+                                  ? std::numeric_limits<lua_Integer>::max()
+                                  : static_cast<lua_Integer>(u);
+        lua_pushinteger(L, clamped);
         matched = true;
         break;
       } else if (k == "doubleValue" || k == "double_value") {
@@ -359,7 +380,11 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& 
       if (num.is_int64()) {
         lua_pushinteger(L, static_cast<lua_Integer>(num.get_int64()));
       } else if (num.is_uint64()) {
-        lua_pushinteger(L, static_cast<lua_Integer>(num.get_uint64()));
+        uint64_t u = num.get_uint64();
+        lua_Integer clamped = u > static_cast<uint64_t>(INT64_MAX)
+                                  ? std::numeric_limits<lua_Integer>::max()
+                                  : static_cast<lua_Integer>(u);
+        lua_pushinteger(L, clamped);
       } else {
         lua_pushnumber(L, num.get_double());
       }
@@ -394,7 +419,7 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& 
 }
 
 void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
-                         FastJsonWriter& json_writer) {
+                         FastJsonWriter& json_writer, std::string_view* out_service_name) {
   if (L == nullptr) {
     return;
   }
@@ -422,14 +447,22 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
       if (key_res.error() != simdjson::SUCCESS) continue;
       auto key_str_res = key_res.value().get_string();
       if (key_str_res.error() != simdjson::SUCCESS) continue;
-      std::string_view key_sv = key_str_res.value();
+      std::string_view k = key_str_res.value();
 
       auto val_res = kv_obj.find_field_unordered("value");
       if (val_res.error() != simdjson::SUCCESS) continue;
-      auto val = val_res.value();
+      auto v = val_res.value();
 
-      lua_pushlstring(L, key_sv.data(), key_sv.size());
-      PushAnyValue(L, val, json_writer);
+      lua_pushlstring(L, k.data(), k.size());
+      PushAnyValue(L, v, json_writer);
+      if (out_service_name != nullptr && (k == "service.name" || k == "service_name") &&
+          lua_type(L, -1) == LUA_TSTRING) {
+        size_t slen = 0;
+        const char* s = lua_tolstring(L, -1, &slen);
+        if (slen > 0) {
+          *out_service_name = std::string_view(s, slen);
+        }
+      }
       lua_rawset(L, -3);
     }
   } else if (type == simdjson::ondemand::json_type::object) {
@@ -441,14 +474,22 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
       if (field_res.error() != simdjson::SUCCESS) continue;
       auto key_res = field_res.unescaped_key();
       if (key_res.error() != simdjson::SUCCESS) continue;
-      std::string_view key_sv = key_res.value();
+      std::string_view k = key_res.value();
 
       auto val_res = field_res.value();
       if (val_res.error() != simdjson::SUCCESS) continue;
-      auto fv = val_res.value();
+      auto v = val_res.value();
 
-      lua_pushlstring(L, key_sv.data(), key_sv.size());
-      PushAnyValue(L, fv, json_writer);
+      lua_pushlstring(L, k.data(), k.size());
+      PushAnyValue(L, v, json_writer);
+      if (out_service_name != nullptr && (k == "service.name" || k == "service_name") &&
+          lua_type(L, -1) == LUA_TSTRING) {
+        size_t slen = 0;
+        const char* s = lua_tolstring(L, -1, &slen);
+        if (slen > 0) {
+          *out_service_name = std::string_view(s, slen);
+        }
+      }
       lua_rawset(L, -3);
     }
   }
