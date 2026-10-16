@@ -83,12 +83,20 @@ std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
 }  // namespace
 
 ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_idx) {
-  static thread_local core::OtelParser parser;
+  auto& parser = core::OtelParser::Instance();
   static thread_local core::FastJsonWriter writer;
   static thread_local core::FastJsonWriter body_writer;
 
   writer.Reset();
   body_writer.Reset();
+  struct WriterTrimGuard {
+    core::FastJsonWriter& w1;
+    core::FastJsonWriter& w2;
+    ~WriterTrimGuard() noexcept {
+      w1.Trim();
+      w2.Trim();
+    }
+  } trim_guard{writer, body_writer};
 
   auto doc_res = parser.Iterate(raw_json);
   if (doc_res.error() != simdjson::SUCCESS) {
@@ -158,16 +166,17 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
       auto r_obj_res = r_val.get_object();
       if (r_obj_res.error() == simdjson::SUCCESS) {
         auto r_obj = r_obj_res.value();
-        service_name = core::ExtractServiceName(r_obj);
         if (L != nullptr) {
           auto attrs_res = r_obj.find_field_unordered("attributes");
           if (attrs_res.error() == simdjson::SUCCESS) {
             auto attrs_val = attrs_res.value();
-            core::PushAttributesTable(L, attrs_val, writer);
+            core::PushAttributesTable(L, attrs_val, writer, &service_name);
           } else {
             lua_newtable(L);
           }
           res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+        } else {
+          service_name = core::ExtractServiceName(r_obj);
         }
       }
     }
@@ -394,22 +403,41 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 }
 
 ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
+  const int entry_top = lua_gettop(L);
   int abs_idx = lua_absindex(L, table_idx);
+  int abs_emit_idx = lua_absindex(L, emit_idx);
   if (!lua_istable(L, abs_idx)) {
     return ExtractionResult{false, "payload must be a table", 0};
   }
 
+  static thread_local core::FastJsonWriter writer;
+  writer.Reset();
+  struct TableScopeGuard {
+    lua_State* L;
+    int top;
+    core::FastJsonWriter& writer;
+    ~TableScopeGuard() noexcept {
+      lua_settop(L, top);
+      writer.Trim();
+    }
+  } scope_guard{L, entry_top, writer};
+
+  char proc_buf[32];
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf);
+  std::string_view processed_at(proc_buf, 30);
+  core::LuaEmitter emitter(L, abs_emit_idx);
+
   int rl_arr_idx = 0;
-  bool pop_rl = false;
 
   if (core::GetTableField(L, abs_idx, "resourceLogs", "resource_logs")) {
     rl_arr_idx = lua_absindex(L, -1);
-    pop_rl = true;
   } else if (core::GetTableField(L, abs_idx, "log")) {
     int log_idx = lua_absindex(L, -1);
     if (core::GetTableField(L, log_idx, "resourceLogs", "resource_logs")) {
+      lua_remove(L, log_idx);
       rl_arr_idx = lua_absindex(L, -1);
-      pop_rl = true;
+    } else {
+      lua_pop(L, 1);
     }
   }
 
@@ -418,13 +446,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
   }
 
   if (!lua_istable(L, rl_arr_idx)) {
-    if (pop_rl) lua_pop(L, 1);
     return ExtractionResult{true, "", 0};
   }
-
-  static thread_local core::FastJsonWriter writer;
-  std::string processed_at = core::FormatIso8601Nano(core::CurrentTimeUnixNano());
-  core::LuaEmitter emitter(L, emit_idx);
 
   lua_Integer rl_len = luaL_len(L, rl_arr_idx);
   for (lua_Integer i = 1; i <= rl_len; ++i) {
@@ -592,7 +615,6 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             emitter.EndRecord();
             lua_pop(L, 1);  // pop rec_obj
             if (emitter.HasError()) {
-              if (pop_rl) lua_pop(L, 1);
               return ExtractionResult{false, std::string(emitter.ErrorMessage()),
                                       emitter.EmittedCount()};
             }
@@ -604,10 +626,6 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
     }
     lua_pop(L, 1);  // pop sl_arr
     lua_pop(L, 1);  // pop rl_obj
-  }
-
-  if (pop_rl) {
-    lua_pop(L, 1);
   }
 
   emitter.Flush();

@@ -388,6 +388,140 @@ TEST_F(LogsExtractorTest, EmptyBatches) {
   }
 }
 
+TEST_F(LogsExtractorTest, ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperAndError) {
+  // 1. { log = { resourceLogs = { ... } } }
+  {
+    const char* setup_nested = R"(
+      return {
+        log = {
+          resourceLogs = {
+            {
+              resource = {
+                attributes = {
+                  { key = "service.name", value = { stringValue = "nested-svc" } }
+                }
+              },
+              scopeLogs = {
+                {
+                  logRecords = {
+                    { timeUnixNano = "1700000000000000000", body = { stringValue = "hi" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    )";
+    ASSERT_EQ(luaL_dostring(L_, setup_nested), LUA_OK);
+    int payload_idx = lua_gettop(L_);
+    int initial_top = lua_gettop(L_);
+    auto res = ProcessLogsTable(L_, payload_idx, 1);
+    EXPECT_TRUE(res.success);
+    EXPECT_EQ(res.emitted_count, 1);
+    EXPECT_EQ(lua_gettop(L_), initial_top);
+    lua_pop(L_, 1);
+  }
+
+  // 2. { log = { unrelated = 1 } }
+  {
+    const char* setup_unrelated = R"(
+      return {
+        log = {
+          unrelated = 1
+        }
+      }
+    )";
+    ASSERT_EQ(luaL_dostring(L_, setup_unrelated), LUA_OK);
+    int payload_idx = lua_gettop(L_);
+    int initial_top = lua_gettop(L_);
+    auto res = ProcessLogsTable(L_, payload_idx, 1);
+    EXPECT_TRUE(res.success);
+    EXPECT_EQ(res.emitted_count, 0);
+    EXPECT_EQ(lua_gettop(L_), initial_top);
+    lua_pop(L_, 1);
+  }
+
+  // 3. Emit callback raises a Lua error
+  {
+    const char* setup_err = R"(
+      function err_emit(ev)
+        error("boom from emit")
+      end
+      return {
+        log = {
+          resourceLogs = {
+            {
+              scopeLogs = {
+                {
+                  logRecords = {
+                    { timeUnixNano = "1700000000000000000", body = { stringValue = "err" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    )";
+    ASSERT_EQ(luaL_dostring(L_, setup_err), LUA_OK);
+    int payload_idx = lua_gettop(L_);
+    lua_getglobal(L_, "err_emit");
+    int err_emit_idx = lua_gettop(L_);
+    int initial_top = lua_gettop(L_);
+    auto res = ProcessLogsTable(L_, payload_idx, err_emit_idx);
+    EXPECT_FALSE(res.success);
+    EXPECT_NE(res.error.find("boom from emit"), std::string::npos);
+    EXPECT_EQ(lua_gettop(L_), initial_top);
+    lua_pop(L_, 2);
+  }
+
+  // 4. ProcessLogs extracts ServiceName and ResourceAttributes when "attributes" appears
+  // before or after other fields in "resource".
+  {
+    std::string json_before = R"({
+      "resourceLogs": [{
+        "resource": {
+          "attributes": [
+            { "key": "service.name", "value": { "stringValue": "svc-before" } },
+            { "key": "env", "value": { "stringValue": "prod" } }
+          ],
+          "droppedAttributesCount": 2
+        },
+        "scopeLogs": [{
+          "logRecords": [{ "timeUnixNano": "1700000000000000000", "body": { "stringValue": "b1" } }]
+        }]
+      }, {
+        "resource": {
+          "droppedAttributesCount": 3,
+          "attributes": [
+            { "key": "region", "value": { "stringValue": "us-east" } },
+            { "key": "service.name", "value": { "stringValue": "svc-after" } }
+          ]
+        },
+        "scopeLogs": [{
+          "logRecords": [{ "timeUnixNano": "1700000000000000000", "body": { "stringValue": "b2" } }]
+        }]
+      }]
+    })";
+    auto res = ProcessLogs(L_, json_before, 1);
+    EXPECT_TRUE(res.success);
+    EXPECT_EQ(res.emitted_count, 2);
+
+    const char* verify_script = R"(
+      local r_before = emitted[#emitted - 1].log
+      local r_after = emitted[#emitted].log
+      assert(r_before.ServiceName == "svc-before", "svc-before mismatch: " .. tostring(r_before.ServiceName))
+      assert(r_before.ResourceAttributes["service.name"] == "svc-before")
+      assert(r_before.ResourceAttributes["env"] == "prod")
+      assert(r_after.ServiceName == "svc-after", "svc-after mismatch: " .. tostring(r_after.ServiceName))
+      assert(r_after.ResourceAttributes["service.name"] == "svc-after")
+      assert(r_after.ResourceAttributes["region"] == "us-east")
+    )";
+    EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+  }
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel
