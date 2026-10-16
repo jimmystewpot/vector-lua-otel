@@ -65,7 +65,8 @@ class MetricsExtractorTest : public ::testing::Test {
 
 TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
   std::string json_data = ReadFixture("tests/fixtures/metrics_sample.json");
-  ASSERT_FALSE(json_data.empty()) << "Failed to read tests/fixtures/metrics_sample.json";
+  ASSERT_FALSE(json_data.empty())
+      << "Failed to read tests/fixtures/metrics_sample.json";
 
   int initial_top = lua_gettop(L_);
   auto result = ProcessMetrics(L_, json_data, 1);
@@ -186,13 +187,15 @@ TEST_F(MetricsExtractorTest, EmptyAndSparsePayloads) {
   EXPECT_EQ(res4.emitted_count, 0);
 
   // resourceMetrics with empty scopeMetrics
-  auto res5 = ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
+  auto res5 =
+      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
   EXPECT_TRUE(res5.success);
   EXPECT_EQ(res5.emitted_count, 0);
 
   // scopeMetrics with empty metrics
-  auto res6 =
-      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}", 1);
+  auto res6 = ProcessMetrics(
+      L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}",
+      1);
   EXPECT_TRUE(res6.success);
   EXPECT_EQ(res6.emitted_count, 0);
 }
@@ -343,6 +346,87 @@ TEST_F(MetricsExtractorTest, UnorderedKeysAndSnakeCase) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(MetricsExtractorTest, ExemplarsAndAttrsCleanedUpOnExtractionFailure) {
+  // Test with invalid payload that has exemplars and attributes
+  int initial_top = lua_gettop(L_);
+
+  // Probe registry freelist head before extraction
+  lua_newtable(L_);
+  int probe_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
+  luaL_unref(L_, LUA_REGISTRYINDEX, probe_ref);
+
+  const std::string invalid_payload =
+      R"({"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"gauge": {"dataPoints": [{"exemplars": [{"timeUnixNano": "1000"}], "asDouble": "invalid_double"}]}}]}]}]})";
+  auto res = ProcessMetrics(L_, invalid_payload, 1);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  // Probe registry freelist head after extraction: no references leaked
+  lua_newtable(L_);
+  int after_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
+  luaL_unref(L_, LUA_REGISTRYINDEX, after_ref);
+  EXPECT_EQ(after_ref, probe_ref);
+}
+
+TEST_F(MetricsExtractorTest, RegistryCleanedUpWhenEmitFails) {
+  const char* fail_script = R"(
+    function mock_emit(event)
+      error("simulated sink failure")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, fail_script), LUA_OK);
+  lua_getglobal(L_, "mock_emit");
+  lua_replace(L_, 1);
+
+  int initial_top = lua_gettop(L_);
+
+  lua_newtable(L_);
+  int probe_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
+  luaL_unref(L_, LUA_REGISTRYINDEX, probe_ref);
+
+  const std::string payload =
+      R"({"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"gauge": {"dataPoints": [{"exemplars": [{"timeUnixNano": "1000", "filteredAttributes": [{"key": "f", "value": {"stringValue": "v"}}]}], "attributes": [{"key": "k", "value": {"stringValue": "v"}}], "asDouble": 1.0}]}}]}]}]})";
+  auto res = ProcessMetrics(L_, payload, 1);
+  EXPECT_FALSE(res.success);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  lua_newtable(L_);
+  int after_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
+  luaL_unref(L_, LUA_REGISTRYINDEX, after_ref);
+  EXPECT_EQ(after_ref, probe_ref);
+}
+
+TEST_F(MetricsExtractorTest, ExemplarsFilteredAttributesScopedRefLifecycle) {
+  int initial_top = lua_gettop(L_);
+
+  lua_newtable(L_);
+  int probe_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
+  luaL_unref(L_, LUA_REGISTRYINDEX, probe_ref);
+
+  const std::string payload =
+      R"({"resourceMetrics": [{"scopeMetrics": [{"metrics": [{"gauge": {"dataPoints": [{"exemplars": [{"timeUnixNano": "1000000000", "traceId": "0123456789abcdef0123456789abcdef", "spanId": "0123456789abcdef", "asDouble": 3.14, "filteredAttributes": [{"key": "tenant", "value": {"stringValue": "acme"}}]}], "attributes": [{"key": "cluster", "value": {"stringValue": "prod-1"}}], "asDouble": 100.0}]}}]}]}]})";
+  auto res = ProcessMetrics(L_, payload, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  lua_newtable(L_);
+  int after_ref = luaL_ref(L_, LUA_REGISTRYINDEX);
+  luaL_unref(L_, LUA_REGISTRYINDEX, after_ref);
+  EXPECT_EQ(after_ref, probe_ref);
+
+  const char* verify_script = R"(
+    local e = emitted[#emitted].log
+    assert(e ~= nil)
+    assert(e.Attributes["cluster"] == "prod-1")
+    assert(e.Exemplars ~= nil and #e.Exemplars == 1)
+    local ex = e.Exemplars[1]
+    assert(ex.FilteredAttributes["tenant"] == "acme")
+    assert(math.abs(ex.Value - 3.14) < 1e-5)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
+
 }  // namespace extractors
 }  // namespace vector_otel
