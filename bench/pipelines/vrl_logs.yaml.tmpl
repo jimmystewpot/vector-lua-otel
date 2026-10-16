@@ -1,0 +1,13 @@
+sources:
+  in:
+    type: stdin
+
+transforms:
+  extract:
+    type: remap
+    inputs: [in]
+    file: @VRL@
+
+sinks:
+  out:
+@SINK@

@@ -1,0 +1,103 @@
+sources:
+  otel_in:
+    type: opentelemetry
+    http:
+      address: 0.0.0.0:4318
+    grpc:
+      address: 0.0.0.0:4317
+    use_otlp_decoding:
+      logs: true
+      metrics: true
+
+transforms:
+  extract_logs:
+    type: lua
+    version: "2"
+    inputs:
+      - otel_in.logs
+    source: |
+      package.cpath = "build/?.so;../build/?.so;../../build/?.so;" .. package.cpath
+      local otel_logs = require("vector_otel").logs
+
+      function process(event, emit)
+        local payload = event.log.resourceLogs or event.log.message or event.log
+        local count, err = otel_logs.process(payload, emit)
+        if not count then
+          error("OTLP Logs parsing failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+
+  extract_metrics:
+    type: lua
+    version: "2"
+    inputs:
+      - otel_in.metrics
+    source: |
+      package.cpath = "build/?.so;../build/?.so;../../build/?.so;" .. package.cpath
+      local otel_metrics = require("vector_otel").metrics
+
+      function process(event, emit)
+        local payload = event.log.resourceMetrics or event.log.message or event.log
+        local count, err = otel_metrics.process(payload, emit)
+        if not count then
+          error("OTLP Metrics parsing failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+
+sinks:
+  s3_parquet_logs:
+    type: aws_s3
+    inputs:
+      - extract_logs
+    bucket: telemetry-warehouse
+    region: us-east-1
+    key_prefix: logs/year=%Y/month=%m/day=%d/
+    compression: none
+    encoding:
+      codec: text
+    batch_encoding:
+      codec: parquet
+      schema_file: schemas/parquet/logs.schema
+      compression:
+        algorithm: zstd
+        level: 3
+    buffer:
+      type: memory
+      max_events: 10000
+    batch:
+      max_bytes: 10485760
+      timeout_secs: 30
+
+  s3_parquet_metrics:
+    type: aws_s3
+    inputs:
+      - extract_metrics
+    bucket: telemetry-warehouse
+    region: us-east-1
+    key_prefix: metrics/year=%Y/month=%m/day=%d/
+    compression: none
+    encoding:
+      codec: text
+    batch_encoding:
+      codec: parquet
+      schema_file: schemas/parquet/metrics.schema
+      compression:
+        algorithm: zstd
+        level: 3
+    buffer:
+      type: memory
+      max_events: 10000
+    batch:
+      max_bytes: 10485760
+      timeout_secs: 30
+
+  blackhole_traces:
+    type: blackhole
+    inputs:
+      - otel_in.traces
+
+

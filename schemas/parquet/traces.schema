@@ -1,0 +1,20 @@
+message SpanRecord {
+  required binary Timestamp (STRING);
+  required binary TraceId (STRING);
+  required binary SpanId (STRING);
+  optional binary ParentSpanId (STRING);
+  optional binary TraceState (STRING);
+  required binary SpanName (STRING);
+  required binary SpanKind (STRING);
+  required binary ServiceName (STRING);
+  optional binary ResourceAttributes (STRING);
+  optional binary ScopeName (STRING);
+  optional binary ScopeVersion (STRING);
+  optional binary SpanAttributes (STRING);
+  required int64 Duration;
+  required binary StatusCode (STRING);
+  optional binary StatusMessage (STRING);
+  optional binary Events (STRING);
+  optional binary Links (STRING);
+  required binary processed_at (STRING);
+}

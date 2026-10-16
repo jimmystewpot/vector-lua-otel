@@ -1,0 +1,22 @@
+sources:
+  in: { type: stdin }
+transforms:
+  extract:
+    type: lua
+    version: "2"
+    inputs: [in]
+    source: |
+      package.cpath = "@LIBDIR@/?.so;" .. package.cpath
+      local otel_logs = require("vector_otel").logs
+      function process(event, emit)
+        local payload = event.log.resourceLogs or event.log.message or event.log
+        local count, err = otel_logs.process(payload, emit)
+        if not count then
+          error("OTLP Logs parsing failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+sinks:
+  out:
+@SINK@

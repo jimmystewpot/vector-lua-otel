@@ -1,0 +1,888 @@
+#include "vector_otel/extractors/traces_extractor.hpp"
+
+#include <cstdint>
+#include <exception>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include "vector_otel/core/fast_json_writer.hpp"
+#include "vector_otel/core/lua_bridge.hpp"
+#include "vector_otel/core/otlp_common.hpp"
+#include "vector_otel/core/parser.hpp"
+#include "vector_otel/core/table_reader.hpp"
+#include "vector_otel/core/timestamp.hpp"
+
+namespace vector_otel {
+namespace extractors {
+namespace {
+
+void WriteAnyValueJson(core::FastJsonWriter& writer,
+                       simdjson::ondemand::value& val) {
+  auto type_res = val.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    writer.Null();
+    return;
+  }
+  auto type = type_res.value();
+  if (type == simdjson::ondemand::json_type::object) {
+    auto obj_res = val.get_object();
+    if (obj_res.error() != simdjson::SUCCESS) {
+      writer.Null();
+      return;
+    }
+    auto obj = obj_res.value();
+    bool matched = false;
+    for (auto field_res : obj) {
+      if (field_res.error() != simdjson::SUCCESS) continue;
+      auto k_res = field_res.unescaped_key();
+      if (k_res.error() != simdjson::SUCCESS) continue;
+      std::string_view k = k_res.value();
+      auto v_res = field_res.value();
+      if (v_res.error() != simdjson::SUCCESS) continue;
+      auto fv = v_res.value();
+
+      if (k == "stringValue" || k == "string_value") {
+        auto s_res = fv.get_string();
+        if (s_res.error() == simdjson::SUCCESS) {
+          writer.String(s_res.value());
+          matched = true;
+          break;
+        }
+      } else if (k == "intValue" || k == "int_value") {
+        writer.Int64(core::ParseInt64(fv));
+        matched = true;
+        break;
+      } else if (k == "doubleValue" || k == "double_value") {
+        auto num_res = fv.get_double();
+        if (num_res.error() == simdjson::SUCCESS) {
+          writer.Double(num_res.value());
+        } else {
+          auto s_res = fv.get_string();
+          if (s_res.error() == simdjson::SUCCESS) {
+            double d = 0.0;
+            std::string s(s_res.value());
+            try {
+              d = std::stod(s);
+            } catch (...) {
+            }
+            writer.Double(d);
+          } else {
+            writer.Double(0.0);
+          }
+        }
+        matched = true;
+        break;
+      } else if (k == "boolValue" || k == "bool_value") {
+        auto b_res = fv.get_bool();
+        writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
+        matched = true;
+        break;
+      } else if (k == "arrayValue" || k == "array_value" ||
+                 k == "kvlistValue" || k == "kvlist_value" ||
+                 k == "bytesValue" || k == "bytes_value") {
+        auto raw_res = fv.raw_json();
+        if (raw_res.error() == simdjson::SUCCESS) {
+          writer.RawJson(raw_res.value());
+        } else {
+          writer.Null();
+        }
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      writer.Null();
+    }
+  } else if (type == simdjson::ondemand::json_type::string) {
+    auto s_res = val.get_string();
+    if (s_res.error() == simdjson::SUCCESS) {
+      writer.String(s_res.value());
+    } else {
+      writer.Null();
+    }
+  } else if (type == simdjson::ondemand::json_type::number) {
+    auto num_res = val.get_number();
+    if (num_res.error() == simdjson::SUCCESS) {
+      auto num = num_res.value();
+      if (num.is_int64()) {
+        writer.Int64(num.get_int64());
+      } else if (num.is_uint64()) {
+        writer.Uint64(num.get_uint64());
+      } else {
+        writer.Double(num.get_double());
+      }
+    } else {
+      writer.Null();
+    }
+  } else if (type == simdjson::ondemand::json_type::boolean) {
+    auto b_res = val.get_bool();
+    writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
+  } else {
+    writer.Null();
+  }
+}
+
+void WriteAttributesJson(core::FastJsonWriter& writer,
+                         simdjson::ondemand::value& attrs_val) {
+  writer.StartObject();
+  auto type_res = attrs_val.type();
+  if (type_res.error() == simdjson::SUCCESS) {
+    if (type_res.value() == simdjson::ondemand::json_type::array) {
+      auto arr_res = attrs_val.get_array();
+      if (arr_res.error() == simdjson::SUCCESS) {
+        for (auto elem_res : arr_res.value()) {
+          if (elem_res.error() != simdjson::SUCCESS) continue;
+          auto item_val = elem_res.value();
+          auto obj_res = item_val.get_object();
+          if (obj_res.error() != simdjson::SUCCESS) continue;
+          auto kv = obj_res.value();
+          auto k_res = kv.find_field_unordered("key");
+          if (k_res.error() != simdjson::SUCCESS) continue;
+          auto k_str_res = k_res.value().get_string();
+          if (k_str_res.error() != simdjson::SUCCESS) continue;
+          std::string_view k = k_str_res.value();
+
+          auto v_res = kv.find_field_unordered("value");
+          if (v_res.error() != simdjson::SUCCESS) continue;
+          auto v = v_res.value();
+
+          writer.Key(k);
+          WriteAnyValueJson(writer, v);
+        }
+      }
+    } else if (type_res.value() == simdjson::ondemand::json_type::object) {
+      auto obj_res = attrs_val.get_object();
+      if (obj_res.error() == simdjson::SUCCESS) {
+        for (auto field_res : obj_res.value()) {
+          if (field_res.error() != simdjson::SUCCESS) continue;
+          auto k_res = field_res.unescaped_key();
+          if (k_res.error() != simdjson::SUCCESS) continue;
+          auto v_res = field_res.value();
+          if (v_res.error() != simdjson::SUCCESS) continue;
+          auto fv = v_res.value();
+
+          writer.Key(k_res.value());
+          WriteAnyValueJson(writer, fv);
+        }
+      }
+    }
+  }
+  writer.EndObject();
+}
+
+void SerializeSpanEvents(simdjson::ondemand::object& span_obj,
+                         core::FastJsonWriter& writer) {
+  writer.StartArray();
+  auto events_res = span_obj.find_field_unordered("events");
+  if (events_res.error() == simdjson::SUCCESS) {
+    auto events_val = events_res.value();
+    auto type_res = events_val.type();
+    if (type_res.error() == simdjson::SUCCESS &&
+        type_res.value() == simdjson::ondemand::json_type::array) {
+      auto arr_res = events_val.get_array();
+      if (arr_res.error() == simdjson::SUCCESS) {
+        for (auto elem_res : arr_res.value()) {
+          if (elem_res.error() != simdjson::SUCCESS) continue;
+          auto item_val = elem_res.value();
+          auto ev_obj_res = item_val.get_object();
+          if (ev_obj_res.error() != simdjson::SUCCESS) continue;
+          auto ev_obj = ev_obj_res.value();
+
+          writer.StartObject();
+
+          // Timestamp
+          uint64_t time_nanos = 0;
+          auto time_res = ev_obj.find_field_unordered("timeUnixNano");
+          if (time_res.error() == simdjson::SUCCESS) {
+            auto tval = time_res.value();
+            time_nanos = core::ParseUint64(tval);
+          }
+          writer.Key("Timestamp");
+          writer.String(core::FormatIso8601Nano(time_nanos));
+
+          // Name
+          std::string_view name = core::ExtractStringField(ev_obj, "name", "");
+          writer.Key("Name");
+          writer.String(name);
+
+          // Attributes
+          writer.Key("Attributes");
+          auto attrs_res = ev_obj.find_field_unordered("attributes");
+          if (attrs_res.error() == simdjson::SUCCESS) {
+            auto aval = attrs_res.value();
+            WriteAttributesJson(writer, aval);
+          } else {
+            writer.StartObject();
+            writer.EndObject();
+          }
+
+          writer.EndObject();
+        }
+      }
+    }
+  }
+  writer.EndArray();
+}
+
+void SerializeSpanLinks(simdjson::ondemand::object& span_obj,
+                        core::FastJsonWriter& writer) {
+  writer.StartArray();
+  auto links_res = span_obj.find_field_unordered("links");
+  if (links_res.error() == simdjson::SUCCESS) {
+    auto links_val = links_res.value();
+    auto type_res = links_val.type();
+    if (type_res.error() == simdjson::SUCCESS &&
+        type_res.value() == simdjson::ondemand::json_type::array) {
+      auto arr_res = links_val.get_array();
+      if (arr_res.error() == simdjson::SUCCESS) {
+        for (auto elem_res : arr_res.value()) {
+          if (elem_res.error() != simdjson::SUCCESS) continue;
+          auto item_val = elem_res.value();
+          auto link_obj_res = item_val.get_object();
+          if (link_obj_res.error() != simdjson::SUCCESS) continue;
+          auto link_obj = link_obj_res.value();
+
+          writer.StartObject();
+
+          std::string_view trace_id =
+              core::ExtractStringField(link_obj, "traceId", "");
+          writer.Key("TraceId");
+          writer.String(trace_id);
+
+          std::string_view span_id =
+              core::ExtractStringField(link_obj, "spanId", "");
+          writer.Key("SpanId");
+          writer.String(span_id);
+
+          std::string_view trace_state =
+              core::ExtractStringField(link_obj, "traceState", "");
+          writer.Key("TraceState");
+          writer.String(trace_state);
+
+          writer.Key("Attributes");
+          auto attrs_res = link_obj.find_field_unordered("attributes");
+          if (attrs_res.error() == simdjson::SUCCESS) {
+            auto aval = attrs_res.value();
+            WriteAttributesJson(writer, aval);
+          } else {
+            writer.StartObject();
+            writer.EndObject();
+          }
+
+          writer.EndObject();
+        }
+      }
+    }
+  }
+  writer.EndArray();
+}
+
+std::string ParseSpanKind(simdjson::ondemand::object& span_obj) {
+  auto kind_res = span_obj.find_field_unordered("kind");
+  if (kind_res.error() != simdjson::SUCCESS) {
+    return "SPAN_KIND_UNSPECIFIED";
+  }
+  auto kval = kind_res.value();
+  auto ktype_res = kval.type();
+  if (ktype_res.error() != simdjson::SUCCESS) {
+    return "SPAN_KIND_UNSPECIFIED";
+  }
+  if (ktype_res.value() == simdjson::ondemand::json_type::number) {
+    int64_t k = core::ParseInt64(kval);
+    switch (k) {
+      case 1:
+        return "SPAN_KIND_INTERNAL";
+      case 2:
+        return "SPAN_KIND_SERVER";
+      case 3:
+        return "SPAN_KIND_CLIENT";
+      case 4:
+        return "SPAN_KIND_PRODUCER";
+      case 5:
+        return "SPAN_KIND_CONSUMER";
+      default:
+        return "SPAN_KIND_UNSPECIFIED";
+    }
+  } else if (ktype_res.value() == simdjson::ondemand::json_type::string) {
+    auto s_res = kval.get_string();
+    if (s_res.error() == simdjson::SUCCESS) {
+      std::string_view sv = s_res.value();
+      if (sv.starts_with("SPAN_KIND_")) {
+        return std::string(sv);
+      }
+      if (sv == "INTERNAL") return "SPAN_KIND_INTERNAL";
+      if (sv == "SERVER") return "SPAN_KIND_SERVER";
+      if (sv == "CLIENT") return "SPAN_KIND_CLIENT";
+      if (sv == "PRODUCER") return "SPAN_KIND_PRODUCER";
+      if (sv == "CONSUMER") return "SPAN_KIND_CONSUMER";
+      if (sv == "UNSPECIFIED") return "SPAN_KIND_UNSPECIFIED";
+      return std::string(sv);
+    }
+  }
+  return "SPAN_KIND_UNSPECIFIED";
+}
+
+std::string ParseStatusCode(simdjson::ondemand::object& status_obj) {
+  auto code_res = status_obj.find_field_unordered("code");
+  if (code_res.error() != simdjson::SUCCESS) {
+    return "STATUS_CODE_UNSET";
+  }
+  auto code_val = code_res.value();
+  auto ctype_res = code_val.type();
+  if (ctype_res.error() != simdjson::SUCCESS) {
+    return "STATUS_CODE_UNSET";
+  }
+  if (ctype_res.value() == simdjson::ondemand::json_type::number) {
+    int64_t c = core::ParseInt64(code_val);
+    switch (c) {
+      case 1:
+        return "STATUS_CODE_OK";
+      case 2:
+        return "STATUS_CODE_ERROR";
+      default:
+        return "STATUS_CODE_UNSET";
+    }
+  } else if (ctype_res.value() == simdjson::ondemand::json_type::string) {
+    auto s_res = code_val.get_string();
+    if (s_res.error() == simdjson::SUCCESS) {
+      std::string_view sv = s_res.value();
+      if (sv.starts_with("STATUS_CODE_")) {
+        return std::string(sv);
+      }
+      if (sv == "OK") return "STATUS_CODE_OK";
+      if (sv == "ERROR") return "STATUS_CODE_ERROR";
+      if (sv == "UNSET") return "STATUS_CODE_UNSET";
+      return std::string(sv);
+    }
+  }
+  return "STATUS_CODE_UNSET";
+}
+
+}  // namespace
+
+ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json,
+                               int emit_idx) {
+  core::LuaEmitter emitter(L, emit_idx);
+  try {
+    core::OtelParser parser;
+    auto doc_res = parser.Iterate(raw_json);
+    if (doc_res.error() != simdjson::SUCCESS) {
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(doc_res.error())), 0};
+    }
+    auto doc = std::move(doc_res.value());
+    auto doc_obj_res = doc.get_object();
+    if (doc_obj_res.error() != simdjson::SUCCESS) {
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
+    }
+    auto doc_obj = doc_obj_res.value();
+
+    auto res_spans_field = doc_obj.find_field_unordered("resourceSpans");
+    if (res_spans_field.error() == simdjson::NO_SUCH_FIELD) {
+      return ExtractionResult{true, "", 0};
+    }
+    if (res_spans_field.error() != simdjson::SUCCESS) {
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(res_spans_field.error())),
+          0};
+    }
+    auto res_spans_val = res_spans_field.value();
+    auto res_spans_arr_res = res_spans_val.get_array();
+    if (res_spans_arr_res.error() != simdjson::SUCCESS) {
+      return ExtractionResult{
+          false,
+          std::string(simdjson::error_message(res_spans_arr_res.error())), 0};
+    }
+
+    core::FastJsonWriter events_writer;
+    core::FastJsonWriter links_writer;
+    core::FastJsonWriter attr_writer;
+
+    std::string processed_at =
+        core::FormatIso8601Nano(core::CurrentTimeUnixNano());
+
+    for (auto res_span_elem : res_spans_arr_res.value()) {
+      if (res_span_elem.error() != simdjson::SUCCESS) {
+        return ExtractionResult{
+            false, std::string(simdjson::error_message(res_span_elem.error())),
+            emitter.EmittedCount()};
+      }
+      auto res_span_obj_res = res_span_elem.value().get_object();
+      if (res_span_obj_res.error() != simdjson::SUCCESS) {
+        continue;
+      }
+      auto res_span_obj = res_span_obj_res.value();
+
+      std::string service_name = "unknown_service";
+      core::ScopedLuaRef res_attr_ref(L, LUA_NOREF);
+
+      auto res_field = res_span_obj.find_field_unordered("resource");
+      if (res_field.error() == simdjson::SUCCESS) {
+        auto res_val = res_field.value();
+        auto res_obj_res = res_val.get_object();
+        if (res_obj_res.error() == simdjson::SUCCESS) {
+          auto res_obj = res_obj_res.value();
+          service_name = core::ExtractServiceName(res_obj);
+          auto attrs_field = res_obj.find_field_unordered("attributes");
+          if (attrs_field.error() == simdjson::SUCCESS) {
+            auto attrs_val = attrs_field.value();
+            if (L != nullptr) {
+              core::PushAttributesTable(L, attrs_val, attr_writer);
+              res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+            }
+          }
+        }
+      }
+
+      if (L != nullptr && !res_attr_ref.valid()) {
+        lua_newtable(L);
+        res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+      }
+
+      auto scope_spans_field = res_span_obj.find_field_unordered("scopeSpans");
+      if (scope_spans_field.error() == simdjson::NO_SUCH_FIELD) {
+        continue;
+      }
+      if (scope_spans_field.error() != simdjson::SUCCESS) {
+        return ExtractionResult{
+            false,
+            std::string(simdjson::error_message(scope_spans_field.error())),
+            emitter.EmittedCount()};
+      }
+      auto scope_spans_val = scope_spans_field.value();
+      auto scope_spans_arr_res = scope_spans_val.get_array();
+      if (scope_spans_arr_res.error() != simdjson::SUCCESS) {
+        return ExtractionResult{
+            false,
+            std::string(simdjson::error_message(scope_spans_arr_res.error())),
+            emitter.EmittedCount()};
+      }
+
+      for (auto scope_span_elem : scope_spans_arr_res.value()) {
+        if (scope_span_elem.error() != simdjson::SUCCESS) {
+          return ExtractionResult{
+              false,
+              std::string(simdjson::error_message(scope_span_elem.error())),
+              emitter.EmittedCount()};
+        }
+        auto scope_span_obj_res = scope_span_elem.value().get_object();
+        if (scope_span_obj_res.error() != simdjson::SUCCESS) {
+          continue;
+        }
+        auto scope_span_obj = scope_span_obj_res.value();
+
+        std::string scope_name;
+        std::string scope_version;
+        auto scope_field = scope_span_obj.find_field_unordered("scope");
+        if (scope_field.error() == simdjson::SUCCESS) {
+          auto scope_val = scope_field.value();
+          auto scope_obj_res = scope_val.get_object();
+          if (scope_obj_res.error() == simdjson::SUCCESS) {
+            auto scope_obj = scope_obj_res.value();
+            scope_name =
+                std::string(core::ExtractStringField(scope_obj, "name", ""));
+            scope_version =
+                std::string(core::ExtractStringField(scope_obj, "version", ""));
+          }
+        }
+
+        auto spans_field = scope_span_obj.find_field_unordered("spans");
+        if (spans_field.error() == simdjson::NO_SUCH_FIELD) {
+          continue;
+        }
+        if (spans_field.error() != simdjson::SUCCESS) {
+          return ExtractionResult{
+              false, std::string(simdjson::error_message(spans_field.error())),
+              emitter.EmittedCount()};
+        }
+        auto spans_val = spans_field.value();
+        auto spans_arr_res = spans_val.get_array();
+        if (spans_arr_res.error() != simdjson::SUCCESS) {
+          return ExtractionResult{
+              false,
+              std::string(simdjson::error_message(spans_arr_res.error())),
+              emitter.EmittedCount()};
+        }
+
+        for (auto span_elem : spans_arr_res.value()) {
+          if (span_elem.error() != simdjson::SUCCESS) {
+            return ExtractionResult{
+                false, std::string(simdjson::error_message(span_elem.error())),
+                emitter.EmittedCount()};
+          }
+          auto span_obj_res = span_elem.value().get_object();
+          if (span_obj_res.error() != simdjson::SUCCESS) {
+            continue;
+          }
+          auto span_obj = span_obj_res.value();
+
+          std::string_view trace_id =
+              core::ExtractStringField(span_obj, "traceId", "");
+          std::string_view span_id =
+              core::ExtractStringField(span_obj, "spanId", "");
+          std::string_view parent_span_id =
+              core::ExtractStringField(span_obj, "parentSpanId", "");
+          std::string_view trace_state =
+              core::ExtractStringField(span_obj, "traceState", "");
+          std::string_view span_name =
+              core::ExtractStringField(span_obj, "name", "");
+          std::string span_kind = ParseSpanKind(span_obj);
+
+          uint64_t start_time = 0;
+          auto start_res = span_obj.find_field_unordered("startTimeUnixNano");
+          if (start_res.error() == simdjson::SUCCESS) {
+            auto val = start_res.value();
+            start_time = core::ParseUint64(val);
+          }
+
+          uint64_t end_time = 0;
+          auto end_res = span_obj.find_field_unordered("endTimeUnixNano");
+          if (end_res.error() == simdjson::SUCCESS) {
+            auto val = end_res.value();
+            end_time = core::ParseUint64(val);
+          }
+
+          int64_t duration = static_cast<int64_t>(end_time - start_time);
+          std::string timestamp_str = core::FormatIso8601Nano(start_time);
+
+          std::string status_code = "STATUS_CODE_UNSET";
+          std::string_view status_msg;
+          auto status_res = span_obj.find_field_unordered("status");
+          if (status_res.error() == simdjson::SUCCESS) {
+            auto status_val = status_res.value();
+            auto status_type_res = status_val.type();
+            if (status_type_res.error() == simdjson::SUCCESS &&
+                status_type_res.value() ==
+                    simdjson::ondemand::json_type::object) {
+              auto status_obj_res = status_val.get_object();
+              if (status_obj_res.error() == simdjson::SUCCESS) {
+                auto status_obj = status_obj_res.value();
+                status_code = ParseStatusCode(status_obj);
+                status_msg =
+                    core::ExtractStringField(status_obj, "message", "");
+              }
+            }
+          }
+
+          events_writer.Reset();
+          SerializeSpanEvents(span_obj, events_writer);
+
+          links_writer.Reset();
+          SerializeSpanLinks(span_obj, links_writer);
+
+          emitter.StartRecord();
+          emitter.SetString("Timestamp", timestamp_str);
+          emitter.SetString("TraceId", trace_id);
+          emitter.SetString("SpanId", span_id);
+          emitter.SetString("ParentSpanId", parent_span_id);
+          emitter.SetString("TraceState", trace_state);
+          emitter.SetString("SpanName", span_name);
+          emitter.SetString("SpanKind", span_kind);
+          emitter.SetString("ServiceName", service_name);
+
+          if (L != nullptr) {
+            lua_rawgeti(L, LUA_REGISTRYINDEX, res_attr_ref.get());
+            emitter.SetTableFromStack("ResourceAttributes");
+          }
+
+          emitter.SetString("ScopeName", scope_name);
+          emitter.SetString("ScopeVersion", scope_version);
+
+          if (L != nullptr) {
+            auto attrs_res = span_obj.find_field_unordered("attributes");
+            if (attrs_res.error() == simdjson::SUCCESS) {
+              auto attrs_val = attrs_res.value();
+              core::PushAttributesTable(L, attrs_val, attr_writer);
+            } else {
+              lua_newtable(L);
+            }
+            emitter.SetTableFromStack("SpanAttributes");
+          }
+
+          emitter.SetInt64("Duration", duration);
+          emitter.SetString("StatusCode", status_code);
+          emitter.SetString("StatusMessage", status_msg);
+          emitter.SetString("Events", events_writer.Str());
+          emitter.SetString("Links", links_writer.Str());
+          emitter.SetString("processed_at", processed_at);
+
+          emitter.EndRecord();
+        }
+      }
+    }
+
+    emitter.Flush();
+    return ExtractionResult{true, "", emitter.EmittedCount()};
+  } catch (const std::exception& ex) {
+    return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
+  } catch (...) {
+    return ExtractionResult{false,
+                            "Unknown C++ exception during traces processing",
+                            emitter.EmittedCount()};
+  }
+}
+
+ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
+  int abs_idx = lua_absindex(L, table_idx);
+  if (!lua_istable(L, abs_idx)) {
+    return ExtractionResult{false, "payload must be a table", 0};
+  }
+
+  int rs_arr_idx = 0;
+  bool pop_rs = false;
+
+  if (core::GetTableField(L, abs_idx, "resourceSpans", "resource_spans")) {
+    rs_arr_idx = lua_absindex(L, -1);
+    pop_rs = true;
+  } else if (core::GetTableField(L, abs_idx, "trace")) {
+    int tr_idx = lua_absindex(L, -1);
+    if (core::GetTableField(L, tr_idx, "resourceSpans", "resource_spans")) {
+      rs_arr_idx = lua_absindex(L, -1);
+      pop_rs = true;
+    }
+  } else if (core::GetTableField(L, abs_idx, "log")) {
+    int log_idx = lua_absindex(L, -1);
+    if (core::GetTableField(L, log_idx, "resourceSpans", "resource_spans")) {
+      rs_arr_idx = lua_absindex(L, -1);
+      pop_rs = true;
+    }
+  }
+
+  if (rs_arr_idx == 0) {
+    rs_arr_idx = abs_idx;
+  }
+
+  if (!lua_istable(L, rs_arr_idx)) {
+    if (pop_rs) lua_pop(L, 1);
+    return ExtractionResult{true, "", 0};
+  }
+
+  core::LuaEmitter emitter(L, emit_idx);
+  static thread_local core::FastJsonWriter writer;
+  std::string processed_at =
+      core::FormatIso8601Nano(core::CurrentTimeUnixNano());
+
+  lua_Integer rs_len = luaL_len(L, rs_arr_idx);
+  for (lua_Integer i = 1; i <= rs_len; ++i) {
+    lua_rawgeti(L, rs_arr_idx, i);
+    if (!lua_istable(L, -1)) {
+      lua_pop(L, 1);
+      continue;
+    }
+    int rs_obj_idx = lua_absindex(L, -1);
+
+    std::string service_name = "unknown_service";
+    core::ScopedLuaRef res_attr_ref(L, LUA_NOREF);
+
+    if (core::GetTableField(L, rs_obj_idx, "resource")) {
+      int res_idx = lua_absindex(L, -1);
+      service_name = core::ExtractTableServiceName(L, res_idx);
+      if (core::GetTableField(L, res_idx, "attributes")) {
+        core::PushTableAttributes(L, -1, writer);
+        res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);
+    }
+    if (!res_attr_ref.valid()) {
+      lua_newtable(L);
+      res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+    }
+
+    if (!core::GetTableField(L, rs_obj_idx, "scopeSpans", "scope_spans")) {
+      lua_pop(L, 1);
+      continue;
+    }
+    int ss_arr_idx = lua_absindex(L, -1);
+    if (!lua_istable(L, ss_arr_idx)) {
+      lua_pop(L, 2);
+      continue;
+    }
+
+    lua_Integer ss_len = luaL_len(L, ss_arr_idx);
+    for (lua_Integer j = 1; j <= ss_len; ++j) {
+      lua_rawgeti(L, ss_arr_idx, j);
+      if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        continue;
+      }
+      int ss_obj_idx = lua_absindex(L, -1);
+
+      std::string scope_name;
+      std::string scope_version;
+      if (core::GetTableField(L, ss_obj_idx, "scope")) {
+        int s_idx = lua_absindex(L, -1);
+        scope_name = core::ReadTableString(L, s_idx, "name");
+        scope_version = core::ReadTableString(L, s_idx, "version");
+        lua_pop(L, 1);
+      }
+
+      if (core::GetTableField(L, ss_obj_idx, "spans")) {
+        int spans_arr_idx = lua_absindex(L, -1);
+        if (lua_istable(L, spans_arr_idx)) {
+          lua_Integer spans_len = luaL_len(L, spans_arr_idx);
+          for (lua_Integer k = 1; k <= spans_len; ++k) {
+            lua_rawgeti(L, spans_arr_idx, k);
+            if (!lua_istable(L, -1)) {
+              lua_pop(L, 1);
+              continue;
+            }
+            int span_obj_idx = lua_absindex(L, -1);
+
+            std::string trace_id =
+                core::ReadTableString(L, span_obj_idx, "traceId", "trace_id");
+            std::string span_id =
+                core::ReadTableString(L, span_obj_idx, "spanId", "span_id");
+            std::string parent_span_id = core::ReadTableString(
+                L, span_obj_idx, "parentSpanId", "parent_span_id");
+            std::string trace_state = core::ReadTableString(
+                L, span_obj_idx, "traceState", "trace_state");
+            std::string span_name =
+                core::ReadTableString(L, span_obj_idx, "name");
+            std::string span_kind = "SPAN_KIND_UNSPECIFIED";
+            if (core::GetTableField(L, span_obj_idx, "kind")) {
+              if (lua_isinteger(L, -1)) {
+                int64_t ki = lua_tointeger(L, -1);
+                switch (ki) {
+                  case 1:
+                    span_kind = "SPAN_KIND_INTERNAL";
+                    break;
+                  case 2:
+                    span_kind = "SPAN_KIND_SERVER";
+                    break;
+                  case 3:
+                    span_kind = "SPAN_KIND_CLIENT";
+                    break;
+                  case 4:
+                    span_kind = "SPAN_KIND_PRODUCER";
+                    break;
+                  case 5:
+                    span_kind = "SPAN_KIND_CONSUMER";
+                    break;
+                  default:
+                    span_kind = "SPAN_KIND_UNSPECIFIED";
+                    break;
+                }
+              } else if (lua_isstring(L, -1)) {
+                std::string s = lua_tostring(L, -1);
+                if (s.rfind("SPAN_KIND_", 0) == 0) {
+                  span_kind = s;
+                } else {
+                  span_kind = "SPAN_KIND_" + s;
+                }
+              }
+              lua_pop(L, 1);
+            }
+
+            uint64_t start_time = core::ReadTableUint64(
+                L, span_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
+            uint64_t end_time = core::ReadTableUint64(
+                L, span_obj_idx, "endTimeUnixNano", "end_time_unix_nano");
+            int64_t duration = static_cast<int64_t>(end_time - start_time);
+            char ts_buf[32];
+            core::FormatIso8601Nano(start_time, ts_buf);
+
+            std::string status_code = "STATUS_CODE_UNSET";
+            std::string status_msg;
+            if (core::GetTableField(L, span_obj_idx, "status")) {
+              int st_idx = lua_absindex(L, -1);
+              if (core::GetTableField(L, st_idx, "code")) {
+                if (lua_isinteger(L, -1)) {
+                  int64_t c = lua_tointeger(L, -1);
+                  if (c == 1)
+                    status_code = "STATUS_CODE_OK";
+                  else if (c == 2)
+                    status_code = "STATUS_CODE_ERROR";
+                  else
+                    status_code = "STATUS_CODE_UNSET";
+                } else if (lua_isstring(L, -1)) {
+                  std::string s = lua_tostring(L, -1);
+                  if (s.rfind("STATUS_CODE_", 0) == 0) {
+                    status_code = s;
+                  } else {
+                    status_code = "STATUS_CODE_" + s;
+                  }
+                }
+                lua_pop(L, 1);
+              }
+              status_msg = core::ReadTableString(L, st_idx, "message");
+              lua_pop(L, 1);
+            }
+
+            emitter.StartRecord();
+            emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
+            emitter.SetString("TraceId", trace_id);
+            emitter.SetString("SpanId", span_id);
+            emitter.SetString("ParentSpanId", parent_span_id);
+            emitter.SetString("TraceState", trace_state);
+            emitter.SetString("SpanName", span_name);
+            emitter.SetString("SpanKind", span_kind);
+            emitter.SetString("ServiceName", service_name);
+
+            lua_rawgeti(L, LUA_REGISTRYINDEX, res_attr_ref.get());
+            emitter.SetTableFromStack("ResourceAttributes");
+
+            emitter.SetString("ScopeName", scope_name);
+            emitter.SetString("ScopeVersion", scope_version);
+
+            if (core::GetTableField(L, span_obj_idx, "attributes")) {
+              core::PushTableAttributes(L, -1, writer);
+              emitter.SetTableFromStack("SpanAttributes");
+              lua_pop(L, 1);
+            } else {
+              lua_newtable(L);
+              emitter.SetTableFromStack("SpanAttributes");
+            }
+
+            emitter.SetInt64("Duration", duration);
+            emitter.SetString("StatusCode", status_code);
+            emitter.SetString("StatusMessage", status_msg);
+
+            // Events & Links: serializes to JSON string (matching string
+            // extractor output)
+            writer.Reset();
+            if (core::GetTableField(L, span_obj_idx, "events")) {
+              core::SerializeLuaValueToJson(L, -1, writer);
+              lua_pop(L, 1);
+            } else {
+              writer.StartArray();
+              writer.EndArray();
+            }
+            emitter.SetString("Events", writer.Str());
+
+            writer.Reset();
+            if (core::GetTableField(L, span_obj_idx, "links")) {
+              core::SerializeLuaValueToJson(L, -1, writer);
+              lua_pop(L, 1);
+            } else {
+              writer.StartArray();
+              writer.EndArray();
+            }
+            emitter.SetString("Links", writer.Str());
+
+            emitter.SetString("processed_at", processed_at);
+
+            emitter.EndRecord();
+            lua_pop(L, 1);  // pop span_obj
+          }
+        }
+        lua_pop(L, 1);  // pop spans_arr
+      }
+      lua_pop(L, 1);  // pop ss_obj
+    }
+    lua_pop(L, 1);  // pop ss_arr
+    lua_pop(L, 1);  // pop rs_obj
+  }
+
+  if (pop_rs) {
+    lua_pop(L, 1);
+  }
+
+  emitter.Flush();
+  return ExtractionResult{true, "", emitter.EmittedCount()};
+}
+
+}  // namespace extractors
+}  // namespace vector_otel

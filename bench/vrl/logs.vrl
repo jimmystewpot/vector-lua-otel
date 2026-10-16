@@ -1,0 +1,103 @@
+# Baseline: OTLP/JSON ExportLogsServiceRequest -> one flat event per logRecord.
+# Column set follows ClickHouse exporter logs_json_table.sql.
+#
+# Conventions (shared with the future C++/Lua implementation):
+#   * Timestamps are ISO-8601 UTC strings with 9 fractional digits (no float/int64 lossiness).
+#   * int64 AnyValues become native integers; arrays/kvlists/bytes become JSON strings.
+#   * Attribute maps are JSON objects keyed by attribute key.
+#   * processed_at is evaluated once per batch.
+#
+# Performance notes (measured on Vector 0.59.0; see bench/README.md):
+#   * VRL closures clone their enclosing scope on every invocation. Inner closures that
+#     capture the whole batch (req/rl/sl) therefore made cost quadratic in records-per-batch
+#     (~600 rec/s at 250 records/batch). We hoist the scalars/arrays we need and null the big
+#     containers before descending, which restores linear scaling (~10x at 250/batch).
+#   * Fan-out uses map_values (new array per level) rather than push() onto an accumulator.
+
+ts_fmt = "%Y-%m-%dT%H:%M:%S%.9fZ"
+processed_at = format_timestamp!(now(), ts_fmt)
+
+req = parse_json!(string!(.message))
+rls = array(req.resourceLogs) ?? []
+req = null
+
+per_resource = map_values(rls) -> |rl| {
+  res_attrs = {}
+  for_each(array(rl.resource.attributes) ?? []) -> |_j, a| {
+    v = a.value
+    val = if !is_null(v.stringValue) { v.stringValue }
+    else if !is_null(v.intValue) { to_int(v.intValue) ?? v.intValue }
+    else if !is_null(v.doubleValue) { v.doubleValue }
+    else if !is_null(v.boolValue) { v.boolValue }
+    else { encode_json(v) }
+    res_attrs = set!(res_attrs, [string!(a.key)], val)
+  }
+  service_name = string(res_attrs."service.name") ?? "unknown_service"
+  res_schema = string(rl.schemaUrl) ?? ""
+  scopes = array(rl.scopeLogs) ?? []
+  rl = null
+
+  map_values(scopes) -> |sl| {
+    scope_attrs = {}
+    for_each(array(sl.scope.attributes) ?? []) -> |_j, a| {
+      v = a.value
+      val = if !is_null(v.stringValue) { v.stringValue }
+      else if !is_null(v.intValue) { to_int(v.intValue) ?? v.intValue }
+      else if !is_null(v.doubleValue) { v.doubleValue }
+      else if !is_null(v.boolValue) { v.boolValue }
+      else { encode_json(v) }
+      scope_attrs = set!(scope_attrs, [string!(a.key)], val)
+    }
+
+    scope_schema = string(sl.schemaUrl) ?? ""
+    scope_name = string(sl.scope.name) ?? ""
+    scope_version = string(sl.scope.version) ?? ""
+    recs = array(sl.logRecords) ?? []
+    sl = null
+
+    map_values(recs) -> |lr| {
+      log_attrs = {}
+      for_each(array(lr.attributes) ?? []) -> |_j, a| {
+        v = a.value
+        val = if !is_null(v.stringValue) { v.stringValue }
+        else if !is_null(v.intValue) { to_int(v.intValue) ?? v.intValue }
+        else if !is_null(v.doubleValue) { v.doubleValue }
+        else if !is_null(v.boolValue) { v.boolValue }
+        else { encode_json(v) }
+        log_attrs = set!(log_attrs, [string!(a.key)], val)
+      }
+
+      # timeUnixNano, falling back to observedTimeUnixNano when absent or "0".
+      t_ns = to_int(lr.timeUnixNano) ?? 0
+      if t_ns == 0 { t_ns = to_int(lr.observedTimeUnixNano) ?? 0 }
+      ts = format_timestamp!(from_unix_timestamp!(t_ns, unit: "nanoseconds"), ts_fmt)
+
+      body = if !is_null(lr.body.stringValue) { lr.body.stringValue }
+      else if is_null(lr.body) { "" }
+      else { encode_json(lr.body) }
+
+      {
+        "Timestamp": ts,
+        "TraceId": string(lr.traceId) ?? "",
+        "SpanId": string(lr.spanId) ?? "",
+        "TraceFlags": to_int(lr.flags) ?? 0,
+        "SeverityText": string(lr.severityText) ?? "",
+        "SeverityNumber": to_int(lr.severityNumber) ?? 0,
+        "ServiceName": service_name,
+        "Body": body,
+        "ResourceSchemaUrl": res_schema,
+        "ResourceAttributes": res_attrs,
+        "ScopeSchemaUrl": scope_schema,
+        "ScopeName": scope_name,
+        "ScopeVersion": scope_version,
+        "ScopeAttributes": scope_attrs,
+        "LogAttributes": log_attrs,
+        "EventName": string(lr.eventName) ?? "",
+        "processed_at": processed_at,
+      }
+    }
+  }
+}
+
+# An array root fans out into one Vector event per element (empty array => no events).
+. = flatten(per_resource)

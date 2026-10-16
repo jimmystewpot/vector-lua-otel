@@ -1,0 +1,19 @@
+message MetricRecord {
+  required binary MetricName (STRING);
+  optional binary MetricDescription (STRING);
+  optional binary MetricUnit (STRING);
+  required binary MetricType (STRING);
+  required binary ServiceName (STRING);
+  optional binary ResourceAttributes (STRING);
+  optional binary ScopeName (STRING);
+  optional binary ScopeVersion (STRING);
+  optional binary ScopeAttributes (STRING);
+  optional binary Attributes (STRING);
+  optional binary StartTimeUnix (STRING);
+  required binary TimeUnix (STRING);
+  optional double Value;
+  optional binary Histogram (STRING);
+  optional int64 Flags;
+  optional binary Exemplars (STRING);
+  required binary processed_at (STRING);
+}

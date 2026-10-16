@@ -1,0 +1,10 @@
+docs/superpowers/
+.superpowers/
+.worktrees/
+build/
+build_bench/
+.cache/
+.vscode/
+
+bench/.data/
+

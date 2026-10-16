@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} (${{ matrix.compiler }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            liblua5.4-dev \
+            lua5.4 \
+            luarocks \
+            cmake \
+            ninja-build \
+            clang-format \
+            clang \
+            gcc \
+            g++
+
+      - name: Check formatting
+        run: find include src -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
+
+      - name: Configure and build with CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
+          cmake --build build
+
+      - name: Run C++ test suite
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run Lua integration test suite
+        run: bash tests/lua/run_tests.sh
+
+      - name: Validate rockspec
+        run: luarocks lint vector-otel-scm-1.rockspec

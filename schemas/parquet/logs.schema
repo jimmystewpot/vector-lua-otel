@@ -1,0 +1,19 @@
+message LogRecord {
+  required binary Timestamp (STRING);
+  optional binary TraceId (STRING);
+  optional binary SpanId (STRING);
+  optional int64 TraceFlags;
+  optional binary SeverityText (STRING);
+  optional int64 SeverityNumber;
+  optional binary ServiceName (STRING);
+  optional binary Body (STRING);
+  optional binary ResourceSchemaUrl (STRING);
+  optional binary ResourceAttributes (STRING);
+  optional binary ScopeSchemaUrl (STRING);
+  optional binary ScopeName (STRING);
+  optional binary ScopeVersion (STRING);
+  optional binary ScopeAttributes (STRING);
+  optional binary LogAttributes (STRING);
+  optional binary EventName (STRING);
+  required binary processed_at (STRING);
+}

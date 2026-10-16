@@ -1,0 +1,194 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "payment-service"
+            }
+          },
+          {
+            "key": "deployment.environment",
+            "value": {
+              "stringValue": "production"
+            }
+          }
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "scope": {
+            "name": "com.acme.metrics",
+            "version": "1.2.3",
+            "attributes": [
+              {
+                "key": "scope.key",
+                "value": {
+                  "stringValue": "scope.val"
+                }
+              }
+            ]
+          },
+          "metrics": [
+            {
+              "name": "memory_usage",
+              "description": "Process memory usage",
+              "unit": "By",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1629999900000000000",
+                    "timeUnixNano": "1630000000000000000",
+                    "asDouble": 1048576.5,
+                    "flags": 0,
+                    "attributes": [
+                      {
+                        "key": "host",
+                        "value": {
+                          "stringValue": "node1"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "startTimeUnixNano": "1629999900000000000",
+                    "timeUnixNano": "1630000001000000000",
+                    "asInt": "2097152",
+                    "flags": 1,
+                    "attributes": [
+                      {
+                        "key": "host",
+                        "value": {
+                          "stringValue": "node2"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "http_requests_total",
+              "description": "Total HTTP requests",
+              "unit": "1",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1630000000000000000",
+                    "timeUnixNano": "1630000002000000000",
+                    "asInt": "5000",
+                    "flags": 0,
+                    "attributes": [
+                      {
+                        "key": "status",
+                        "value": {
+                          "intValue": 200
+                        }
+                      }
+                    ],
+                    "exemplars": [
+                      {
+                        "timeUnixNano": "1630000001500000000",
+                        "asDouble": 1.25,
+                        "traceId": "0123456789abcdef0123456789abcdef",
+                        "spanId": "0123456789abcdef",
+                        "filteredAttributes": [
+                          {
+                            "key": "user_id",
+                            "value": {
+                              "stringValue": "usr_99"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "request_duration_seconds",
+              "description": "HTTP request duration distribution",
+              "unit": "s",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1630000000000000000",
+                    "timeUnixNano": "1630000003000000000",
+                    "count": "100",
+                    "sum": 25.5,
+                    "min": 0.05,
+                    "max": 5.2,
+                    "bucketCounts": ["10", "40", "30", "15", "5"],
+                    "explicitBounds": [0.1, 0.5, 1.0, 2.5],
+                    "flags": 0,
+                    "attributes": [
+                      {
+                        "key": "method",
+                        "value": {
+                          "stringValue": "POST"
+                        }
+                      }
+                    ],
+                    "exemplars": [
+                      {
+                        "timeUnixNano": "1630000002800000000",
+                        "asDouble": 2.45,
+                        "traceId": "fedcba9876543210fedcba9876543210",
+                        "spanId": "fedcba9876543210",
+                        "filteredAttributes": [
+                          {
+                            "key": "client_ip",
+                            "value": {
+                              "stringValue": "192.168.1.1"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "rpc_latency",
+              "description": "RPC latency summary",
+              "unit": "ms",
+              "summary": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1630000000000000000",
+                    "timeUnixNano": "1630000004000000000",
+                    "count": "50",
+                    "sum": 1234.5,
+                    "flags": 0,
+                    "attributes": [
+                      {
+                        "key": "service",
+                        "value": {
+                          "stringValue": "auth"
+                        }
+                      }
+                    ],
+                    "quantileValues": [
+                      {
+                        "quantile": 0.5,
+                        "value": 12.0
+                      },
+                      {
+                        "quantile": 0.99,
+                        "value": 85.0
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
