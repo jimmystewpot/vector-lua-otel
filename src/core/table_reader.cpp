@@ -583,11 +583,9 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
         lua_setfield(L, out_table_idx, ks);
       } else if (lua_type(L, -2) == LUA_TNUMBER) {
         lua_pushvalue(L, -2);
-        size_t klen = 0;
-        const char* ks = lua_tolstring(L, -1, &klen);
+        lua_tolstring(L, -1, nullptr);
         PushSingleAttributeValue(L, -2, writer);
-        lua_setfield(L, out_table_idx, ks);
-        lua_pop(L, 1);  // Pop duplicate string key
+        lua_settable(L, out_table_idx);
       }
       lua_pop(L, 1);  // pop value, keep key for next iteration
     }
