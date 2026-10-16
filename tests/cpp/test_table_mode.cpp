@@ -299,5 +299,124 @@ TEST_F(TableModeTest, SerializeSequentialArrayPreservedAsArray) {
   lua_pop(L_, 1);
 }
 
+TEST_F(TableModeTest, MalformedAnyValueTypesDoNotCrashOrPanic) {
+  const char* cases[] = {
+      "return { intValue = true }",     "return { intValue = {} }",
+      "return { stringValue = true }",  "return { bytesValue = {} }",
+      "return { arrayValue = 123 }",    "return { arrayValue = { values = 'not_a_table' } }",
+      "return { kvlistValue = false }", "return { kvlistValue = { values = { 999, 'bad' } } }",
+  };
+
+  core::FastJsonWriter writer;
+  for (const char* expr : cases) {
+    int top_before = lua_gettop(L_);
+    ASSERT_EQ(luaL_dostring(L_, expr), LUA_OK);
+    int val_idx = lua_gettop(L_);
+
+    writer.Reset();
+    EXPECT_NO_THROW(core::SerializeLuaValueToJson(L_, val_idx, writer));
+    EXPECT_FALSE(writer.Str().empty());
+
+    // Also test inside PushTableAttributes (map mode and KV-array mode)
+    lua_newtable(L_);
+    lua_pushvalue(L_, val_idx);
+    lua_setfield(L_, -2, "attr_key");
+    EXPECT_NO_THROW(core::PushTableAttributes(L_, -1, writer));
+    EXPECT_TRUE(lua_istable(L_, -1));
+    lua_pop(L_, 2);  // pop out table and map table
+
+    lua_newtable(L_);
+    lua_newtable(L_);
+    lua_pushstring(L_, "attr_key");
+    lua_setfield(L_, -2, "key");
+    lua_pushvalue(L_, val_idx);
+    lua_setfield(L_, -2, "value");
+    lua_rawseti(L_, -2, 1);
+    EXPECT_NO_THROW(core::PushTableAttributes(L_, -1, writer));
+    EXPECT_TRUE(lua_istable(L_, -1));
+    lua_pop(L_, 2);  // pop out table and kv-array table
+
+    lua_pop(L_, 1);  // pop val_idx
+    EXPECT_EQ(lua_gettop(L_), top_before);
+  }
+
+  // Also verify PushTableSpanEvents and PushTableSpanLinks with valid and non-string fields
+  const char* events_script = R"(
+    return {
+      { timeUnixNano = 1700000000000000000, name = "ev_ok", attributes = { k = "v" } },
+      { timeUnixNano = 1700000000000000000, name = true }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, events_script), LUA_OK);
+  core::PushTableSpanEvents(L_, -1, writer);
+  ASSERT_TRUE(lua_istable(L_, -1));
+  lua_rawgeti(L_, -1, 1);
+  lua_getfield(L_, -1, "Name");
+  EXPECT_STREQ(lua_tostring(L_, -1), "ev_ok");
+  lua_pop(L_, 2);
+  lua_rawgeti(L_, -1, 2);
+  lua_getfield(L_, -1, "Name");
+  EXPECT_STREQ(lua_tostring(L_, -1), "");
+  lua_pop(L_, 4);  // pop Name, item 2, events out, events in
+
+  const char* links_script = R"(
+    return {
+      { traceId = "t1", spanId = "s1", traceState = "ts1" },
+      { traceId = {}, spanId = false, traceState = 123 }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, links_script), LUA_OK);
+  core::PushTableSpanLinks(L_, -1, writer);
+  ASSERT_TRUE(lua_istable(L_, -1));
+  lua_rawgeti(L_, -1, 1);
+  lua_getfield(L_, -1, "TraceId");
+  EXPECT_STREQ(lua_tostring(L_, -1), "t1");
+  lua_pop(L_, 2);
+  lua_rawgeti(L_, -1, 2);
+  lua_getfield(L_, -1, "TraceId");
+  EXPECT_STREQ(lua_tostring(L_, -1), "");
+  lua_pop(L_, 4);  // pop TraceId, item 2, links out, links in
+}
+
+TEST_F(TableModeTest, PushTableAttributesPreservesEmbeddedNullBytesInKeys) {
+  core::FastJsonWriter writer;
+  const char kKeyWithNull[] = {'a', '\0', 'b'};
+
+  // 1. Map mode with embedded null byte in key
+  lua_newtable(L_);
+  lua_pushlstring(L_, kKeyWithNull, sizeof(kKeyWithNull));
+  lua_pushstring(L_, "map_val");
+  lua_rawset(L_, -3);
+
+  core::PushTableAttributes(L_, -1, writer);
+  int out_map_idx = lua_gettop(L_);
+  ASSERT_TRUE(lua_istable(L_, out_map_idx));
+
+  lua_pushlstring(L_, kKeyWithNull, sizeof(kKeyWithNull));
+  lua_rawget(L_, out_map_idx);
+  EXPECT_EQ(lua_type(L_, -1), LUA_TSTRING);
+  EXPECT_STREQ(lua_tostring(L_, -1), "map_val");
+  lua_pop(L_, 3);  // pop field value, out_map_idx, input map
+
+  // 2. KV-array mode with embedded null byte in key
+  lua_newtable(L_);
+  lua_newtable(L_);
+  lua_pushlstring(L_, kKeyWithNull, sizeof(kKeyWithNull));
+  lua_setfield(L_, -2, "key");
+  lua_pushstring(L_, "kv_val");
+  lua_setfield(L_, -2, "value");
+  lua_rawseti(L_, -2, 1);
+
+  core::PushTableAttributes(L_, -1, writer);
+  int out_kv_idx = lua_gettop(L_);
+  ASSERT_TRUE(lua_istable(L_, out_kv_idx));
+
+  lua_pushlstring(L_, kKeyWithNull, sizeof(kKeyWithNull));
+  lua_rawget(L_, out_kv_idx);
+  EXPECT_EQ(lua_type(L_, -1), LUA_TSTRING);
+  EXPECT_STREQ(lua_tostring(L_, -1), "kv_val");
+  lua_pop(L_, 3);  // pop field value, out_kv_idx, input kv-array
+}
+
 }  // namespace
 }  // namespace vector_otel
