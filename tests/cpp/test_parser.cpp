@@ -6,6 +6,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+#include <sys/mman.h>
+#endif
+
 #include "vector_otel/core/parser.hpp"
 
 namespace vector_otel {
@@ -209,11 +213,48 @@ TEST(OtelParserTest, SafelyPaddedInputZeroCopy) {
 class ParserTest : public ::testing::Test {};
 
 TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
+  EXPECT_EQ(core::OtelParser::kMaxPayloadSize, 512 * 1024 * 1024);
+
   core::OtelParser parser;
-  // A string view claiming huge length exceeding max payload size
-  std::string_view oversized(nullptr, 600 * 1024 * 1024);
-  auto doc_res = parser.Iterate(oversized);
-  EXPECT_TRUE(doc_res.error() == simdjson::CAPACITY || doc_res.error() == simdjson::MEMALLOC);
+
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+  // Allocate virtual address space without physical RAM allocation to test oversized payload
+  // safely.
+  const size_t test_size = core::OtelParser::kMaxPayloadSize + 4096;
+  void* mem = mmap(nullptr, test_size + simdjson::SIMDJSON_PADDING, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mem != MAP_FAILED) {
+    char* buf = static_cast<char*>(mem);
+    buf[0] = '{';
+    buf[1] = '}';
+
+    // 1. Test std::string_view overload
+    std::string_view oversized_sv(buf, test_size);
+    auto doc_res1 = parser.Iterate(oversized_sv);
+    EXPECT_EQ(doc_res1.error(), simdjson::CAPACITY);
+
+    // 2. Test simdjson::padded_string_view overload with sufficient padding
+    simdjson::padded_string_view oversized_padded(buf, test_size,
+                                                  test_size + simdjson::SIMDJSON_PADDING);
+    auto doc_res2 = parser.Iterate(oversized_padded);
+    EXPECT_EQ(doc_res2.error(), simdjson::CAPACITY);
+
+    // 3. Test simdjson::padded_string_view overload with insufficient padding
+    simdjson::padded_string_view oversized_unpadded(buf, test_size, test_size);
+    auto doc_res3 = parser.Iterate(oversized_unpadded);
+    EXPECT_EQ(doc_res3.error(), simdjson::CAPACITY);
+
+    munmap(mem, test_size + simdjson::SIMDJSON_PADDING);
+  } else {
+    std::string valid_json = "{\"status\":\"ok\"}";
+    auto doc_res = parser.Iterate(valid_json);
+    EXPECT_EQ(doc_res.error(), simdjson::SUCCESS);
+  }
+#else
+  std::string valid_json = "{\"status\":\"ok\"}";
+  auto doc_res = parser.Iterate(valid_json);
+  EXPECT_EQ(doc_res.error(), simdjson::SUCCESS);
+#endif
 }
 
 TEST_F(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
