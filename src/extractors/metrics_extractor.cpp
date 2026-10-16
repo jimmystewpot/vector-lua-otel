@@ -44,10 +44,14 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
     std::string time_iso;
     std::string span_id;
     std::string trace_id;
-    enum class ExValKind { kNone, kDouble, kInt64 } ex_val_kind = ExValKind::kNone;
+    enum class ExValKind {
+      kNone,
+      kDouble,
+      kInt64
+    } ex_val_kind = ExValKind::kNone;
     double ex_double_val = 0.0;
     int64_t ex_int_val = 0;
-    int filtered_attrs_ref = LUA_NOREF;
+    core::ScopedLuaRef filtered_attrs_ref(L, LUA_NOREF);
 
     for (auto field_res : ex_obj) {
       if (field_res.error() != simdjson::SUCCESS) continue;
@@ -95,14 +99,14 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
         ex_val_kind = ExValKind::kInt64;
       } else if (k == "filteredAttributes" || k == "filtered_attributes") {
         core::PushAttributesTable(L, fv, json_writer);
-        filtered_attrs_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        filtered_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
       }
     }
 
     // Set FilteredAttributes
-    if (filtered_attrs_ref != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, filtered_attrs_ref);
-      luaL_unref(L, LUA_REGISTRYINDEX, filtered_attrs_ref);
+    if (filtered_attrs_ref.valid()) {
+      lua_rawgeti(L, LUA_REGISTRYINDEX, filtered_attrs_ref.get());
+      filtered_attrs_ref.reset();
     } else {
       lua_newtable(L);
     }
@@ -138,7 +142,8 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
 
 }  // namespace
 
-ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emit_idx) {
+ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
+                                int emit_idx) {
   if (raw_json.empty()) {
     return ExtractionResult{false, "Empty JSON input", 0};
   }
@@ -150,7 +155,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
   auto doc_res = parser.Iterate(raw_json);
   if (doc_res.error() != simdjson::SUCCESS) {
     return ExtractionResult{
-        false, "JSON parsing error: " + std::string(simdjson::error_message(doc_res.error())), 0};
+        false,
+        "JSON parsing error: " +
+            std::string(simdjson::error_message(doc_res.error())),
+        0};
   }
 
   auto doc = std::move(doc_res.value());
@@ -207,9 +215,11 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
         res_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
       }
 
-      auto scope_metrics_res = res_metric_obj.find_field_unordered("scopeMetrics");
+      auto scope_metrics_res =
+          res_metric_obj.find_field_unordered("scopeMetrics");
       if (scope_metrics_res.error() != simdjson::SUCCESS) {
-        scope_metrics_res = res_metric_obj.find_field_unordered("scope_metrics");
+        scope_metrics_res =
+            res_metric_obj.find_field_unordered("scope_metrics");
       }
       if (scope_metrics_res.error() != simdjson::SUCCESS) {
         continue;
@@ -236,8 +246,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           auto scope_obj_res = scope_val.get_object();
           if (scope_obj_res.error() == simdjson::SUCCESS) {
             auto scope_obj = scope_obj_res.value();
-            scope_name = std::string(core::ExtractStringField(scope_obj, "name"));
-            scope_version = std::string(core::ExtractStringField(scope_obj, "version"));
+            scope_name =
+                std::string(core::ExtractStringField(scope_obj, "name"));
+            scope_version =
+                std::string(core::ExtractStringField(scope_obj, "version"));
             auto attrs_res = scope_obj.find_field_unordered("attributes");
             if (attrs_res.error() == simdjson::SUCCESS && L != nullptr) {
               auto attrs_val = attrs_res.value();
@@ -269,7 +281,8 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           auto metric_obj = metric_obj_res.value();
 
           std::string metric_name(core::ExtractStringField(metric_obj, "name"));
-          std::string metric_desc(core::ExtractStringField(metric_obj, "description"));
+          std::string metric_desc(
+              core::ExtractStringField(metric_obj, "description"));
           std::string metric_unit(core::ExtractStringField(metric_obj, "unit"));
 
           std::string metric_type;
@@ -332,8 +345,8 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
             double double_val = 0.0;
             int64_t int_val = 0;
             uint32_t flags = 0;
-            int dp_attrs_ref = LUA_NOREF;
-            int exemplars_ref = LUA_NOREF;
+            core::ScopedLuaRef dp_attrs_ref(L, LUA_NOREF);
+            core::ScopedLuaRef exemplars_ref(L, LUA_NOREF);
 
             // Histogram fields
             uint64_t hist_count = 0;
@@ -391,7 +404,7 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
               } else if (k == "attributes") {
                 if (L != nullptr) {
                   core::PushAttributesTable(L, fv, json_writer);
-                  dp_attrs_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+                  dp_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
                 }
               } else if (k == "count") {
                 hist_count = core::ParseUint64(fv);
@@ -443,7 +456,8 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
                         auto s_res = eb_val.get_string();
                         if (s_res.error() == simdjson::SUCCESS) {
                           try {
-                            explicit_bounds.push_back(std::stod(std::string(s_res.value())));
+                            explicit_bounds.push_back(
+                                std::stod(std::string(s_res.value())));
                           } catch (...) {
                           }
                         }
@@ -453,7 +467,7 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
                 }
               } else if (k == "exemplars") {
                 if (L != nullptr) {
-                  exemplars_ref = ParseExemplars(L, fv, json_writer);
+                  exemplars_ref.reset(ParseExemplars(L, fv, json_writer));
                 }
               }
             }
@@ -482,10 +496,9 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
 
             // Attributes
             if (L != nullptr) {
-              if (dp_attrs_ref != LUA_NOREF) {
-                lua_rawgeti(L, LUA_REGISTRYINDEX, dp_attrs_ref);
-                luaL_unref(L, LUA_REGISTRYINDEX, dp_attrs_ref);
-                dp_attrs_ref = LUA_NOREF;
+              if (dp_attrs_ref.valid()) {
+                lua_rawgeti(L, LUA_REGISTRYINDEX, dp_attrs_ref.get());
+                dp_attrs_ref.reset();
               } else {
                 lua_newtable(L);
               }
@@ -556,20 +569,21 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
             emitter.SetInt64("Flags", flags);
 
             // Exemplars
-            if (L != nullptr && exemplars_ref != LUA_NOREF) {
-              lua_rawgeti(L, LUA_REGISTRYINDEX, exemplars_ref);
-              luaL_unref(L, LUA_REGISTRYINDEX, exemplars_ref);
-              exemplars_ref = LUA_NOREF;
+            if (L != nullptr && exemplars_ref.valid()) {
+              lua_rawgeti(L, LUA_REGISTRYINDEX, exemplars_ref.get());
+              exemplars_ref.reset();
               emitter.SetTableFromStack("Exemplars");
             }
 
             char processed_at_buf[32];
-            core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf);
+            core::FormatIso8601Nano(core::CurrentTimeUnixNano(),
+                                    processed_at_buf);
             emitter.SetString("processed_at", processed_at_buf);
 
             emitter.EndRecord();
             if (emitter.HasError()) {
-              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+              return ExtractionResult{false,
+                                      std::string(emitter.ErrorMessage()),
                                       emitter.EmittedCount()};
             }
           }
@@ -579,18 +593,22 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
 
     emitter.Flush();
     if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+      return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                              emitter.EmittedCount()};
     }
     return ExtractionResult{true, "", emitter.EmittedCount()};
   } catch (const std::exception& e) {
-    return ExtractionResult{false, std::string("Extraction exception: ") + e.what(),
+    return ExtractionResult{false,
+                            std::string("Extraction exception: ") + e.what(),
                             emitter.EmittedCount()};
   } catch (...) {
-    return ExtractionResult{false, "Unknown extraction exception", emitter.EmittedCount()};
+    return ExtractionResult{false, "Unknown extraction exception",
+                            emitter.EmittedCount()};
   }
 }
 
-ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) {
+ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx,
+                                     int emit_idx) {
   int abs_idx = lua_absindex(L, table_idx);
   if (!lua_istable(L, abs_idx)) {
     return ExtractionResult{false, "payload must be a table", 0};
@@ -610,7 +628,8 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
     }
   } else if (core::GetTableField(L, abs_idx, "log")) {
     int log_idx = lua_absindex(L, -1);
-    if (core::GetTableField(L, log_idx, "resourceMetrics", "resource_metrics")) {
+    if (core::GetTableField(L, log_idx, "resourceMetrics",
+                            "resource_metrics")) {
       rm_arr_idx = lua_absindex(L, -1);
       pop_rm = true;
     }
@@ -713,11 +732,7 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
         }
         int metric_obj_idx = lua_absindex(L, -1);
 
-        std::string metric_name = core::ReadTableString(L, metric_obj_idx, "name");
-        std::string metric_desc = core::ReadTableString(L, metric_obj_idx, "description");
-        std::string metric_unit = core::ReadTableString(L, metric_obj_idx, "unit");
-
-        std::string metric_type;
+        std::string_view metric_type;
         int type_obj_idx = 0;
         bool pop_type = false;
 
@@ -760,8 +775,8 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
               }
               int dp_obj_idx = lua_absindex(L, -1);
 
-              uint64_t start_nanos =
-                  core::ReadTableUint64(L, dp_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
+              uint64_t start_nanos = core::ReadTableUint64(
+                  L, dp_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
               std::string start_time_iso;
               if (start_nanos > 0) {
                 char buf[32];
@@ -769,8 +784,8 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
                 start_time_iso = buf;
               }
 
-              uint64_t time_nanos =
-                  core::ReadTableUint64(L, dp_obj_idx, "timeUnixNano", "time_unix_nano");
+              uint64_t time_nanos = core::ReadTableUint64(
+                  L, dp_obj_idx, "timeUnixNano", "time_unix_nano");
               std::string time_iso;
               if (time_nanos > 0) {
                 char buf[32];
@@ -779,9 +794,12 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
               }
 
               emitter.StartRecord();
-              emitter.SetString("MetricName", metric_name);
-              emitter.SetString("MetricDescription", metric_desc);
-              emitter.SetString("MetricUnit", metric_unit);
+              core::CopyStringField(L, metric_obj_idx, "name", nullptr, emitter,
+                                    "MetricName");
+              core::CopyStringField(L, metric_obj_idx, "description", nullptr,
+                                    emitter, "MetricDescription");
+              core::CopyStringField(L, metric_obj_idx, "unit", nullptr, emitter,
+                                    "MetricUnit");
               emitter.SetString("MetricType", metric_type);
               emitter.SetString("ServiceName", service_name);
 
@@ -807,10 +825,12 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
               emitter.SetString("TimeUnix", time_iso);
 
               if (!is_histogram && !is_summary) {
-                if (core::GetTableField(L, dp_obj_idx, "asDouble", "as_double")) {
+                if (core::GetTableField(L, dp_obj_idx, "asDouble",
+                                        "as_double")) {
                   emitter.SetDouble("Value", lua_tonumber(L, -1));
                   lua_pop(L, 1);
-                } else if (core::GetTableField(L, dp_obj_idx, "asInt", "as_int")) {
+                } else if (core::GetTableField(L, dp_obj_idx, "asInt",
+                                               "as_int")) {
                   emitter.SetInt64("Value", lua_tointeger(L, -1));
                   lua_pop(L, 1);
                 } else if (core::GetTableField(L, dp_obj_idx, "value")) {
@@ -825,7 +845,8 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
               if (is_histogram) {
                 lua_newtable(L);
                 int h_tab_idx = lua_absindex(L, -1);
-                uint64_t h_count = core::ReadTableUint64(L, dp_obj_idx, "count");
+                uint64_t h_count =
+                    core::ReadTableUint64(L, dp_obj_idx, "count");
                 lua_pushinteger(L, static_cast<lua_Integer>(h_count));
                 lua_setfield(L, h_tab_idx, "count");
                 lua_pushinteger(L, static_cast<lua_Integer>(h_count));
@@ -852,14 +873,16 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
                   lua_pop(L, 1);
                 }
 
-                if (core::GetTableField(L, dp_obj_idx, "bucketCounts", "bucket_counts")) {
+                if (core::GetTableField(L, dp_obj_idx, "bucketCounts",
+                                        "bucket_counts")) {
                   lua_pushvalue(L, -1);
                   lua_setfield(L, h_tab_idx, "bucketCounts");
                   lua_pushvalue(L, -1);
                   lua_setfield(L, h_tab_idx, "BucketCounts");
                   lua_pop(L, 1);
                 }
-                if (core::GetTableField(L, dp_obj_idx, "explicitBounds", "explicit_bounds")) {
+                if (core::GetTableField(L, dp_obj_idx, "explicitBounds",
+                                        "explicit_bounds")) {
                   lua_pushvalue(L, -1);
                   lua_setfield(L, h_tab_idx, "explicitBounds");
                   lua_pushvalue(L, -1);
@@ -869,7 +892,8 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
                 emitter.SetTableFromStack("Histogram");
               }
 
-              emitter.SetInt64("Flags", core::ReadTableInt64(L, dp_obj_idx, "flags"));
+              emitter.SetInt64("Flags",
+                               core::ReadTableInt64(L, dp_obj_idx, "flags"));
 
               if (core::GetTableField(L, dp_obj_idx, "exemplars")) {
                 emitter.SetTableFromStack("Exemplars");
@@ -879,14 +903,16 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
               }
 
               char processed_at_buf[32];
-              core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf);
+              core::FormatIso8601Nano(core::CurrentTimeUnixNano(),
+                                      processed_at_buf);
               emitter.SetString("processed_at", processed_at_buf);
 
               emitter.EndRecord();
               lua_pop(L, 1);  // pop dp_obj
               if (emitter.HasError()) {
                 if (pop_rm) lua_pop(L, 1);
-                return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                return ExtractionResult{false,
+                                        std::string(emitter.ErrorMessage()),
                                         emitter.EmittedCount()};
               }
             }
@@ -907,7 +933,8 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
   if (pop_rm) lua_pop(L, 1);
   emitter.Flush();
   if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                            emitter.EmittedCount()};
   }
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
