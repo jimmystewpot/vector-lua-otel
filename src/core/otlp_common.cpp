@@ -219,16 +219,17 @@ std::string_view ExtractServiceName(simdjson::ondemand::object& resource_obj) {
   return "unknown_service";
 }
 
-double ParseDouble(simdjson::ondemand::value& val) {
+bool TryParseDouble(simdjson::ondemand::value& val, double& out) {
   auto type_res = val.type();
   if (type_res.error() != simdjson::SUCCESS) {
-    return 0.0;
+    return false;
   }
   auto type = type_res.value();
   if (type == simdjson::ondemand::json_type::number) {
     auto num_res = val.get_double();
     if (num_res.error() == simdjson::SUCCESS) {
-      return num_res.value();
+      out = num_res.value();
+      return true;
     }
   } else if (type == simdjson::ondemand::json_type::string) {
     auto str_res = val.get_string();
@@ -246,12 +247,19 @@ double ParseDouble(simdjson::ondemand::value& val) {
         double d = 0.0;
         auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), d);
         if (ec == std::errc()) {
-          return d;
+          out = d;
+          return true;
         }
       }
     }
   }
-  return 0.0;
+  return false;
+}
+
+double ParseDouble(simdjson::ondemand::value& val) {
+  double d = 0.0;
+  TryParseDouble(val, d);
+  return d;
 }
 
 void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer) {

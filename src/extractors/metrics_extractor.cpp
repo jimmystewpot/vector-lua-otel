@@ -76,8 +76,9 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
           trace_id = s_res.value();
         }
       } else if (k == "asDouble" || k == "as_double" || k == "value") {
-        ex_double_val = core::ParseDouble(fv);
-        ex_val_kind = ExValKind::kDouble;
+        if (core::TryParseDouble(fv, ex_double_val)) {
+          ex_val_kind = ExValKind::kDouble;
+        }
       } else if (k == "asInt" || k == "as_int") {
         ex_int_val = core::ParseInt64(fv);
         ex_val_kind = ExValKind::kInt64;
@@ -359,8 +360,9 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
                   time_ts_len = 30;
                 }
               } else if (k == "asDouble" || k == "as_double") {
-                double_val = core::ParseDouble(fv);
-                val_kind = ValueKind::kDouble;
+                if (core::TryParseDouble(fv, double_val)) {
+                  val_kind = ValueKind::kDouble;
+                }
               } else if (k == "asInt" || k == "as_int") {
                 int_val = core::ParseInt64(fv);
                 val_kind = ValueKind::kInt64;
@@ -376,11 +378,13 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
               } else if (k == "sum") {
                 hist_sum = core::ParseDouble(fv);
               } else if (k == "min") {
-                hist_min = core::ParseDouble(fv);
-                has_min = true;
+                if (core::TryParseDouble(fv, hist_min)) {
+                  has_min = true;
+                }
               } else if (k == "max") {
-                hist_max = core::ParseDouble(fv);
-                has_max = true;
+                if (core::TryParseDouble(fv, hist_max)) {
+                  has_max = true;
+                }
               } else if (k == "bucketCounts" || k == "bucket_counts") {
                 auto arr_res = fv.get_array();
                 if (arr_res.error() == simdjson::SUCCESS) {

@@ -423,6 +423,55 @@ TEST_F(MetricsExtractorTest, ExemplarsFilteredAttributesScopedRefLifecycle) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(MetricsExtractorTest, InvalidDoubleStringDoesNotSetMetricValueKind) {
+  const std::string payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "test_gauge",
+          "gauge": {
+            "dataPoints": [{
+              "asDouble": "invalid_double",
+              "exemplars": [{
+                "timeUnixNano": "1000000000",
+                "asDouble": "invalid_double"
+              }]
+            }]
+          }
+        }, {
+          "name": "test_hist",
+          "histogram": {
+            "dataPoints": [{
+              "count": 1,
+              "min": "invalid_min",
+              "max": "invalid_max"
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+
+  auto res = ProcessMetrics(L_, payload, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    local gauge_event = emitted[#emitted - 1].log
+    assert(gauge_event ~= nil)
+    assert(gauge_event.Value == nil, "DataPoint Value should not be set when asDouble is invalid")
+    assert(gauge_event.Exemplars ~= nil and #gauge_event.Exemplars == 1)
+    local ex = gauge_event.Exemplars[1]
+    assert(ex.Value == nil, "Exemplar Value should not be set when asDouble is invalid")
+
+    local hist_event = emitted[#emitted].log
+    assert(hist_event ~= nil)
+    assert(hist_event.Min == nil, "Histogram Min should not be set when min is invalid")
+    assert(hist_event.Max == nil, "Histogram Max should not be set when max is invalid")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 
 }  // namespace extractors
