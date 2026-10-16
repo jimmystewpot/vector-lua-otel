@@ -9,6 +9,8 @@ namespace core {
 
 class OtelParser {
  public:
+  static constexpr size_t kMaxPayloadSize = 512 * 1024 * 1024;
+
   OtelParser() = default;
 
   simdjson::simdjson_result<simdjson::ondemand::document> Iterate(std::string_view json_str);

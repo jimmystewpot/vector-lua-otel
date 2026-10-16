@@ -11,8 +11,7 @@ thread_local std::string tls_padded_buffer;
 
 simdjson::simdjson_result<simdjson::ondemand::document> IterateWithThreadLocalPadding(
     simdjson::ondemand::parser& parser, std::string_view json_str) {
-  constexpr size_t kMaxPayloadSize = 512 * 1024 * 1024;
-  if (json_str.size() > kMaxPayloadSize ||
+  if (json_str.size() > OtelParser::kMaxPayloadSize ||
       json_str.size() > (std::string().max_size() - simdjson::SIMDJSON_PADDING)) [[unlikely]] {
     return simdjson::CAPACITY;
   }
@@ -34,10 +33,13 @@ simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
 
 simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
     simdjson::padded_string_view json_str) {
+  if (json_str.size() > kMaxPayloadSize) [[unlikely]] {
+    return simdjson::CAPACITY;
+  }
   if (json_str.has_sufficient_padding()) [[likely]] {
     return parser_.iterate(json_str);
   }
-  return IterateWithThreadLocalPadding(parser_, std::string_view(json_str.data(), json_str.size()));
+  return IterateWithThreadLocalPadding(parser_, json_str);
 }
 
 size_t OtelParser::ThreadLocalBufferCapacity() noexcept { return tls_padded_buffer.capacity(); }
