@@ -21,6 +21,7 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& 
 int64_t ParseInt64(simdjson::ondemand::value& val);
 uint64_t ParseUint64(simdjson::ondemand::value& val);
 double ParseDouble(simdjson::ondemand::value& val);
+bool TryParseDouble(simdjson::ondemand::value& val, double& out);
 std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string_view key,
                                     std::string_view default_val = "");
 
