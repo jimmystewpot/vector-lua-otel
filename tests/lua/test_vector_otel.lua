@@ -148,6 +148,25 @@ assert(count == nil, "failing emit must return nil count")
 assert(type(err) == "string" and err:find("downstream backpressure"), "error must capture emit error message, got: " .. tostring(err))
 assert(emitted == 0, "emitted count must be 0")
 
+-- Test 7: Re-entrant process invocation inside emit callback is rejected safely
+local inner_count, inner_err, inner_emitted
+local outer_events = {}
+local reentrant_payload = [[{"resourceLogs": [{"scopeLogs": [{"logRecords": [{"body": {"stringValue": "first"}}, {"body": {"stringValue": "second"}}]}]}]}]]
+local reentrant_emit = function(ev)
+    table.insert(outer_events, ev)
+    if #outer_events == 1 then
+        inner_count, inner_err, inner_emitted = vo.logs.process(log_sample, dummy_emit)
+    end
+end
+count, err = vo.logs.process(reentrant_payload, reentrant_emit)
+assert(inner_count == nil, "Re-entrant call must return nil count, got: " .. tostring(inner_count))
+assert(inner_err == "re-entrant vector_otel.process() invocation is not permitted",
+    "Unexpected re-entrant error message: " .. tostring(inner_err))
+assert(inner_emitted == 0, "Re-entrant call must return 0 emitted_count, got: " .. tostring(inner_emitted))
+assert(count == 2 and err == nil, "Outer call must succeed with 2 records, got: " .. tostring(count) .. ", " .. tostring(err))
+assert(#outer_events == 2 and outer_events[1].log.Body == "first" and outer_events[2].log.Body == "second",
+    "Outer call records must be intact without memory corruption")
+
 print("   Error contracts passed.")
 
 --------------------------------------------------------------------------------

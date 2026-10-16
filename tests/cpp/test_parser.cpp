@@ -210,9 +210,7 @@ TEST(OtelParserTest, SafelyPaddedInputZeroCopy) {
   EXPECT_EQ(val2, 42);
 }
 
-class ParserTest : public ::testing::Test {};
-
-TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
+TEST(ParserTest, OversizedPayloadReturnsCapacityError) {
   EXPECT_EQ(core::OtelParser::kMaxPayloadSize, 512 * 1024 * 1024);
 
   core::OtelParser parser;
@@ -257,7 +255,7 @@ TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
 #endif
 }
 
-TEST_F(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
+TEST(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
   core::OtelParser parser;
   std::string large_json(17 * 1024 * 1024, ' ');
   large_json.front() = '[';
@@ -266,6 +264,17 @@ TEST_F(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
   EXPECT_GE(core::OtelParser::ThreadLocalBufferCapacity(), 17 * 1024 * 1024);
   core::OtelParser::TrimThreadLocalBuffer();
   EXPECT_LT(core::OtelParser::ThreadLocalBufferCapacity(), 17 * 1024 * 1024);
+}
+
+TEST(ParserTest, SharedInstanceTrimsParserCapacityAboveThreshold) {
+  auto& parser = core::OtelParser::Instance();
+  std::string large_json = R"({"key":")" + std::string(17 * 1024 * 1024, 'x') + R"("})";
+  auto doc_res = parser.Iterate(std::string_view(large_json));
+  ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
+  EXPECT_GT(parser.Capacity(), core::OtelParser::kMaxRetainedBufferCapacity);
+
+  core::OtelParser::TrimThreadLocalBuffer();
+  EXPECT_LE(parser.Capacity(), core::OtelParser::kMaxRetainedBufferCapacity);
 }
 
 }  // namespace core

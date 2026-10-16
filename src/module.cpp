@@ -19,9 +19,26 @@ using ExtractorStringFn = vector_otel::extractors::ExtractionResult (*)(lua_Stat
                                                                         std::string_view, int);
 using ExtractorTableFn = vector_otel::extractors::ExtractionResult (*)(lua_State*, int, int);
 
+thread_local bool tls_active_extraction = false;
+
+struct ActiveExtractionGuard {
+  ActiveExtractionGuard() noexcept { tls_active_extraction = true; }
+  ~ActiveExtractionGuard() noexcept { tls_active_extraction = false; }
+  ActiveExtractionGuard(const ActiveExtractionGuard&) = delete;
+  ActiveExtractionGuard& operator=(const ActiveExtractionGuard&) = delete;
+};
+
 template <ExtractorStringFn StringExtractor, ExtractorTableFn TableExtractor>
 int ProcessDispatcher(lua_State* L) {
   try {
+    if (tls_active_extraction) [[unlikely]] {
+      lua_pushnil(L);
+      lua_pushstring(L, "re-entrant vector_otel.process() invocation is not permitted");
+      lua_pushinteger(L, 0);
+      return 3;
+    }
+    ActiveExtractionGuard extraction_guard;
+
     int arg_type = lua_type(L, 1);
     if (arg_type != LUA_TSTRING && arg_type != LUA_TTABLE) {
       lua_pushnil(L);
