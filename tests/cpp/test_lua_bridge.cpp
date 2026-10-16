@@ -350,7 +350,8 @@ TEST_F(LuaBridgeTest, ProtectedEmitCatchesLuaError) {
   emitter.EndRecord();
 
   EXPECT_TRUE(emitter.HasError());
-  EXPECT_NE(emitter.ErrorMessage().find("downstream sink queue full"), std::string_view::npos);
+  EXPECT_NE(emitter.ErrorMessage().find("downstream sink queue full"),
+            std::string_view::npos);
   EXPECT_EQ(emitter.EmittedCount(), 0);
 
   // Subsequent records and flush should safely no-op without crashing
@@ -379,6 +380,70 @@ TEST_F(LuaBridgeTest, CustomRecordFieldName) {
     assert(ev.log == nil, "ev.log must not exist")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LuaBridgeTest, DestructorRestoresStackTopWhenInRecord) {
+  int initial_top = lua_gettop(L_);
+  {
+    core::LuaEmitter emitter(L_, 1);
+    emitter.StartRecord();
+    EXPECT_GT(lua_gettop(L_), initial_top);
+    // Destructor runs without calling EndRecord()
+  }
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+}
+
+TEST_F(LuaBridgeTest, DestructorRestoresStackTopWhenInRecordBatchMode) {
+  int initial_top = lua_gettop(L_);
+  {
+    core::LuaEmitter emitter(L_, 1, 4);
+    emitter.StartRecord();
+    EXPECT_GT(lua_gettop(L_), initial_top);
+    // Destructor runs without calling EndRecord()
+  }
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+}
+
+TEST_F(LuaBridgeTest, DestructorRestoresStackTopWhenHasError) {
+  const char* error_script = R"(
+    function failing_emit_stack(event)
+      error("emit failed")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, error_script), LUA_OK);
+
+  lua_getglobal(L_, "failing_emit_stack");
+  int fail_idx = lua_gettop(L_);
+  int initial_top = fail_idx;
+
+  {
+    core::LuaEmitter emitter(L_, fail_idx, 1);
+    emitter.StartRecord();
+    emitter.EndRecord();  // Failing emit sets has_error_ = true
+
+    EXPECT_TRUE(emitter.HasError());
+    // Simulate unpopped intermediate values pushed before destruction
+    lua_pushstring(L_, "leftover_value");
+    EXPECT_GT(lua_gettop(L_), initial_top);
+  }
+  // Destructor observes has_error_ and cleans up stack to initial_top_
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  lua_pop(L_, 1);  // pop failing_emit_stack
+}
+
+TEST_F(LuaBridgeTest, DestructorMoveSemanticsStackRestoration) {
+  int initial_top = lua_gettop(L_);
+  {
+    core::LuaEmitter emitter1(L_, 1);
+    emitter1.StartRecord();
+    EXPECT_GT(lua_gettop(L_), initial_top);
+
+    // Move construct emitter2 from emitter1
+    core::LuaEmitter emitter2(std::move(emitter1));
+    EXPECT_GT(lua_gettop(L_), initial_top);
+  }
+  EXPECT_EQ(lua_gettop(L_), initial_top);
 }
 
 }  // namespace

@@ -6,6 +6,7 @@ namespace core {
 LuaEmitter::LuaEmitter(lua_State* L, int emit_index, size_t batch_size,
                        std::string_view record_field_name)
     : L_(L),
+      initial_top_(0),
       emit_index_(0),
       emitted_count_(0),
       batch_size_(batch_size < 1 ? 1 : batch_size),
@@ -18,6 +19,7 @@ LuaEmitter::LuaEmitter(lua_State* L, int emit_index, size_t batch_size,
       event_ref_(L, LUA_NOREF),
       records_ref_(L, LUA_NOREF) {
   if (L_ != nullptr) {
+    initial_top_ = lua_gettop(L_);
     emit_index_ = lua_absindex(L_, emit_index);
   }
 }
@@ -38,7 +40,7 @@ void LuaEmitter::StartRecord() {
     // Pre-push emit function, event table, and record table
     lua_pushvalue(L_, emit_index_);  // emit function
     lua_createtable(L_, 0, 1);       // event table
-    lua_createtable(L_, 0, 16);      // record table
+    lua_createtable(L_, 0, 32);      // record table
     record_index_ = lua_gettop(L_);
     event_index_ = record_index_ - 1;
   } else {
@@ -46,19 +48,21 @@ void LuaEmitter::StartRecord() {
     if (current_batch_count_ == 0) {
       // Allocate batch event table structure:
       // event = { [record_field_name] = { records = pre_allocated_array } }
-      lua_createtable(L_, 0, 1);                                // event table
-      lua_createtable(L_, 0, 1);                                // container table
-      lua_createtable(L_, static_cast<int>(batch_size_), 0);    // records array
-      records_ref_.reset(L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops records array
+      lua_createtable(L_, 0, 1);                              // event table
+      lua_createtable(L_, 0, 1);                              // container table
+      lua_createtable(L_, static_cast<int>(batch_size_), 0);  // records array
+      records_ref_.reset(
+          L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops records array
       lua_rawgeti(L_, LUA_REGISTRYINDEX, records_ref_.get());
       lua_setfield(L_, -2, "records");
       lua_pushlstring(L_, record_field_name_.data(), record_field_name_.size());
       lua_insert(L_, -2);
       lua_rawset(L_, -3);  // event[record_field_name] = container
-      event_ref_.reset(L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops event table
+      event_ref_.reset(L_,
+                       luaL_ref(L_, LUA_REGISTRYINDEX));  // pops event table
     }
     // Create new row table
-    lua_createtable(L_, 0, 16);
+    lua_createtable(L_, 0, 32);
     record_index_ = lua_gettop(L_);
   }
 }
