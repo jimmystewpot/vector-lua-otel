@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -613,9 +614,11 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
             links_writer.EndArray();
           }
 
-          int64_t duration = (end_time >= start_time && start_time > 0)
-                                 ? static_cast<int64_t>(end_time - start_time)
-                                 : 0;
+          uint64_t delta = (end_time >= start_time && start_time > 0) ? (end_time - start_time) : 0;
+          constexpr uint64_t kMaxDuration =
+              static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+          int64_t duration = (delta <= kMaxDuration) ? static_cast<int64_t>(delta)
+                                                     : std::numeric_limits<int64_t>::max();
           char ts_buf[32];
           core::FormatIso8601Nano(start_time, ts_buf);
 
@@ -826,9 +829,12 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
                 core::ReadTableUint64(L, span_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
             uint64_t end_time =
                 core::ReadTableUint64(L, span_obj_idx, "endTimeUnixNano", "end_time_unix_nano");
-            int64_t duration = (end_time >= start_time && start_time > 0)
-                                   ? static_cast<int64_t>(end_time - start_time)
-                                   : 0;
+            uint64_t delta =
+                (end_time >= start_time && start_time > 0) ? (end_time - start_time) : 0;
+            constexpr uint64_t kMaxDuration =
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+            int64_t duration = (delta <= kMaxDuration) ? static_cast<int64_t>(delta)
+                                                       : std::numeric_limits<int64_t>::max();
             char ts_buf[32];
             core::FormatIso8601Nano(start_time, ts_buf);
 

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -383,6 +384,74 @@ TEST_F(TracesExtractorTest, DurationInt64Preservation) {
     assert(emitted[1].log.Duration == 5000000000)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, DurationInt64OverflowClamped) {
+  // Test JSON mode with start_time = 1 and end_time = UINT64_MAX (18446744073709551615)
+  const char* overflow_json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [{
+          "traceId": "1",
+          "spanId": "1",
+          "startTimeUnixNano": "1",
+          "endTimeUnixNano": "18446744073709551615"
+        }]
+      }]
+    }]
+  })";
+  auto res = ProcessTraces(L_, overflow_json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_json_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record, got " .. #emitted)
+    local r = emitted[1].log
+    assert(r.Duration > 0, "Duration must not underflow to negative: " .. tostring(r.Duration))
+    assert(r.Duration == math.maxinteger, "Duration must be clamped to INT64_MAX: " .. tostring(r.Duration))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_json_script), LUA_OK) << lua_tostring(L_, -1);
+
+  // Clear emitted table for table mode verification
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+
+  // Test table mode with start_time = 1 and end_time = UINT64_MAX
+  const char* table_script = R"(
+    return {
+      resourceSpans = {
+        {
+          scopeSpans = {
+            {
+              spans = {
+                {
+                  traceId = "2",
+                  spanId = "2",
+                  startTimeUnixNano = 1,
+                  endTimeUnixNano = "18446744073709551615"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(table_res.success);
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);  // pop return table
+
+  const char* verify_table_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record in table mode, got " .. #emitted)
+    local r = emitted[1].log
+    assert(r.Duration > 0, "Duration must not underflow to negative: " .. tostring(r.Duration))
+    assert(r.Duration == math.maxinteger, "Duration must be clamped to INT64_MAX: " .. tostring(r.Duration))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
 }  // namespace
