@@ -613,7 +613,9 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
             links_writer.EndArray();
           }
 
-          int64_t duration = static_cast<int64_t>(end_time - start_time);
+          int64_t duration = (end_time >= start_time && start_time > 0)
+                                 ? static_cast<int64_t>(end_time - start_time)
+                                 : 0;
           char ts_buf[32];
           core::FormatIso8601Nano(start_time, ts_buf);
 
@@ -824,7 +826,9 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
                 core::ReadTableUint64(L, span_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
             uint64_t end_time =
                 core::ReadTableUint64(L, span_obj_idx, "endTimeUnixNano", "end_time_unix_nano");
-            int64_t duration = static_cast<int64_t>(end_time - start_time);
+            int64_t duration = (end_time >= start_time && start_time > 0)
+                                   ? static_cast<int64_t>(end_time - start_time)
+                                   : 0;
             char ts_buf[32];
             core::FormatIso8601Nano(start_time, ts_buf);
 
