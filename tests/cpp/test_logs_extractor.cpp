@@ -340,6 +340,23 @@ TEST_F(LogsExtractorTest, UnorderedKeysHandledCleanly) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(LogsExtractorTest, OutOfOrderFieldsExtractedCorrectly) {
+  const std::string json =
+      R"({"resourceLogs": [{"resource": {}, "scopeLogs": [{"scope": {}, "logRecords": [{"attributes": [{"key": "app", "value": {"stringValue": "demo"}}], "body": {"stringValue": "hello"}, "timeUnixNano": "1700000000000000000"}]}]}]})";
+  auto res = ProcessLogs(L_, json, 1);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    local r = emitted[#emitted].log
+    assert(r ~= nil)
+    assert(r.Timestamp == "2023-11-14T22:13:20.000000000Z", "Timestamp mismatch: " .. tostring(r.Timestamp))
+    assert(r.Body == "hello", "Body mismatch: " .. tostring(r.Body))
+    assert(r.LogAttributes.app == "demo", "LogAttributes.app mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 TEST_F(LogsExtractorTest, MalformedJsonReturnsError) {
   std::string_view bad_json = "{\"resourceLogs\": [ truncated";
   auto res = ProcessLogs(L_, bad_json, 1);
@@ -365,7 +382,8 @@ TEST_F(LogsExtractorTest, EmptyBatches) {
 
   // Resource with empty scopeLogs
   {
-    auto res = ProcessLogs(L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
+    auto res = ProcessLogs(
+        L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
     EXPECT_TRUE(res.success);
     EXPECT_EQ(res.emitted_count, 0);
   }

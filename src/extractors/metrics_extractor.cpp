@@ -41,9 +41,10 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
 
     lua_newtable(L);  // single exemplar table
 
-    std::string time_iso;
-    std::string span_id;
-    std::string trace_id;
+    char time_iso_buf[32];
+    size_t time_iso_len = 0;
+    std::string_view span_id;
+    std::string_view trace_id;
     enum class ExValKind {
       kNone,
       kDouble,
@@ -65,35 +66,22 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
       if (k == "timeUnixNano" || k == "time_unix_nano") {
         uint64_t nanos = core::ParseUint64(fv);
         if (nanos > 0) {
-          char buf[32];
-          core::FormatIso8601Nano(nanos, buf);
-          time_iso = buf;
+          core::FormatIso8601Nano(nanos, time_iso_buf);
+          time_iso_len = 30;
         }
       } else if (k == "spanId" || k == "span_id") {
         auto s_res = fv.get_string();
         if (s_res.error() == simdjson::SUCCESS) {
-          span_id = std::string(s_res.value());
+          span_id = s_res.value();
         }
       } else if (k == "traceId" || k == "trace_id") {
         auto s_res = fv.get_string();
         if (s_res.error() == simdjson::SUCCESS) {
-          trace_id = std::string(s_res.value());
+          trace_id = s_res.value();
         }
       } else if (k == "asDouble" || k == "as_double" || k == "value") {
-        auto d_res = fv.get_double();
-        if (d_res.error() == simdjson::SUCCESS) {
-          ex_double_val = d_res.value();
-          ex_val_kind = ExValKind::kDouble;
-        } else {
-          auto s_res = fv.get_string();
-          if (s_res.error() == simdjson::SUCCESS) {
-            try {
-              ex_double_val = std::stod(std::string(s_res.value()));
-              ex_val_kind = ExValKind::kDouble;
-            } catch (...) {
-            }
-          }
-        }
+        ex_double_val = core::ParseDouble(fv);
+        ex_val_kind = ExValKind::kDouble;
       } else if (k == "asInt" || k == "as_int") {
         ex_int_val = core::ParseInt64(fv);
         ex_val_kind = ExValKind::kInt64;
@@ -113,7 +101,7 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
     lua_setfield(L, -2, "FilteredAttributes");
 
     // Set TimeUnix
-    lua_pushlstring(L, time_iso.data(), time_iso.size());
+    lua_pushlstring(L, time_iso_buf, time_iso_len);
     lua_setfield(L, -2, "TimeUnix");
 
     // Set Value
@@ -338,8 +326,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
             if (dp_obj_res.error() != simdjson::SUCCESS) continue;
             auto dp_obj = dp_obj_res.value();
 
-            std::string start_time_iso;
-            std::string time_iso;
+            char start_ts_buf[32];
+            size_t start_ts_len = 0;
+            char time_ts_buf[32];
+            size_t time_ts_len = 0;
             enum class ValueKind { kNone, kDouble, kInt64 };
             ValueKind val_kind = ValueKind::kNone;
             double double_val = 0.0;
@@ -355,8 +345,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
             bool has_min = false;
             double hist_max = 0.0;
             bool has_max = false;
-            std::vector<int64_t> bucket_counts;
-            std::vector<double> explicit_bounds;
+            static thread_local std::vector<int64_t> tls_bucket_counts;
+            static thread_local std::vector<double> tls_explicit_bounds;
+            tls_bucket_counts.clear();
+            tls_explicit_bounds.clear();
 
             for (auto field_res : dp_obj) {
               if (field_res.error() != simdjson::SUCCESS) continue;
@@ -370,32 +362,18 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
               if (k == "startTimeUnixNano" || k == "start_time_unix_nano") {
                 uint64_t nanos = core::ParseUint64(fv);
                 if (nanos > 0) {
-                  char buf[32];
-                  core::FormatIso8601Nano(nanos, buf);
-                  start_time_iso = buf;
+                  core::FormatIso8601Nano(nanos, start_ts_buf);
+                  start_ts_len = 30;
                 }
               } else if (k == "timeUnixNano" || k == "time_unix_nano") {
                 uint64_t nanos = core::ParseUint64(fv);
                 if (nanos > 0) {
-                  char buf[32];
-                  core::FormatIso8601Nano(nanos, buf);
-                  time_iso = buf;
+                  core::FormatIso8601Nano(nanos, time_ts_buf);
+                  time_ts_len = 30;
                 }
               } else if (k == "asDouble" || k == "as_double") {
-                auto d_res = fv.get_double();
-                if (d_res.error() == simdjson::SUCCESS) {
-                  double_val = d_res.value();
-                  val_kind = ValueKind::kDouble;
-                } else {
-                  auto s_res = fv.get_string();
-                  if (s_res.error() == simdjson::SUCCESS) {
-                    try {
-                      double_val = std::stod(std::string(s_res.value()));
-                      val_kind = ValueKind::kDouble;
-                    } catch (...) {
-                    }
-                  }
-                }
+                double_val = core::ParseDouble(fv);
+                val_kind = ValueKind::kDouble;
               } else if (k == "asInt" || k == "as_int") {
                 int_val = core::ParseInt64(fv);
                 val_kind = ValueKind::kInt64;
@@ -409,37 +387,20 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
               } else if (k == "count") {
                 hist_count = core::ParseUint64(fv);
               } else if (k == "sum") {
-                auto d_res = fv.get_double();
-                if (d_res.error() == simdjson::SUCCESS) {
-                  hist_sum = d_res.value();
-                } else {
-                  auto s_res = fv.get_string();
-                  if (s_res.error() == simdjson::SUCCESS) {
-                    try {
-                      hist_sum = std::stod(std::string(s_res.value()));
-                    } catch (...) {
-                    }
-                  }
-                }
+                hist_sum = core::ParseDouble(fv);
               } else if (k == "min") {
-                auto d_res = fv.get_double();
-                if (d_res.error() == simdjson::SUCCESS) {
-                  hist_min = d_res.value();
-                  has_min = true;
-                }
+                hist_min = core::ParseDouble(fv);
+                has_min = true;
               } else if (k == "max") {
-                auto d_res = fv.get_double();
-                if (d_res.error() == simdjson::SUCCESS) {
-                  hist_max = d_res.value();
-                  has_max = true;
-                }
+                hist_max = core::ParseDouble(fv);
+                has_max = true;
               } else if (k == "bucketCounts" || k == "bucket_counts") {
                 auto arr_res = fv.get_array();
                 if (arr_res.error() == simdjson::SUCCESS) {
                   for (auto b_elem : arr_res.value()) {
                     if (b_elem.error() == simdjson::SUCCESS) {
                       auto b_val = b_elem.value();
-                      bucket_counts.push_back(core::ParseInt64(b_val));
+                      tls_bucket_counts.push_back(core::ParseInt64(b_val));
                     }
                   }
                 }
@@ -449,19 +410,7 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
                   for (auto eb_elem : arr_res.value()) {
                     if (eb_elem.error() == simdjson::SUCCESS) {
                       auto eb_val = eb_elem.value();
-                      auto d_res = eb_val.get_double();
-                      if (d_res.error() == simdjson::SUCCESS) {
-                        explicit_bounds.push_back(d_res.value());
-                      } else {
-                        auto s_res = eb_val.get_string();
-                        if (s_res.error() == simdjson::SUCCESS) {
-                          try {
-                            explicit_bounds.push_back(
-                                std::stod(std::string(s_res.value())));
-                          } catch (...) {
-                          }
-                        }
-                      }
+                      tls_explicit_bounds.push_back(core::ParseDouble(eb_val));
                     }
                   }
                 }
@@ -505,8 +454,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
               emitter.SetTableFromStack("Attributes");
             }
 
-            emitter.SetString("StartTimeUnix", start_time_iso);
-            emitter.SetString("TimeUnix", time_iso);
+            emitter.SetString("StartTimeUnix",
+                              std::string_view(start_ts_buf, start_ts_len));
+            emitter.SetString("TimeUnix",
+                              std::string_view(time_ts_buf, time_ts_len));
 
             // Value: set for gauge/sum, omit for histogram/summary
             if (!is_histogram && !is_summary) {
@@ -544,9 +495,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
               }
 
               // bucketCounts
-              lua_createtable(L, static_cast<int>(bucket_counts.size()), 0);
-              for (size_t bi = 0; bi < bucket_counts.size(); ++bi) {
-                lua_pushinteger(L, static_cast<lua_Integer>(bucket_counts[bi]));
+              lua_createtable(L, static_cast<int>(tls_bucket_counts.size()), 0);
+              for (size_t bi = 0; bi < tls_bucket_counts.size(); ++bi) {
+                lua_pushinteger(
+                    L, static_cast<lua_Integer>(tls_bucket_counts[bi]));
                 lua_rawseti(L, -2, static_cast<lua_Integer>(bi + 1));
               }
               lua_pushvalue(L, -1);
@@ -554,9 +506,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json,
               lua_setfield(L, -2, "bucketCounts");
 
               // explicitBounds
-              lua_createtable(L, static_cast<int>(explicit_bounds.size()), 0);
-              for (size_t bi = 0; bi < explicit_bounds.size(); ++bi) {
-                lua_pushnumber(L, explicit_bounds[bi]);
+              lua_createtable(L, static_cast<int>(tls_explicit_bounds.size()),
+                              0);
+              for (size_t bi = 0; bi < tls_explicit_bounds.size(); ++bi) {
+                lua_pushnumber(L, tls_explicit_bounds[bi]);
                 lua_rawseti(L, -2, static_cast<lua_Integer>(bi + 1));
               }
               lua_pushvalue(L, -1);

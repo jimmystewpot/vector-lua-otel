@@ -17,7 +17,8 @@ namespace vector_otel {
 namespace extractors {
 namespace {
 
-void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& val) {
+void WriteAnyValueJson(core::FastJsonWriter& writer,
+                       simdjson::ondemand::value& val) {
   auto type_res = val.type();
   if (type_res.error() != simdjson::SUCCESS) {
     writer.Null();
@@ -61,8 +62,9 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
         writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
         matched = true;
         break;
-      } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
-                 k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
+      } else if (k == "arrayValue" || k == "array_value" ||
+                 k == "kvlistValue" || k == "kvlist_value" ||
+                 k == "bytesValue" || k == "bytes_value") {
         auto raw_res = fv.raw_json();
         if (raw_res.error() == simdjson::SUCCESS) {
           writer.RawJson(raw_res.value());
@@ -105,7 +107,8 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
   }
 }
 
-void WriteAttributesJson(core::FastJsonWriter& writer, simdjson::ondemand::value& attrs_val) {
+void WriteAttributesJson(core::FastJsonWriter& writer,
+                         simdjson::ondemand::value& attrs_val) {
   writer.StartObject();
   auto type_res = attrs_val.type();
   if (type_res.error() == simdjson::SUCCESS) {
@@ -152,114 +155,132 @@ void WriteAttributesJson(core::FastJsonWriter& writer, simdjson::ondemand::value
   writer.EndObject();
 }
 
-void SerializeSpanEvents(simdjson::ondemand::object& span_obj, core::FastJsonWriter& writer) {
+void SerializeSpanEventsValue(simdjson::ondemand::value& events_val,
+                              core::FastJsonWriter& writer) {
   writer.StartArray();
+  auto type_res = events_val.type();
+  if (type_res.error() == simdjson::SUCCESS &&
+      type_res.value() == simdjson::ondemand::json_type::array) {
+    auto arr_res = events_val.get_array();
+    if (arr_res.error() == simdjson::SUCCESS) {
+      for (auto elem_res : arr_res.value()) {
+        if (elem_res.error() != simdjson::SUCCESS) continue;
+        auto item_val = elem_res.value();
+        auto ev_obj_res = item_val.get_object();
+        if (ev_obj_res.error() != simdjson::SUCCESS) continue;
+        auto ev_obj = ev_obj_res.value();
+
+        writer.StartObject();
+
+        // Timestamp
+        uint64_t time_nanos = 0;
+        auto time_res = ev_obj.find_field_unordered("timeUnixNano");
+        if (time_res.error() == simdjson::SUCCESS) {
+          auto tval = time_res.value();
+          time_nanos = core::ParseUint64(tval);
+        }
+        writer.Key("Timestamp");
+        char ev_ts_buf[32];
+        core::FormatIso8601Nano(time_nanos, ev_ts_buf);
+        writer.String(std::string_view(ev_ts_buf, 30));
+
+        // Name
+        std::string_view name = core::ExtractStringField(ev_obj, "name", "");
+        writer.Key("Name");
+        writer.String(name);
+
+        // Attributes
+        writer.Key("Attributes");
+        auto attrs_res = ev_obj.find_field_unordered("attributes");
+        if (attrs_res.error() == simdjson::SUCCESS) {
+          auto aval = attrs_res.value();
+          WriteAttributesJson(writer, aval);
+        } else {
+          writer.StartObject();
+          writer.EndObject();
+        }
+
+        writer.EndObject();
+      }
+    }
+  }
+  writer.EndArray();
+}
+
+void SerializeSpanEvents(simdjson::ondemand::object& span_obj,
+                         core::FastJsonWriter& writer) {
   auto events_res = span_obj.find_field_unordered("events");
   if (events_res.error() == simdjson::SUCCESS) {
     auto events_val = events_res.value();
-    auto type_res = events_val.type();
-    if (type_res.error() == simdjson::SUCCESS &&
-        type_res.value() == simdjson::ondemand::json_type::array) {
-      auto arr_res = events_val.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
-        for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
-          auto item_val = elem_res.value();
-          auto ev_obj_res = item_val.get_object();
-          if (ev_obj_res.error() != simdjson::SUCCESS) continue;
-          auto ev_obj = ev_obj_res.value();
+    SerializeSpanEventsValue(events_val, writer);
+  } else {
+    writer.StartArray();
+    writer.EndArray();
+  }
+}
 
+void SerializeSpanLinksValue(simdjson::ondemand::value& links_val,
+                             core::FastJsonWriter& writer) {
+  writer.StartArray();
+  auto type_res = links_val.type();
+  if (type_res.error() == simdjson::SUCCESS &&
+      type_res.value() == simdjson::ondemand::json_type::array) {
+    auto arr_res = links_val.get_array();
+    if (arr_res.error() == simdjson::SUCCESS) {
+      for (auto elem_res : arr_res.value()) {
+        if (elem_res.error() != simdjson::SUCCESS) continue;
+        auto item_val = elem_res.value();
+        auto link_obj_res = item_val.get_object();
+        if (link_obj_res.error() != simdjson::SUCCESS) continue;
+        auto link_obj = link_obj_res.value();
+
+        writer.StartObject();
+
+        std::string_view trace_id =
+            core::ExtractStringField(link_obj, "traceId", "");
+        writer.Key("TraceId");
+        writer.String(trace_id);
+
+        std::string_view span_id =
+            core::ExtractStringField(link_obj, "spanId", "");
+        writer.Key("SpanId");
+        writer.String(span_id);
+
+        std::string_view trace_state =
+            core::ExtractStringField(link_obj, "traceState", "");
+        writer.Key("TraceState");
+        writer.String(trace_state);
+
+        writer.Key("Attributes");
+        auto attrs_res = link_obj.find_field_unordered("attributes");
+        if (attrs_res.error() == simdjson::SUCCESS) {
+          auto aval = attrs_res.value();
+          WriteAttributesJson(writer, aval);
+        } else {
           writer.StartObject();
-
-          // Timestamp
-          uint64_t time_nanos = 0;
-          auto time_res = ev_obj.find_field_unordered("timeUnixNano");
-          if (time_res.error() == simdjson::SUCCESS) {
-            auto tval = time_res.value();
-            time_nanos = core::ParseUint64(tval);
-          }
-          writer.Key("Timestamp");
-          writer.String(core::FormatIso8601Nano(time_nanos));
-
-          // Name
-          std::string_view name = core::ExtractStringField(ev_obj, "name", "");
-          writer.Key("Name");
-          writer.String(name);
-
-          // Attributes
-          writer.Key("Attributes");
-          auto attrs_res = ev_obj.find_field_unordered("attributes");
-          if (attrs_res.error() == simdjson::SUCCESS) {
-            auto aval = attrs_res.value();
-            WriteAttributesJson(writer, aval);
-          } else {
-            writer.StartObject();
-            writer.EndObject();
-          }
-
           writer.EndObject();
         }
+
+        writer.EndObject();
       }
     }
   }
   writer.EndArray();
 }
 
-void SerializeSpanLinks(simdjson::ondemand::object& span_obj, core::FastJsonWriter& writer) {
-  writer.StartArray();
+void SerializeSpanLinks(simdjson::ondemand::object& span_obj,
+                        core::FastJsonWriter& writer) {
   auto links_res = span_obj.find_field_unordered("links");
   if (links_res.error() == simdjson::SUCCESS) {
     auto links_val = links_res.value();
-    auto type_res = links_val.type();
-    if (type_res.error() == simdjson::SUCCESS &&
-        type_res.value() == simdjson::ondemand::json_type::array) {
-      auto arr_res = links_val.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
-        for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
-          auto item_val = elem_res.value();
-          auto link_obj_res = item_val.get_object();
-          if (link_obj_res.error() != simdjson::SUCCESS) continue;
-          auto link_obj = link_obj_res.value();
-
-          writer.StartObject();
-
-          std::string_view trace_id = core::ExtractStringField(link_obj, "traceId", "");
-          writer.Key("TraceId");
-          writer.String(trace_id);
-
-          std::string_view span_id = core::ExtractStringField(link_obj, "spanId", "");
-          writer.Key("SpanId");
-          writer.String(span_id);
-
-          std::string_view trace_state = core::ExtractStringField(link_obj, "traceState", "");
-          writer.Key("TraceState");
-          writer.String(trace_state);
-
-          writer.Key("Attributes");
-          auto attrs_res = link_obj.find_field_unordered("attributes");
-          if (attrs_res.error() == simdjson::SUCCESS) {
-            auto aval = attrs_res.value();
-            WriteAttributesJson(writer, aval);
-          } else {
-            writer.StartObject();
-            writer.EndObject();
-          }
-
-          writer.EndObject();
-        }
-      }
-    }
+    SerializeSpanLinksValue(links_val, writer);
+  } else {
+    writer.StartArray();
+    writer.EndArray();
   }
-  writer.EndArray();
 }
 
-std::string ParseSpanKind(simdjson::ondemand::object& span_obj) {
-  auto kind_res = span_obj.find_field_unordered("kind");
-  if (kind_res.error() != simdjson::SUCCESS) {
-    return "SPAN_KIND_UNSPECIFIED";
-  }
-  auto kval = kind_res.value();
+std::string_view ParseSpanKindValue(simdjson::ondemand::value& kval) {
   auto ktype_res = kval.type();
   if (ktype_res.error() != simdjson::SUCCESS) {
     return "SPAN_KIND_UNSPECIFIED";
@@ -285,7 +306,7 @@ std::string ParseSpanKind(simdjson::ondemand::object& span_obj) {
     if (s_res.error() == simdjson::SUCCESS) {
       std::string_view sv = s_res.value();
       if (sv.starts_with("SPAN_KIND_")) {
-        return std::string(sv);
+        return sv;
       }
       if (sv == "INTERNAL") return "SPAN_KIND_INTERNAL";
       if (sv == "SERVER") return "SPAN_KIND_SERVER";
@@ -293,18 +314,22 @@ std::string ParseSpanKind(simdjson::ondemand::object& span_obj) {
       if (sv == "PRODUCER") return "SPAN_KIND_PRODUCER";
       if (sv == "CONSUMER") return "SPAN_KIND_CONSUMER";
       if (sv == "UNSPECIFIED") return "SPAN_KIND_UNSPECIFIED";
-      return std::string(sv);
+      return sv;
     }
   }
   return "SPAN_KIND_UNSPECIFIED";
 }
 
-std::string ParseStatusCode(simdjson::ondemand::object& status_obj) {
-  auto code_res = status_obj.find_field_unordered("code");
-  if (code_res.error() != simdjson::SUCCESS) {
-    return "STATUS_CODE_UNSET";
+std::string_view ParseSpanKind(simdjson::ondemand::object& span_obj) {
+  auto kind_res = span_obj.find_field_unordered("kind");
+  if (kind_res.error() != simdjson::SUCCESS) {
+    return "SPAN_KIND_UNSPECIFIED";
   }
-  auto code_val = code_res.value();
+  auto kval = kind_res.value();
+  return ParseSpanKindValue(kval);
+}
+
+std::string_view ParseStatusCodeValue(simdjson::ondemand::value& code_val) {
   auto ctype_res = code_val.type();
   if (ctype_res.error() != simdjson::SUCCESS) {
     return "STATUS_CODE_UNSET";
@@ -324,20 +349,30 @@ std::string ParseStatusCode(simdjson::ondemand::object& status_obj) {
     if (s_res.error() == simdjson::SUCCESS) {
       std::string_view sv = s_res.value();
       if (sv.starts_with("STATUS_CODE_")) {
-        return std::string(sv);
+        return sv;
       }
       if (sv == "OK") return "STATUS_CODE_OK";
       if (sv == "ERROR") return "STATUS_CODE_ERROR";
       if (sv == "UNSET") return "STATUS_CODE_UNSET";
-      return std::string(sv);
+      return sv;
     }
   }
   return "STATUS_CODE_UNSET";
 }
 
+std::string_view ParseStatusCode(simdjson::ondemand::object& status_obj) {
+  auto code_res = status_obj.find_field_unordered("code");
+  if (code_res.error() != simdjson::SUCCESS) {
+    return "STATUS_CODE_UNSET";
+  }
+  auto code_val = code_res.value();
+  return ParseStatusCodeValue(code_val);
+}
+
 }  // namespace
 
-ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit_idx) {
+ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json,
+                               int emit_idx) {
   core::LuaEmitter emitter(L, emit_idx);
   try {
     static thread_local core::OtelParser parser;
@@ -351,12 +386,14 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
 
     auto doc_res = parser.Iterate(raw_json);
     if (doc_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(doc_res.error())), 0};
     }
     auto doc = std::move(doc_res.value());
     auto doc_obj_res = doc.get_object();
     if (doc_obj_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
     }
     auto doc_obj = doc_obj_res.value();
 
@@ -365,14 +402,16 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
       return ExtractionResult{true, "", 0};
     }
     if (res_spans_field.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(res_spans_field.error())),
-                              0};
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(res_spans_field.error())),
+          0};
     }
     auto res_spans_val = res_spans_field.value();
     auto res_spans_arr_res = res_spans_val.get_array();
     if (res_spans_arr_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false,
-                              std::string(simdjson::error_message(res_spans_arr_res.error())), 0};
+      return ExtractionResult{
+          false,
+          std::string(simdjson::error_message(res_spans_arr_res.error())), 0};
     }
 
     char proc_buf[32];
@@ -381,8 +420,9 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
 
     for (auto res_span_elem : res_spans_arr_res.value()) {
       if (res_span_elem.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(res_span_elem.error())),
-                                emitter.EmittedCount()};
+        return ExtractionResult{
+            false, std::string(simdjson::error_message(res_span_elem.error())),
+            emitter.EmittedCount()};
       }
       auto res_span_obj_res = res_span_elem.value().get_object();
       if (res_span_obj_res.error() != simdjson::SUCCESS) {
@@ -421,23 +461,26 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
         continue;
       }
       if (scope_spans_field.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false,
-                                std::string(simdjson::error_message(scope_spans_field.error())),
-                                emitter.EmittedCount()};
+        return ExtractionResult{
+            false,
+            std::string(simdjson::error_message(scope_spans_field.error())),
+            emitter.EmittedCount()};
       }
       auto scope_spans_val = scope_spans_field.value();
       auto scope_spans_arr_res = scope_spans_val.get_array();
       if (scope_spans_arr_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false,
-                                std::string(simdjson::error_message(scope_spans_arr_res.error())),
-                                emitter.EmittedCount()};
+        return ExtractionResult{
+            false,
+            std::string(simdjson::error_message(scope_spans_arr_res.error())),
+            emitter.EmittedCount()};
       }
 
       for (auto scope_span_elem : scope_spans_arr_res.value()) {
         if (scope_span_elem.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false,
-                                  std::string(simdjson::error_message(scope_span_elem.error())),
-                                  emitter.EmittedCount()};
+          return ExtractionResult{
+              false,
+              std::string(simdjson::error_message(scope_span_elem.error())),
+              emitter.EmittedCount()};
         }
         auto scope_span_obj_res = scope_span_elem.value().get_object();
         if (scope_span_obj_res.error() != simdjson::SUCCESS) {
@@ -445,16 +488,16 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
         }
         auto scope_span_obj = scope_span_obj_res.value();
 
-        std::string scope_name;
-        std::string scope_version;
+        std::string_view scope_name;
+        std::string_view scope_version;
         auto scope_field = scope_span_obj.find_field_unordered("scope");
         if (scope_field.error() == simdjson::SUCCESS) {
           auto scope_val = scope_field.value();
           auto scope_obj_res = scope_val.get_object();
           if (scope_obj_res.error() == simdjson::SUCCESS) {
             auto scope_obj = scope_obj_res.value();
-            scope_name = std::string(core::ExtractStringField(scope_obj, "name", ""));
-            scope_version = std::string(core::ExtractStringField(scope_obj, "version", ""));
+            scope_name = core::ExtractStringField(scope_obj, "name", "");
+            scope_version = core::ExtractStringField(scope_obj, "version", "");
           }
         }
 
@@ -463,21 +506,24 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           continue;
         }
         if (spans_field.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(spans_field.error())),
-                                  emitter.EmittedCount()};
+          return ExtractionResult{
+              false, std::string(simdjson::error_message(spans_field.error())),
+              emitter.EmittedCount()};
         }
         auto spans_val = spans_field.value();
         auto spans_arr_res = spans_val.get_array();
         if (spans_arr_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false,
-                                  std::string(simdjson::error_message(spans_arr_res.error())),
-                                  emitter.EmittedCount()};
+          return ExtractionResult{
+              false,
+              std::string(simdjson::error_message(spans_arr_res.error())),
+              emitter.EmittedCount()};
         }
 
         for (auto span_elem : spans_arr_res.value()) {
           if (span_elem.error() != simdjson::SUCCESS) {
-            return ExtractionResult{false, std::string(simdjson::error_message(span_elem.error())),
-                                    emitter.EmittedCount()};
+            return ExtractionResult{
+                false, std::string(simdjson::error_message(span_elem.error())),
+                emitter.EmittedCount()};
           }
           auto span_obj_res = span_elem.value().get_object();
           if (span_obj_res.error() != simdjson::SUCCESS) {
@@ -485,53 +531,115 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           }
           auto span_obj = span_obj_res.value();
 
-          std::string_view trace_id = core::ExtractStringField(span_obj, "traceId", "");
-          std::string_view span_id = core::ExtractStringField(span_obj, "spanId", "");
-          std::string_view parent_span_id = core::ExtractStringField(span_obj, "parentSpanId", "");
-          std::string_view trace_state = core::ExtractStringField(span_obj, "traceState", "");
-          std::string_view span_name = core::ExtractStringField(span_obj, "name", "");
-          std::string span_kind = ParseSpanKind(span_obj);
-
+          std::string_view trace_id;
+          std::string_view span_id;
+          std::string_view parent_span_id;
+          std::string_view trace_state;
+          std::string_view span_name;
+          std::string_view span_kind = "SPAN_KIND_UNSPECIFIED";
           uint64_t start_time = 0;
-          auto start_res = span_obj.find_field_unordered("startTimeUnixNano");
-          if (start_res.error() == simdjson::SUCCESS) {
-            auto val = start_res.value();
-            start_time = core::ParseUint64(val);
+          uint64_t end_time = 0;
+          std::string_view status_code = "STATUS_CODE_UNSET";
+          std::string_view status_msg;
+          bool has_events = false;
+          bool has_links = false;
+          bool has_span_attrs = false;
+          core::ScopedLuaRef span_attrs_scoped(L, LUA_NOREF);
+
+          events_writer.Reset();
+          links_writer.Reset();
+
+          for (auto field_res : span_obj) {
+            if (field_res.error() != simdjson::SUCCESS) continue;
+            auto k_res = field_res.unescaped_key();
+            if (k_res.error() != simdjson::SUCCESS) continue;
+            std::string_view k = k_res.value();
+            auto fv_res = field_res.value();
+            if (fv_res.error() != simdjson::SUCCESS) continue;
+            auto fv = fv_res.value();
+
+            if (k == "traceId" || k == "trace_id") {
+              auto s_res = fv.get_string();
+              if (s_res.error() == simdjson::SUCCESS) {
+                trace_id = s_res.value();
+              }
+            } else if (k == "spanId" || k == "span_id") {
+              auto s_res = fv.get_string();
+              if (s_res.error() == simdjson::SUCCESS) {
+                span_id = s_res.value();
+              }
+            } else if (k == "parentSpanId" || k == "parent_span_id") {
+              auto s_res = fv.get_string();
+              if (s_res.error() == simdjson::SUCCESS) {
+                parent_span_id = s_res.value();
+              }
+            } else if (k == "traceState" || k == "trace_state") {
+              auto s_res = fv.get_string();
+              if (s_res.error() == simdjson::SUCCESS) {
+                trace_state = s_res.value();
+              }
+            } else if (k == "name") {
+              auto s_res = fv.get_string();
+              if (s_res.error() == simdjson::SUCCESS) {
+                span_name = s_res.value();
+              }
+            } else if (k == "kind") {
+              span_kind = ParseSpanKindValue(fv);
+            } else if (k == "startTimeUnixNano" ||
+                       k == "start_time_unix_nano") {
+              start_time = core::ParseUint64(fv);
+            } else if (k == "endTimeUnixNano" || k == "end_time_unix_nano") {
+              end_time = core::ParseUint64(fv);
+            } else if (k == "status") {
+              auto status_obj_res = fv.get_object();
+              if (status_obj_res.error() == simdjson::SUCCESS) {
+                auto status_obj = status_obj_res.value();
+                for (auto st_res : status_obj) {
+                  if (st_res.error() != simdjson::SUCCESS) continue;
+                  auto stk_res = st_res.unescaped_key();
+                  if (stk_res.error() != simdjson::SUCCESS) continue;
+                  std::string_view stk = stk_res.value();
+                  auto stv_res = st_res.value();
+                  if (stv_res.error() != simdjson::SUCCESS) continue;
+                  auto stv = stv_res.value();
+                  if (stk == "code") {
+                    status_code = ParseStatusCodeValue(stv);
+                  } else if (stk == "message") {
+                    auto m_res = stv.get_string();
+                    if (m_res.error() == simdjson::SUCCESS) {
+                      status_msg = m_res.value();
+                    }
+                  }
+                }
+              }
+            } else if (k == "events") {
+              SerializeSpanEventsValue(fv, events_writer);
+              has_events = true;
+            } else if (k == "links") {
+              SerializeSpanLinksValue(fv, links_writer);
+              has_links = true;
+            } else if (k == "attributes") {
+              if (L != nullptr) {
+                core::PushAttributesTable(L, fv, attr_writer);
+                span_attrs_scoped =
+                    core::ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+                has_span_attrs = true;
+              }
+            }
           }
 
-          uint64_t end_time = 0;
-          auto end_res = span_obj.find_field_unordered("endTimeUnixNano");
-          if (end_res.error() == simdjson::SUCCESS) {
-            auto val = end_res.value();
-            end_time = core::ParseUint64(val);
+          if (!has_events) {
+            events_writer.StartArray();
+            events_writer.EndArray();
+          }
+          if (!has_links) {
+            links_writer.StartArray();
+            links_writer.EndArray();
           }
 
           int64_t duration = static_cast<int64_t>(end_time - start_time);
           char ts_buf[32];
           core::FormatIso8601Nano(start_time, ts_buf);
-
-          std::string status_code = "STATUS_CODE_UNSET";
-          std::string_view status_msg;
-          auto status_res = span_obj.find_field_unordered("status");
-          if (status_res.error() == simdjson::SUCCESS) {
-            auto status_val = status_res.value();
-            auto status_type_res = status_val.type();
-            if (status_type_res.error() == simdjson::SUCCESS &&
-                status_type_res.value() == simdjson::ondemand::json_type::object) {
-              auto status_obj_res = status_val.get_object();
-              if (status_obj_res.error() == simdjson::SUCCESS) {
-                auto status_obj = status_obj_res.value();
-                status_code = ParseStatusCode(status_obj);
-                status_msg = core::ExtractStringField(status_obj, "message", "");
-              }
-            }
-          }
-
-          events_writer.Reset();
-          SerializeSpanEvents(span_obj, events_writer);
-
-          links_writer.Reset();
-          SerializeSpanLinks(span_obj, links_writer);
 
           emitter.StartRecord();
           emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
@@ -552,10 +660,9 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           emitter.SetString("ScopeVersion", scope_version);
 
           if (L != nullptr) {
-            auto attrs_res = span_obj.find_field_unordered("attributes");
-            if (attrs_res.error() == simdjson::SUCCESS) {
-              auto attrs_val = attrs_res.value();
-              core::PushAttributesTable(L, attrs_val, attr_writer);
+            if (has_span_attrs && span_attrs_scoped.get() != LUA_NOREF) {
+              lua_rawgeti(L, LUA_REGISTRYINDEX, span_attrs_scoped.get());
+              span_attrs_scoped.reset();
             } else {
               lua_newtable(L);
             }
@@ -580,13 +687,15 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
 
     emitter.Flush();
     if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+      return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                              emitter.EmittedCount()};
     }
     return ExtractionResult{true, "", emitter.EmittedCount()};
   } catch (const std::exception& ex) {
     return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
   } catch (...) {
-    return ExtractionResult{false, "Unknown C++ exception during traces processing",
+    return ExtractionResult{false,
+                            "Unknown C++ exception during traces processing",
                             emitter.EmittedCount()};
   }
 }
@@ -628,7 +737,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
 
   core::LuaEmitter emitter(L, emit_idx);
   static thread_local core::FastJsonWriter writer;
-  std::string processed_at = core::FormatIso8601Nano(core::CurrentTimeUnixNano());
+  std::string processed_at =
+      core::FormatIso8601Nano(core::CurrentTimeUnixNano());
 
   lua_Integer rs_len = luaL_len(L, rs_arr_idx);
   for (lua_Integer i = 1; i <= rs_len; ++i) {
@@ -697,14 +807,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
             }
             int span_obj_idx = lua_absindex(L, -1);
 
-            std::string trace_id = core::ReadTableString(L, span_obj_idx, "traceId", "trace_id");
-            std::string span_id = core::ReadTableString(L, span_obj_idx, "spanId", "span_id");
-            std::string parent_span_id =
-                core::ReadTableString(L, span_obj_idx, "parentSpanId", "parent_span_id");
-            std::string trace_state =
-                core::ReadTableString(L, span_obj_idx, "traceState", "trace_state");
-            std::string span_name = core::ReadTableString(L, span_obj_idx, "name");
-            std::string span_kind = "SPAN_KIND_UNSPECIFIED";
+            std::string_view span_kind = "SPAN_KIND_UNSPECIFIED";
+            static thread_local std::string span_kind_buf;
             if (core::GetTableField(L, span_obj_idx, "kind")) {
               if (lua_isinteger(L, -1)) {
                 int64_t ki = lua_tointeger(L, -1);
@@ -729,26 +833,32 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
                     break;
                 }
               } else if (lua_isstring(L, -1)) {
-                std::string s = lua_tostring(L, -1);
-                if (s.rfind("SPAN_KIND_", 0) == 0) {
-                  span_kind = s;
+                size_t slen = 0;
+                const char* s = lua_tolstring(L, -1, &slen);
+                std::string_view sv(s, slen);
+                if (sv.starts_with("SPAN_KIND_")) {
+                  span_kind = sv;
                 } else {
-                  span_kind = "SPAN_KIND_" + s;
+                  span_kind_buf = "SPAN_KIND_";
+                  span_kind_buf.append(sv);
+                  span_kind = span_kind_buf;
                 }
               }
               lua_pop(L, 1);
             }
 
-            uint64_t start_time =
-                core::ReadTableUint64(L, span_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
-            uint64_t end_time =
-                core::ReadTableUint64(L, span_obj_idx, "endTimeUnixNano", "end_time_unix_nano");
+            uint64_t start_time = core::ReadTableUint64(
+                L, span_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
+            uint64_t end_time = core::ReadTableUint64(
+                L, span_obj_idx, "endTimeUnixNano", "end_time_unix_nano");
             int64_t duration = static_cast<int64_t>(end_time - start_time);
             char ts_buf[32];
             core::FormatIso8601Nano(start_time, ts_buf);
 
-            std::string status_code = "STATUS_CODE_UNSET";
-            std::string status_msg;
+            std::string_view status_code = "STATUS_CODE_UNSET";
+            static thread_local std::string status_code_buf;
+            static thread_local std::string status_msg_buf;
+            std::string_view status_msg;
             if (core::GetTableField(L, span_obj_idx, "status")) {
               int st_idx = lua_absindex(L, -1);
               if (core::GetTableField(L, st_idx, "code")) {
@@ -761,26 +871,43 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
                   else
                     status_code = "STATUS_CODE_UNSET";
                 } else if (lua_isstring(L, -1)) {
-                  std::string s = lua_tostring(L, -1);
-                  if (s.rfind("STATUS_CODE_", 0) == 0) {
-                    status_code = s;
+                  size_t slen = 0;
+                  const char* s = lua_tolstring(L, -1, &slen);
+                  std::string_view sv(s, slen);
+                  if (sv.starts_with("STATUS_CODE_")) {
+                    status_code = sv;
                   } else {
-                    status_code = "STATUS_CODE_" + s;
+                    status_code_buf = "STATUS_CODE_";
+                    status_code_buf.append(sv);
+                    status_code = status_code_buf;
                   }
                 }
                 lua_pop(L, 1);
               }
-              status_msg = core::ReadTableString(L, st_idx, "message");
-              lua_pop(L, 1);
+              if (core::GetTableField(L, st_idx, "message")) {
+                if (lua_isstring(L, -1)) {
+                  size_t mlen = 0;
+                  const char* ms = lua_tolstring(L, -1, &mlen);
+                  status_msg_buf.assign(ms, mlen);
+                  status_msg = status_msg_buf;
+                }
+                lua_pop(L, 1);
+              }
+              lua_pop(L, 1);  // pop status table BEFORE StartRecord
             }
 
             emitter.StartRecord();
             emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
-            emitter.SetString("TraceId", trace_id);
-            emitter.SetString("SpanId", span_id);
-            emitter.SetString("ParentSpanId", parent_span_id);
-            emitter.SetString("TraceState", trace_state);
-            emitter.SetString("SpanName", span_name);
+            core::CopyStringField(L, span_obj_idx, "traceId", "trace_id",
+                                  emitter, "TraceId");
+            core::CopyStringField(L, span_obj_idx, "spanId", "span_id", emitter,
+                                  "SpanId");
+            core::CopyStringField(L, span_obj_idx, "parentSpanId",
+                                  "parent_span_id", emitter, "ParentSpanId");
+            core::CopyStringField(L, span_obj_idx, "traceState", "trace_state",
+                                  emitter, "TraceState");
+            core::CopyStringField(L, span_obj_idx, "name", nullptr, emitter,
+                                  "SpanName");
             emitter.SetString("SpanKind", span_kind);
             emitter.SetString("ServiceName", service_name);
 
@@ -831,7 +958,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
             lua_pop(L, 1);  // pop span_obj
             if (emitter.HasError()) {
               if (pop_rs) lua_pop(L, 1);
-              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+              return ExtractionResult{false,
+                                      std::string(emitter.ErrorMessage()),
                                       emitter.EmittedCount()};
             }
           }
@@ -850,7 +978,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
 
   emitter.Flush();
   if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                            emitter.EmittedCount()};
   }
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }

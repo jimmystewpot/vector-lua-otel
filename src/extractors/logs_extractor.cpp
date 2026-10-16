@@ -23,22 +23,19 @@ namespace {
 
 using core::ScopedLuaRef;
 
-void ExtractBodyString(simdjson::ondemand::value& body_val, core::FastJsonWriter& writer,
-                       std::string& out_body) {
+std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
+                                 core::FastJsonWriter& writer) {
   auto type_res = body_val.type();
   if (type_res.error() != simdjson::SUCCESS) {
-    out_body.clear();
-    return;
+    return "";
   }
   auto type = type_res.value();
   if (type == simdjson::ondemand::json_type::object) {
     auto b_obj_res = body_val.get_object();
     if (b_obj_res.error() != simdjson::SUCCESS) {
-      out_body.clear();
-      return;
+      return "";
     }
     auto b_obj = b_obj_res.value();
-    bool is_anyvalue_string = false;
     writer.Reset();
     writer.StartObject();
     for (auto field_res : b_obj) {
@@ -53,9 +50,7 @@ void ExtractBodyString(simdjson::ondemand::value& body_val, core::FastJsonWriter
       if (k == "stringValue" || k == "string_value") {
         auto s_res = fv.get_string();
         if (s_res.error() == simdjson::SUCCESS) {
-          out_body = std::string(s_res.value());
-          is_anyvalue_string = true;
-          break;
+          return s_res.value();
         }
       }
       writer.Key(k);
@@ -66,44 +61,47 @@ void ExtractBodyString(simdjson::ondemand::value& body_val, core::FastJsonWriter
         writer.Null();
       }
     }
-    if (!is_anyvalue_string) {
-      writer.EndObject();
-      out_body = std::string(writer.Str());
-    }
+    writer.EndObject();
+    return writer.Str();
   } else if (type == simdjson::ondemand::json_type::string) {
     auto s_res = body_val.get_string();
     if (s_res.error() == simdjson::SUCCESS) {
-      out_body = std::string(s_res.value());
-    } else {
-      out_body.clear();
+      return s_res.value();
     }
+    return "";
   } else if (type == simdjson::ondemand::json_type::null) {
-    out_body.clear();
+    return "";
   } else {
     auto raw_res = body_val.raw_json();
     if (raw_res.error() == simdjson::SUCCESS) {
-      out_body = std::string(raw_res.value());
-    } else {
-      out_body.clear();
+      return raw_res.value();
     }
+    return "";
   }
 }
 
 }  // namespace
 
-ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_idx) {
+ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json,
+                             int emit_idx) {
   static thread_local core::OtelParser parser;
   static thread_local core::FastJsonWriter writer;
+  static thread_local core::FastJsonWriter body_writer;
+
+  writer.Reset();
+  body_writer.Reset();
 
   auto doc_res = parser.Iterate(raw_json);
   if (doc_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
+    return ExtractionResult{
+        false, std::string(simdjson::error_message(doc_res.error())), 0};
   }
 
   auto doc = std::move(doc_res.value());
   auto doc_obj_res = doc.get_object();
   if (doc_obj_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
+    return ExtractionResult{
+        false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
   }
   auto doc_obj = doc_obj_res.value();
 
@@ -130,8 +128,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
   for (auto rl_elem_res : rl_arr_res.value()) {
     if (rl_elem_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(rl_elem_res.error())),
-                              emitter.EmittedCount()};
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(rl_elem_res.error())),
+          emitter.EmittedCount()};
     }
     auto rl_val_item = rl_elem_res.value();
     auto rl_obj_res = rl_val_item.get_object();
@@ -141,7 +140,7 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
     auto rl_obj = rl_obj_res.value();
 
     // 1. Resource schema URL
-    std::string resource_schema_url;
+    std::string_view resource_schema_url;
     auto res_schema_res = rl_obj.find_field_unordered("schemaUrl");
     if (res_schema_res.error() != simdjson::SUCCESS) {
       res_schema_res = rl_obj.find_field_unordered("schema_url");
@@ -149,7 +148,7 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
     if (res_schema_res.error() == simdjson::SUCCESS) {
       auto s_res = res_schema_res.value().get_string();
       if (s_res.error() == simdjson::SUCCESS) {
-        resource_schema_url = std::string(s_res.value());
+        resource_schema_url = s_res.value();
       }
     }
 
@@ -198,8 +197,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
     for (auto sl_elem_res : sl_arr_res.value()) {
       if (sl_elem_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(sl_elem_res.error())),
-                                emitter.EmittedCount()};
+        return ExtractionResult{
+            false, std::string(simdjson::error_message(sl_elem_res.error())),
+            emitter.EmittedCount()};
       }
       auto sl_val_item = sl_elem_res.value();
       auto sl_obj_res = sl_val_item.get_object();
@@ -209,7 +209,7 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
       auto sl_obj = sl_obj_res.value();
 
       // Scope schema URL
-      std::string scope_schema_url;
+      std::string_view scope_schema_url;
       auto sl_schema_res = sl_obj.find_field_unordered("schemaUrl");
       if (sl_schema_res.error() != simdjson::SUCCESS) {
         sl_schema_res = sl_obj.find_field_unordered("schema_url");
@@ -217,13 +217,13 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
       if (sl_schema_res.error() == simdjson::SUCCESS) {
         auto s_res = sl_schema_res.value().get_string();
         if (s_res.error() == simdjson::SUCCESS) {
-          scope_schema_url = std::string(s_res.value());
+          scope_schema_url = s_res.value();
         }
       }
 
       // Scope metadata
-      std::string scope_name;
-      std::string scope_version;
+      std::string_view scope_name;
+      std::string_view scope_version;
       ScopedLuaRef scope_attrs_scoped(L, LUA_NOREF);
 
       auto scope_res = sl_obj.find_field_unordered("scope");
@@ -232,8 +232,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
         auto s_obj_res = scope_val.get_object();
         if (s_obj_res.error() == simdjson::SUCCESS) {
           auto s_obj = s_obj_res.value();
-          scope_name = std::string(core::ExtractStringField(s_obj, "name", ""));
-          scope_version = std::string(core::ExtractStringField(s_obj, "version", ""));
+          scope_name = core::ExtractStringField(s_obj, "name", "");
+          scope_version = core::ExtractStringField(s_obj, "version", "");
           if (L != nullptr) {
             auto s_attrs_res = s_obj.find_field_unordered("attributes");
             if (s_attrs_res.error() == simdjson::SUCCESS) {
@@ -242,7 +242,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
             } else {
               lua_newtable(L);
             }
-            scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+            scope_attrs_scoped =
+                ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
           }
         }
       }
@@ -268,8 +269,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
       for (auto rec_elem_res : recs_arr_res.value()) {
         if (rec_elem_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(rec_elem_res.error())),
-                                  emitter.EmittedCount()};
+          return ExtractionResult{
+              false, std::string(simdjson::error_message(rec_elem_res.error())),
+              emitter.EmittedCount()};
         }
         auto rec_val_item = rec_elem_res.value();
         auto rec_obj_res = rec_val_item.get_object();
@@ -278,136 +280,110 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
         }
         auto rec_obj = rec_obj_res.value();
 
-        emitter.StartRecord();
-
-        // 1. Timestamp
         uint64_t t_ns = 0;
-        auto t_res = rec_obj.find_field_unordered("timeUnixNano");
-        if (t_res.error() != simdjson::SUCCESS) {
-          t_res = rec_obj.find_field_unordered("time_unix_nano");
+        uint64_t obs_t_ns = 0;
+        std::string_view trace_id;
+        std::string_view span_id;
+        int64_t flags = 0;
+        std::string_view sev_text;
+        int64_t sev_num = 0;
+        std::string_view body_sv;
+        std::string_view event_name;
+        bool has_log_attrs = false;
+        ScopedLuaRef log_attrs_scoped(L, LUA_NOREF);
+
+        for (auto field_res : rec_obj) {
+          if (field_res.error() != simdjson::SUCCESS) continue;
+          auto k_res = field_res.unescaped_key();
+          if (k_res.error() != simdjson::SUCCESS) continue;
+          std::string_view k = k_res.value();
+          auto fv_res = field_res.value();
+          if (fv_res.error() != simdjson::SUCCESS) continue;
+          auto fv = fv_res.value();
+
+          if (k == "timeUnixNano" || k == "time_unix_nano") {
+            t_ns = core::ParseUint64(fv);
+          } else if (k == "observedTimeUnixNano" ||
+                     k == "observed_time_unix_nano") {
+            obs_t_ns = core::ParseUint64(fv);
+          } else if (k == "traceId" || k == "trace_id") {
+            auto s_res = fv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              trace_id = s_res.value();
+            }
+          } else if (k == "spanId" || k == "span_id") {
+            auto s_res = fv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              span_id = s_res.value();
+            }
+          } else if (k == "flags" || k == "traceFlags" || k == "trace_flags") {
+            flags = core::ParseInt64(fv);
+          } else if (k == "severityText" || k == "severity_text") {
+            auto s_res = fv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              sev_text = s_res.value();
+            }
+          } else if (k == "severityNumber" || k == "severity_number") {
+            sev_num = core::ParseInt64(fv);
+          } else if (k == "body") {
+            body_sv = ExtractBodyView(fv, body_writer);
+          } else if (k == "eventName" || k == "event_name") {
+            auto s_res = fv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              event_name = s_res.value();
+            }
+          } else if (k == "attributes") {
+            if (L != nullptr) {
+              core::PushAttributesTable(L, fv, writer);
+              log_attrs_scoped =
+                  ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+              has_log_attrs = true;
+            }
+          }
         }
-        if (t_res.error() == simdjson::SUCCESS) {
-          auto tv = t_res.value();
-          t_ns = core::ParseUint64(tv);
-        }
+
         if (t_ns == 0) {
-          auto obs_res = rec_obj.find_field_unordered("observedTimeUnixNano");
-          if (obs_res.error() != simdjson::SUCCESS) {
-            obs_res = rec_obj.find_field_unordered("observed_time_unix_nano");
-          }
-          if (obs_res.error() == simdjson::SUCCESS) {
-            auto obsv = obs_res.value();
-            t_ns = core::ParseUint64(obsv);
-          }
+          t_ns = obs_t_ns;
         }
         char ts_buf[32];
         core::FormatIso8601Nano(t_ns, ts_buf);
+
+        emitter.StartRecord();
         emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
-
-        // 2. TraceId
-        std::string_view trace_id = core::ExtractStringField(rec_obj, "traceId", "");
-        if (trace_id.empty()) {
-          trace_id = core::ExtractStringField(rec_obj, "trace_id", "");
-        }
         emitter.SetString("TraceId", trace_id);
-
-        // 3. SpanId
-        std::string_view span_id = core::ExtractStringField(rec_obj, "spanId", "");
-        if (span_id.empty()) {
-          span_id = core::ExtractStringField(rec_obj, "span_id", "");
-        }
         emitter.SetString("SpanId", span_id);
-
-        // 4. TraceFlags
-        int64_t flags = 0;
-        auto flags_res = rec_obj.find_field_unordered("flags");
-        if (flags_res.error() != simdjson::SUCCESS) {
-          flags_res = rec_obj.find_field_unordered("traceFlags");
-          if (flags_res.error() != simdjson::SUCCESS) {
-            flags_res = rec_obj.find_field_unordered("trace_flags");
-          }
-        }
-        if (flags_res.error() == simdjson::SUCCESS) {
-          auto fv = flags_res.value();
-          flags = core::ParseInt64(fv);
-        }
         emitter.SetInt64("TraceFlags", flags);
-
-        // 5. SeverityText
-        std::string_view sev_text = core::ExtractStringField(rec_obj, "severityText", "");
-        if (sev_text.empty()) {
-          sev_text = core::ExtractStringField(rec_obj, "severity_text", "");
-        }
         emitter.SetString("SeverityText", sev_text);
-
-        // 6. SeverityNumber
-        int64_t sev_num = 0;
-        auto sev_num_res = rec_obj.find_field_unordered("severityNumber");
-        if (sev_num_res.error() != simdjson::SUCCESS) {
-          sev_num_res = rec_obj.find_field_unordered("severity_number");
-        }
-        if (sev_num_res.error() == simdjson::SUCCESS) {
-          auto snv = sev_num_res.value();
-          sev_num = core::ParseInt64(snv);
-        }
         emitter.SetInt64("SeverityNumber", sev_num);
-
-        // 7. ServiceName
         emitter.SetString("ServiceName", service_name);
-
-        // 8. Body
-        std::string body_str;
-        auto body_res = rec_obj.find_field_unordered("body");
-        if (body_res.error() == simdjson::SUCCESS) {
-          auto body_val = body_res.value();
-          ExtractBodyString(body_val, writer, body_str);
-        }
-        emitter.SetString("Body", body_str);
-
-        // 9. ResourceSchemaUrl
+        emitter.SetString("Body", body_sv);
         emitter.SetString("ResourceSchemaUrl", resource_schema_url);
 
-        // 10. ResourceAttributes
         if (L != nullptr && res_attrs_scoped.get() != LUA_NOREF) {
           lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_scoped.get());
           emitter.SetTableFromStack("ResourceAttributes");
         }
 
-        // 11. ScopeSchemaUrl
         emitter.SetString("ScopeSchemaUrl", scope_schema_url);
-
-        // 12. ScopeName
         emitter.SetString("ScopeName", scope_name);
-
-        // 13. ScopeVersion
         emitter.SetString("ScopeVersion", scope_version);
 
-        // 14. ScopeAttributes
         if (L != nullptr && scope_attrs_scoped.get() != LUA_NOREF) {
           lua_rawgeti(L, LUA_REGISTRYINDEX, scope_attrs_scoped.get());
           emitter.SetTableFromStack("ScopeAttributes");
         }
 
-        // 15. LogAttributes
         if (L != nullptr) {
-          auto log_attrs_res = rec_obj.find_field_unordered("attributes");
-          if (log_attrs_res.error() == simdjson::SUCCESS) {
-            auto log_attrs_val = log_attrs_res.value();
-            core::PushAttributesTable(L, log_attrs_val, writer);
+          if (has_log_attrs && log_attrs_scoped.get() != LUA_NOREF) {
+            lua_rawgeti(L, LUA_REGISTRYINDEX, log_attrs_scoped.get());
+            log_attrs_scoped.reset();
           } else {
             lua_newtable(L);
           }
           emitter.SetTableFromStack("LogAttributes");
         }
 
-        // 16. EventName
-        std::string_view event_name = core::ExtractStringField(rec_obj, "eventName", "");
-        if (event_name.empty()) {
-          event_name = core::ExtractStringField(rec_obj, "event_name", "");
-        }
         emitter.SetString("EventName", event_name);
-
-        // 17. processed_at
         emitter.SetString("processed_at", processed_at);
 
         emitter.EndRecord();
@@ -421,7 +397,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
   emitter.Flush();
   if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                            emitter.EmittedCount()};
   }
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
@@ -456,7 +433,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
   }
 
   static thread_local core::FastJsonWriter writer;
-  std::string processed_at = core::FormatIso8601Nano(core::CurrentTimeUnixNano());
+  std::string processed_at =
+      core::FormatIso8601Nano(core::CurrentTimeUnixNano());
   core::LuaEmitter emitter(L, emit_idx);
 
   lua_Integer rl_len = luaL_len(L, rl_arr_idx);
@@ -555,23 +533,26 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
 
             // 2. TraceId
-            emitter.SetString("TraceId",
-                              core::ReadTableString(L, rec_obj_idx, "traceId", "trace_id"));
+            core::CopyStringField(L, rec_obj_idx, "traceId", "trace_id",
+                                  emitter, "TraceId");
 
             // 3. SpanId
-            emitter.SetString("SpanId", core::ReadTableString(L, rec_obj_idx, "spanId", "span_id"));
+            core::CopyStringField(L, rec_obj_idx, "spanId", "span_id", emitter,
+                                  "SpanId");
 
             // 4. TraceFlags
-            emitter.SetInt64("TraceFlags",
-                             core::ReadTableInt64(L, rec_obj_idx, "flags", "traceFlags"));
+            emitter.SetInt64(
+                "TraceFlags",
+                core::ReadTableInt64(L, rec_obj_idx, "flags", "traceFlags"));
 
             // 5. SeverityText
-            emitter.SetString("SeverityText", core::ReadTableString(L, rec_obj_idx, "severityText",
-                                                                    "severity_text"));
+            core::CopyStringField(L, rec_obj_idx, "severityText",
+                                  "severity_text", emitter, "SeverityText");
 
             // 6. SeverityNumber
             int64_t sev_num = 0;
-            if (core::GetTableField(L, rec_obj_idx, "severityNumber", "severity_number")) {
+            if (core::GetTableField(L, rec_obj_idx, "severityNumber",
+                                    "severity_number")) {
               sev_num = core::ParseTableSeverityNumber(L, -1);
               lua_pop(L, 1);
             }
@@ -581,7 +562,7 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             emitter.SetString("ServiceName", service_name);
 
             // 8. Body
-            emitter.SetString("Body", core::ReadTableBodyString(L, rec_obj_idx, writer));
+            core::CopyTableBody(L, rec_obj_idx, writer, emitter);
 
             // 9. ResourceSchemaUrl
             emitter.SetString("ResourceSchemaUrl", resource_schema_url);
@@ -618,8 +599,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             }
 
             // 16. EventName
-            emitter.SetString("EventName",
-                              core::ReadTableString(L, rec_obj_idx, "eventName", "event_name"));
+            core::CopyStringField(L, rec_obj_idx, "eventName", "event_name",
+                                  emitter, "EventName");
 
             // 17. processed_at
             emitter.SetString("processed_at", processed_at);
@@ -628,7 +609,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             lua_pop(L, 1);  // pop rec_obj
             if (emitter.HasError()) {
               if (pop_rl) lua_pop(L, 1);
-              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+              return ExtractionResult{false,
+                                      std::string(emitter.ErrorMessage()),
                                       emitter.EmittedCount()};
             }
           }
@@ -647,7 +629,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
 
   emitter.Flush();
   if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                            emitter.EmittedCount()};
   }
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
