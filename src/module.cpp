@@ -8,6 +8,7 @@ extern "C" {
 #include <lua.h>
 }
 
+#include "vector_otel/core/parser.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
@@ -41,6 +42,7 @@ int ProcessDispatcher(lua_State* L) {
       const char* str = lua_tolstring(L, 1, &len);
       std::string_view payload(str, len);
       result = StringExtractor(L, payload, 2);
+      vector_otel::core::OtelParser::TrimThreadLocalBuffer();
     } else {
       result = TableExtractor(L, 1, 2);
     }

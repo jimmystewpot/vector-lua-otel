@@ -206,5 +206,26 @@ TEST(OtelParserTest, SafelyPaddedInputZeroCopy) {
   EXPECT_EQ(val2, 42);
 }
 
+class ParserTest : public ::testing::Test {};
+
+TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
+  core::OtelParser parser;
+  // A string view claiming huge length exceeding max payload size
+  std::string_view oversized(nullptr, 600 * 1024 * 1024);
+  auto doc_res = parser.Iterate(oversized);
+  EXPECT_TRUE(doc_res.error() == simdjson::CAPACITY || doc_res.error() == simdjson::MEMALLOC);
+}
+
+TEST_F(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
+  core::OtelParser parser;
+  std::string large_json(17 * 1024 * 1024, ' ');
+  large_json.front() = '[';
+  large_json.back() = ']';
+  auto res = parser.Iterate(large_json);
+  EXPECT_GE(core::OtelParser::ThreadLocalBufferCapacity(), 17 * 1024 * 1024);
+  core::OtelParser::TrimThreadLocalBuffer();
+  EXPECT_LT(core::OtelParser::ThreadLocalBufferCapacity(), 17 * 1024 * 1024);
+}
+
 }  // namespace core
 }  // namespace vector_otel
