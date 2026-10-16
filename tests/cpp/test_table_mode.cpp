@@ -9,6 +9,7 @@ extern "C" {
 #include <lualib.h>
 }
 
+#include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
@@ -223,6 +224,79 @@ TEST_F(TableModeTest, EmptyOrNonTablePayload) {
   auto res2 = extractors::ProcessLogsTable(L_, empty_table_idx, emit_idx_);
   EXPECT_TRUE(res2.success);
   EXPECT_EQ(res2.emitted_count, 0);
+  lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest, SerializeLuaValueToJsonMaxDepthProtection) {
+  const char* script = R"(
+    local root = {}
+    local curr = root
+    for i = 1, 100 do
+      curr.nested = {}
+      curr = curr.nested
+    end
+    return root
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK);
+  core::FastJsonWriter writer;
+  core::SerializeLuaValueToJson(L_, -1, writer);
+  std::string_view json = writer.Str();
+  EXPECT_TRUE(json.find("[max_depth_exceeded]") != std::string_view::npos);
+  lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest, SerializeTableWithNumericKeysDoesNotCorruptIterator) {
+  lua_newtable(L_);
+  lua_pushstring(L_, "alpha");
+  lua_rawseti(L_, -2, 1);
+  lua_pushstring(L_, "beta");
+  lua_rawseti(L_, -2, 42);
+
+  core::FastJsonWriter writer;
+  EXPECT_NO_THROW(core::SerializeLuaValueToJson(L_, -1, writer));
+  std::string_view json = writer.Str();
+  EXPECT_NE(json.find("\"1\":"), std::string_view::npos);
+  EXPECT_NE(json.find("\"42\":"), std::string_view::npos);
+  lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest,
+       PushTableAttributesWithNumericKeysDoesNotCorruptIterator) {
+  lua_newtable(L_);
+  lua_pushstring(L_, "alpha");
+  lua_rawseti(L_, -2, 1);
+  lua_pushstring(L_, "beta");
+  lua_rawseti(L_, -2, 42);
+
+  core::FastJsonWriter writer;
+  EXPECT_NO_THROW(core::PushTableAttributes(L_, -1, writer));
+  int out_idx = lua_gettop(L_);
+  ASSERT_TRUE(lua_istable(L_, out_idx));
+
+  lua_getfield(L_, out_idx, "1");
+  EXPECT_TRUE(lua_isstring(L_, -1));
+  EXPECT_STREQ(lua_tostring(L_, -1), "alpha");
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, out_idx, "42");
+  EXPECT_TRUE(lua_isstring(L_, -1));
+  EXPECT_STREQ(lua_tostring(L_, -1), "beta");
+  lua_pop(L_, 1);
+
+  lua_pop(L_, 2);  // pop out_idx and input table
+}
+
+TEST_F(TableModeTest, SerializeSequentialArrayPreservedAsArray) {
+  lua_newtable(L_);
+  lua_pushstring(L_, "first");
+  lua_rawseti(L_, -2, 1);
+  lua_pushstring(L_, "second");
+  lua_rawseti(L_, -2, 2);
+
+  core::FastJsonWriter writer;
+  EXPECT_NO_THROW(core::SerializeLuaValueToJson(L_, -1, writer));
+  std::string_view json = writer.Str();
+  EXPECT_EQ(json, "[\"first\",\"second\"]");
   lua_pop(L_, 1);
 }
 
