@@ -454,6 +454,113 @@ TEST_F(TracesExtractorTest, DurationInt64OverflowClamped) {
   EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(TracesExtractorTest, ProcessTracesTablePreservesLuaStackDepthOnNestedWrapperAndError) {
+  // 1. Nested { trace = { resourceSpans = { ... } } }
+  const char* trace_wrapper_script = R"(
+    return {
+      trace = {
+        resourceSpans = {
+          {
+            resource = {
+              attributes = {
+                { key = "service.name", value = { stringValue = "nested-trace-svc" } }
+              }
+            },
+            scopeSpans = {
+              {
+                spans = {
+                  {
+                    traceId = "11112222333344445555666677778888",
+                    spanId = "1111222233334444",
+                    name = "nested-span"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, trace_wrapper_script), LUA_OK);
+  int table_idx = lua_gettop(L_);
+  int initial_top = lua_gettop(L_);
+
+  auto res1 = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(res1.success);
+  EXPECT_EQ(res1.emitted_count, 1);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+  lua_pop(L_, 1);
+
+  // 2. Nested { log = { resourceSpans = { ... } } }
+  const char* log_wrapper_script = R"(
+    return {
+      log = {
+        resourceSpans = {
+          {
+            scopeSpans = {
+              {
+                spans = {
+                  {
+                    traceId = "22223333444455556666777788889999",
+                    spanId = "2222333344445555"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, log_wrapper_script), LUA_OK);
+  table_idx = lua_gettop(L_);
+  initial_top = lua_gettop(L_);
+
+  auto res2 = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(res2.success);
+  EXPECT_EQ(res2.emitted_count, 1);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+  lua_pop(L_, 1);
+
+  // 3. { trace = { unrelated = 1 } }
+  const char* unrelated_script = R"(
+    return {
+      trace = {
+        unrelated = 1
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, unrelated_script), LUA_OK);
+  table_idx = lua_gettop(L_);
+  initial_top = lua_gettop(L_);
+
+  auto res3 = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(res3.success);
+  EXPECT_EQ(res3.emitted_count, 0);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+  lua_pop(L_, 1);
+
+  // 4. Error in emit callback during nested { trace = { resourceSpans = ... } }
+  const char* err_emit_script = R"(
+    function err_emit(event)
+      error("simulated emit failure")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, err_emit_script), LUA_OK);
+  lua_getglobal(L_, "err_emit");
+  int err_emit_idx = lua_gettop(L_);
+
+  ASSERT_EQ(luaL_dostring(L_, trace_wrapper_script), LUA_OK);
+  table_idx = lua_gettop(L_);
+  initial_top = lua_gettop(L_);
+
+  auto res4 = ProcessTracesTable(L_, table_idx, err_emit_idx);
+  EXPECT_FALSE(res4.success);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+  lua_pop(L_, 2);  // pop table and err_emit
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel
