@@ -472,6 +472,143 @@ TEST_F(MetricsExtractorTest, InvalidDoubleStringDoesNotSetMetricValueKind) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsHistogramCount) {
+  // 1. Test histogram count clamping in ProcessMetrics (JSON path)
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "clamped_hist_json",
+          "histogram": {
+            "dataPoints": [{
+              "count": "18446744073709551615",
+              "sum": 10.0
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+  int initial_top = lua_gettop(L_);
+  auto json_res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  // 2. Test ProcessMetricsTable with { metric = { resourceMetrics = { ... } } } and UINT64_MAX
+  // count
+  const char* push_nested_metric = R"(
+    return {
+      metric = {
+        resourceMetrics = {
+          {
+            resource = {
+              attributes = {
+                { key = "service.name", value = { stringValue = "tbl-svc" } }
+              }
+            },
+            scopeMetrics = {
+              {
+                metrics = {
+                  {
+                    name = "clamped_hist_tbl",
+                    histogram = {
+                      dataPoints = {
+                        {
+                          startTimeUnixNano = "1630000000000000000",
+                          timeUnixNano = "1630000001000000000",
+                          count = "18446744073709551615",
+                          sum = 20.0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK) << lua_tostring(L_, -1);
+  int table_top = lua_gettop(L_);
+  auto tbl_res1 = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res1.success) << tbl_res1.error;
+  EXPECT_EQ(tbl_res1.emitted_count, 1);
+  EXPECT_EQ(lua_gettop(L_), table_top);
+  lua_pop(L_, 1);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  // Verify both JSON and Table histogram counts were clamped to INT64_MAX (9223372036854775807)
+  const char* verify_clamp = R"(
+    assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
+    local h1 = emitted[1].log.Histogram
+    assert(h1 ~= nil, "h1 missing")
+    assert(h1.count == 9223372036854775807, "h1.count not clamped: " .. tostring(h1.count))
+    assert(h1.Count == 9223372036854775807, "h1.Count not clamped: " .. tostring(h1.Count))
+
+    local e2 = emitted[2].log
+    local h2 = e2.Histogram
+    assert(h2 ~= nil, "h2 missing")
+    assert(h2.count == 9223372036854775807, "h2.count not clamped: " .. tostring(h2.count))
+    assert(h2.Count == 9223372036854775807, "h2.Count not clamped: " .. tostring(h2.Count))
+    assert(e2.StartTimeUnix == "2021-08-26T17:46:40.000000000Z", "StartTimeUnix mismatch: " .. tostring(e2.StartTimeUnix))
+    assert(e2.TimeUnix == "2021-08-26T17:46:41.000000000Z", "TimeUnix mismatch: " .. tostring(e2.TimeUnix))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_clamp), LUA_OK) << lua_tostring(L_, -1);
+
+  // 3. Test ProcessMetricsTable with { log = { resourceMetrics = { ... } } }
+  const char* push_nested_log = R"(
+    return {
+      log = {
+        resourceMetrics = {}
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_nested_log), LUA_OK) << lua_tostring(L_, -1);
+  table_top = lua_gettop(L_);
+  auto tbl_res_log = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res_log.success) << tbl_res_log.error;
+  EXPECT_EQ(tbl_res_log.emitted_count, 0);
+  EXPECT_EQ(lua_gettop(L_), table_top);
+  lua_pop(L_, 1);
+
+  // 4. Test ProcessMetricsTable with { metric = { unrelated = 1 } }
+  const char* push_unrelated = R"(
+    return {
+      metric = {
+        unrelated = 1
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_unrelated), LUA_OK) << lua_tostring(L_, -1);
+  table_top = lua_gettop(L_);
+  auto tbl_res2 = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res2.success) << tbl_res2.error;
+  EXPECT_EQ(tbl_res2.emitted_count, 0);
+  EXPECT_EQ(lua_gettop(L_), table_top);
+  lua_pop(L_, 1);
+
+  // 5. Test ProcessMetricsTable when emit errors preserves stack depth
+  const char* fail_emit_script = R"(
+    function mock_emit(event)
+      error("simulated emit failure in table path")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, fail_emit_script), LUA_OK);
+  lua_getglobal(L_, "mock_emit");
+  lua_replace(L_, 1);
+
+  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK) << lua_tostring(L_, -1);
+  table_top = lua_gettop(L_);
+  auto tbl_res3 = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_FALSE(tbl_res3.success);
+  EXPECT_EQ(lua_gettop(L_), table_top);
+  lua_pop(L_, 1);
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+}
+
 }  // namespace
 
 }  // namespace extractors
