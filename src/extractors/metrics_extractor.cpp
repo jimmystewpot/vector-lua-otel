@@ -214,8 +214,8 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
         if (scope_metric_obj_res.error() != simdjson::SUCCESS) continue;
         auto scope_metric_obj = scope_metric_obj_res.value();
 
-        std::string scope_name;
-        std::string scope_version;
+        std::string_view scope_name;
+        std::string_view scope_version;
         core::ScopedLuaRef scope_attrs_ref(L, LUA_NOREF);
 
         auto scope_field_res = scope_metric_obj.find_field_unordered("scope");
@@ -224,8 +224,8 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           auto scope_obj_res = scope_val.get_object();
           if (scope_obj_res.error() == simdjson::SUCCESS) {
             auto scope_obj = scope_obj_res.value();
-            scope_name = std::string(core::ExtractStringField(scope_obj, "name"));
-            scope_version = std::string(core::ExtractStringField(scope_obj, "version"));
+            scope_name = core::ExtractStringField(scope_obj, "name");
+            scope_version = core::ExtractStringField(scope_obj, "version");
             auto attrs_res = scope_obj.find_field_unordered("attributes");
             if (attrs_res.error() == simdjson::SUCCESS && L != nullptr) {
               auto attrs_val = attrs_res.value();
@@ -256,11 +256,11 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           if (metric_obj_res.error() != simdjson::SUCCESS) continue;
           auto metric_obj = metric_obj_res.value();
 
-          std::string metric_name(core::ExtractStringField(metric_obj, "name"));
-          std::string metric_desc(core::ExtractStringField(metric_obj, "description"));
-          std::string metric_unit(core::ExtractStringField(metric_obj, "unit"));
+          std::string_view metric_name = core::ExtractStringField(metric_obj, "name");
+          std::string_view metric_desc = core::ExtractStringField(metric_obj, "description");
+          std::string_view metric_unit = core::ExtractStringField(metric_obj, "unit");
 
-          std::string metric_type;
+          std::string_view metric_type;
           simdjson::ondemand::value type_val;
 
           auto gauge_res = metric_obj.find_field_unordered("gauge");
