@@ -16,7 +16,7 @@ namespace core {
 
 std::string_view ExtractServiceName(simdjson::ondemand::object& resource_obj);
 void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
-                         FastJsonWriter& json_writer);
+                         FastJsonWriter& json_writer, std::string_view* out_service_name = nullptr);
 void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer);
 int64_t ParseInt64(simdjson::ondemand::value& val);
 uint64_t ParseUint64(simdjson::ondemand::value& val);

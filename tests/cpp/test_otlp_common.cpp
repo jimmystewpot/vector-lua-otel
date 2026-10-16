@@ -660,6 +660,131 @@ TEST_F(OtlpCommonTest, ParseInt64DoubleAndWhitespace) {
   EXPECT_EQ(ParseInt64(v_empty), 0);
 }
 
+TEST_F(OtlpCommonTest, RejectsTrailingGarbageInNumericStrings) {
+  auto json = R"({
+    "bad_int": "123abc",
+    "bad_uint": "456xyz",
+    "bad_dbl": "12.34bad"
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  auto v_int = obj["bad_int"].value();
+  EXPECT_EQ(ParseInt64(v_int), 0);
+
+  auto v_uint = obj["bad_uint"].value();
+  EXPECT_EQ(ParseUint64(v_uint), 0ULL);
+
+  auto v_dbl = obj["bad_dbl"].value();
+  double out = -1.0;
+  EXPECT_FALSE(TryParseDouble(v_dbl, out));
+  EXPECT_DOUBLE_EQ(out, -1.0);
+}
+
+TEST_F(OtlpCommonTest, ParseInt64OutOfRangeDoubleDoesNotInvokeUB) {
+  auto json = R"({
+    "huge_pos": 1e30,
+    "huge_neg": -1e30,
+    "two_pow_63": 9223372036854775808.0
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  auto v_pos = obj["huge_pos"].value();
+  EXPECT_EQ(ParseInt64(v_pos), 0);
+
+  auto v_neg = obj["huge_neg"].value();
+  EXPECT_EQ(ParseInt64(v_neg), 0);
+
+  auto v_lim = obj["two_pow_63"].value();
+  EXPECT_EQ(ParseInt64(v_lim), 0);
+}
+
+TEST_F(OtlpCommonTest, PushAnyValueClampsUint64AboveInt64Max) {
+  auto json = R"({
+    "raw_u64": 18446744073709551615,
+    "obj_int_u64_num": { "intValue": 18446744073709551615 },
+    "obj_int_u64_str": { "intValue": "18446744073709551615" }
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  {
+    auto v = obj["raw_u64"].value();
+    PushAnyValue(L_, v, writer_);
+    EXPECT_TRUE(lua_isinteger(L_, -1));
+    EXPECT_EQ(lua_tointeger(L_, -1), INT64_MAX);
+    lua_pop(L_, 1);
+  }
+  {
+    auto v = obj["obj_int_u64_num"].value();
+    PushAnyValue(L_, v, writer_);
+    EXPECT_TRUE(lua_isinteger(L_, -1));
+    EXPECT_EQ(lua_tointeger(L_, -1), INT64_MAX);
+    lua_pop(L_, 1);
+  }
+  {
+    auto v = obj["obj_int_u64_str"].value();
+    PushAnyValue(L_, v, writer_);
+    EXPECT_TRUE(lua_isinteger(L_, -1));
+    EXPECT_EQ(lua_tointeger(L_, -1), INT64_MAX);
+    lua_pop(L_, 1);
+  }
+}
+
+TEST_F(OtlpCommonTest, PushAttributesTableExtractsServiceNameSinglePass) {
+  // 1. KV-array format with "service.name"
+  {
+    auto json = R"({
+      "attributes": [
+        { "key": "service.name", "value": { "stringValue": "kv-array-svc" } },
+        { "key": "env", "value": { "stringValue": "staging" } }
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    std::string_view svc_name = "unknown_service";
+    PushAttributesTable(L_, attrs, writer_, &svc_name);
+    EXPECT_EQ(svc_name, "kv-array-svc");
+    ASSERT_TRUE(lua_istable(L_, -1));
+    lua_getfield(L_, -1, "service.name");
+    EXPECT_STREQ(lua_tostring(L_, -1), "kv-array-svc");
+    lua_pop(L_, 1);
+    lua_getfield(L_, -1, "env");
+    EXPECT_STREQ(lua_tostring(L_, -1), "staging");
+    lua_pop(L_, 2);
+  }
+
+  // 2. Object-map format with "service_name"
+  {
+    auto json = R"({
+      "attributes": {
+        "service_name": "map-snake-svc",
+        "region": "us-east-1"
+      }
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    std::string_view svc_name = "unknown_service";
+    PushAttributesTable(L_, attrs, writer_, &svc_name);
+    EXPECT_EQ(svc_name, "map-snake-svc");
+    ASSERT_TRUE(lua_istable(L_, -1));
+    lua_getfield(L_, -1, "service_name");
+    EXPECT_STREQ(lua_tostring(L_, -1), "map-snake-svc");
+    lua_pop(L_, 1);
+    lua_getfield(L_, -1, "region");
+    EXPECT_STREQ(lua_tostring(L_, -1), "us-east-1");
+    lua_pop(L_, 2);
+  }
+}
+
 }  // namespace
 }  // namespace core
 }  // namespace vector_otel
