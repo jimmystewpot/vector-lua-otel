@@ -46,7 +46,9 @@ class ScopedLuaRef {
   }
 
   int get() const noexcept { return ref_; }
-  bool valid() const noexcept { return L_ != nullptr && ref_ != LUA_NOREF && ref_ != LUA_REFNIL; }
+  bool valid() const noexcept {
+    return L_ != nullptr && ref_ != LUA_NOREF && ref_ != LUA_REFNIL;
+  }
 
   void reset(int new_ref = LUA_NOREF) noexcept {
     if (valid()) {
@@ -72,15 +74,65 @@ constexpr size_t kCompileTimeBatchSize = VECTOR_OTEL_EMIT_BATCH_SIZE;
 
 class LuaEmitter {
  public:
-  explicit LuaEmitter(lua_State* L, int emit_index, size_t batch_size = kCompileTimeBatchSize,
+  explicit LuaEmitter(lua_State* L, int emit_index,
+                      size_t batch_size = kCompileTimeBatchSize,
                       std::string_view record_field_name = "log");
-  ~LuaEmitter() = default;
+  ~LuaEmitter() {
+    if (L_ != nullptr && (in_record_ || has_error_)) {
+      lua_settop(L_, initial_top_);
+    }
+  }
 
   // Non-copyable
   LuaEmitter(const LuaEmitter&) = delete;
   LuaEmitter& operator=(const LuaEmitter&) = delete;
-  LuaEmitter(LuaEmitter&&) = default;
-  LuaEmitter& operator=(LuaEmitter&&) = default;
+
+  // Move-constructible and move-assignable
+  LuaEmitter(LuaEmitter&& other) noexcept
+      : L_(other.L_),
+        initial_top_(other.initial_top_),
+        emit_index_(other.emit_index_),
+        emitted_count_(other.emitted_count_),
+        batch_size_(other.batch_size_),
+        record_field_name_(other.record_field_name_),
+        current_batch_count_(other.current_batch_count_),
+        in_record_(other.in_record_),
+        has_error_(other.has_error_),
+        error_message_(std::move(other.error_message_)),
+        record_index_(other.record_index_),
+        event_index_(other.event_index_),
+        event_ref_(std::move(other.event_ref_)),
+        records_ref_(std::move(other.records_ref_)) {
+    other.L_ = nullptr;
+    other.in_record_ = false;
+    other.has_error_ = false;
+  }
+
+  LuaEmitter& operator=(LuaEmitter&& other) noexcept {
+    if (this != &other) {
+      if (L_ != nullptr && (in_record_ || has_error_)) {
+        lua_settop(L_, initial_top_);
+      }
+      L_ = other.L_;
+      initial_top_ = other.initial_top_;
+      emit_index_ = other.emit_index_;
+      emitted_count_ = other.emitted_count_;
+      batch_size_ = other.batch_size_;
+      record_field_name_ = other.record_field_name_;
+      current_batch_count_ = other.current_batch_count_;
+      in_record_ = other.in_record_;
+      has_error_ = other.has_error_;
+      error_message_ = std::move(other.error_message_);
+      record_index_ = other.record_index_;
+      event_index_ = other.event_index_;
+      event_ref_ = std::move(other.event_ref_);
+      records_ref_ = std::move(other.records_ref_);
+      other.L_ = nullptr;
+      other.in_record_ = false;
+      other.has_error_ = false;
+    }
+    return *this;
+  }
 
   void StartRecord();
   void SetString(std::string_view key, std::string_view val);
@@ -100,6 +152,7 @@ class LuaEmitter {
   void EmitCurrentBatch();
 
   lua_State* L_{nullptr};
+  int initial_top_{0};
   int emit_index_{0};
   int emitted_count_{0};
   size_t batch_size_{kCompileTimeBatchSize};
