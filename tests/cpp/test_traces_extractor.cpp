@@ -217,6 +217,44 @@ TEST_F(TracesExtractorTest, UnorderedKeysHandling) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(TracesExtractorTest, OutOfOrderFieldsExtractedCorrectly) {
+  const std::string json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "scope": {},
+        "spans": [{
+          "attributes": [{"key": "app", "value": {"stringValue": "demo"}}],
+          "status": {"message": "ok", "code": 1},
+          "events": [{"timeUnixNano": "1700000000100000000", "name": "ev1"}],
+          "links": [{"traceId": "0123456789abcdef0123456789abcdef", "spanId": "0123456789abcdef"}],
+          "name": "span_op",
+          "endTimeUnixNano": "1700000001000000000",
+          "startTimeUnixNano": "1700000000000000000",
+          "spanId": "0123456789abcdef",
+          "traceId": "0123456789abcdef0123456789abcdef"
+        }]
+      }]
+    }]
+  })";
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    local r = emitted[#emitted].log
+    assert(r ~= nil)
+    assert(r.SpanName == "span_op")
+    assert(r.SpanAttributes.app == "demo")
+    assert(r.StatusCode == "STATUS_CODE_OK")
+    assert(r.StatusMessage == "ok")
+    assert(r.Duration == 1000000000)
+    assert(r.Events:find("ev1") ~= nil)
+    assert(r.Links:find("0123456789abcdef") ~= nil)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 TEST_F(TracesExtractorTest, EmptyAndMissingBatches) {
   // 1. Empty JSON object
   auto r1 = ProcessTraces(L_, "{}", emit_idx_);
@@ -229,8 +267,9 @@ TEST_F(TracesExtractorTest, EmptyAndMissingBatches) {
   EXPECT_EQ(r2.emitted_count, 0);
 
   // 3. ResourceSpans with empty scopeSpans
-  auto r3 =
-      ProcessTraces(L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}", emit_idx_);
+  auto r3 = ProcessTraces(
+      L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}",
+      emit_idx_);
   EXPECT_TRUE(r3.success);
   EXPECT_EQ(r3.emitted_count, 0);
 
