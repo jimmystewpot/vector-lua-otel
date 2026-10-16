@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 extern "C" {
@@ -45,9 +46,7 @@ class ScopedLuaRef {
   }
 
   int get() const noexcept { return ref_; }
-  bool valid() const noexcept {
-    return L_ != nullptr && ref_ != LUA_NOREF && ref_ != LUA_REFNIL;
-  }
+  bool valid() const noexcept { return L_ != nullptr && ref_ != LUA_NOREF && ref_ != LUA_REFNIL; }
 
   void reset(int new_ref = LUA_NOREF) noexcept {
     if (valid()) {
@@ -73,8 +72,8 @@ constexpr size_t kCompileTimeBatchSize = VECTOR_OTEL_EMIT_BATCH_SIZE;
 
 class LuaEmitter {
  public:
-  explicit LuaEmitter(lua_State* L, int emit_index,
-                      size_t batch_size = kCompileTimeBatchSize);
+  explicit LuaEmitter(lua_State* L, int emit_index, size_t batch_size = kCompileTimeBatchSize,
+                      std::string_view record_field_name = "log");
   ~LuaEmitter() = default;
 
   // Non-copyable
@@ -94,6 +93,8 @@ class LuaEmitter {
   void Flush();
   int EmittedCount() const;
   size_t BatchSize() const { return batch_size_; }
+  bool HasError() const noexcept { return has_error_; }
+  std::string_view ErrorMessage() const noexcept { return error_message_; }
 
  private:
   void EmitCurrentBatch();
@@ -102,8 +103,11 @@ class LuaEmitter {
   int emit_index_{0};
   int emitted_count_{0};
   size_t batch_size_{kCompileTimeBatchSize};
+  std::string_view record_field_name_{"log"};
   int current_batch_count_{0};
   bool in_record_{false};
+  bool has_error_{false};
+  std::string error_message_;
   int record_index_{0};
   int event_index_{0};
   ScopedLuaRef event_ref_;

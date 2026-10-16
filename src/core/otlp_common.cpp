@@ -8,8 +8,7 @@
 namespace vector_otel {
 namespace core {
 
-std::string_view ExtractStringField(simdjson::ondemand::object& obj,
-                                    std::string_view key,
+std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string_view key,
                                     std::string_view default_val) {
   auto val_res = obj.find_field_unordered(key);
   if (val_res.error() != simdjson::SUCCESS) {
@@ -45,24 +44,22 @@ int64_t ParseInt64(simdjson::ondemand::value& val) {
     auto str_res = val.get_string();
     if (str_res.error() == simdjson::SUCCESS) {
       std::string_view sv = str_res.value();
-      while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' ||
-                             sv.front() == '\r' || sv.front() == '\n')) {
+      while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' ||
+                             sv.front() == '\n')) {
         sv.remove_prefix(1);
       }
-      while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' ||
-                             sv.back() == '\r' || sv.back() == '\n')) {
+      while (!sv.empty() &&
+             (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
         sv.remove_suffix(1);
       }
       if (!sv.empty()) {
         int64_t sval = 0;
-        auto [ptr, ec] =
-            std::from_chars(sv.data(), sv.data() + sv.size(), sval);
+        auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), sval);
         if (ec == std::errc()) {
           return sval;
         }
         uint64_t uval = 0;
-        auto [uptr, uec] =
-            std::from_chars(sv.data(), sv.data() + sv.size(), uval);
+        auto [uptr, uec] = std::from_chars(sv.data(), sv.data() + sv.size(), uval);
         if (uec == std::errc()) {
           return static_cast<int64_t>(uval);
         }
@@ -94,24 +91,22 @@ uint64_t ParseUint64(simdjson::ondemand::value& val) {
     auto str_res = val.get_string();
     if (str_res.error() == simdjson::SUCCESS) {
       std::string_view sv = str_res.value();
-      while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' ||
-                             sv.front() == '\r' || sv.front() == '\n')) {
+      while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' ||
+                             sv.front() == '\n')) {
         sv.remove_prefix(1);
       }
-      while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' ||
-                             sv.back() == '\r' || sv.back() == '\n')) {
+      while (!sv.empty() &&
+             (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
         sv.remove_suffix(1);
       }
       if (!sv.empty()) {
         uint64_t uval = 0;
-        auto [uptr, uec] =
-            std::from_chars(sv.data(), sv.data() + sv.size(), uval);
+        auto [uptr, uec] = std::from_chars(sv.data(), sv.data() + sv.size(), uval);
         if (uec == std::errc()) {
           return uval;
         }
         int64_t sval = 0;
-        auto [ptr, ec] =
-            std::from_chars(sv.data(), sv.data() + sv.size(), sval);
+        auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), sval);
         if (ec == std::errc()) {
           return static_cast<uint64_t>(sval);
         }
@@ -121,7 +116,7 @@ uint64_t ParseUint64(simdjson::ondemand::value& val) {
   return 0;
 }
 
-std::string ExtractServiceName(simdjson::ondemand::object& resource_obj) {
+std::string_view ExtractServiceName(simdjson::ondemand::object& resource_obj) {
   auto attrs_res = resource_obj.find_field_unordered("attributes");
   if (attrs_res.error() != simdjson::SUCCESS) {
     return "unknown_service";
@@ -158,10 +153,9 @@ std::string ExtractServiceName(simdjson::ondemand::object& resource_obj) {
         if (val_type_res.value() == simdjson::ondemand::json_type::string) {
           auto str_res = val.get_string();
           if (str_res.error() == simdjson::SUCCESS) {
-            return std::string(str_res.value());
+            return str_res.value();
           }
-        } else if (val_type_res.value() ==
-                   simdjson::ondemand::json_type::object) {
+        } else if (val_type_res.value() == simdjson::ondemand::json_type::object) {
           auto val_obj_res = val.get_object();
           if (val_obj_res.error() == simdjson::SUCCESS) {
             auto val_obj = val_obj_res.value();
@@ -169,14 +163,14 @@ std::string ExtractServiceName(simdjson::ondemand::object& resource_obj) {
             if (sv_res.error() == simdjson::SUCCESS) {
               auto str_res = sv_res.value().get_string();
               if (str_res.error() == simdjson::SUCCESS) {
-                return std::string(str_res.value());
+                return str_res.value();
               }
             }
             auto sv_snake_res = val_obj.find_field_unordered("string_value");
             if (sv_snake_res.error() == simdjson::SUCCESS) {
               auto str_res = sv_snake_res.value().get_string();
               if (str_res.error() == simdjson::SUCCESS) {
-                return std::string(str_res.value());
+                return str_res.value();
               }
             }
           }
@@ -196,7 +190,7 @@ std::string ExtractServiceName(simdjson::ondemand::object& resource_obj) {
           if (val_type == simdjson::ondemand::json_type::string) {
             auto s_res = svc_val.get_string();
             if (s_res.error() == simdjson::SUCCESS) {
-              return std::string(s_res.value());
+              return s_res.value();
             }
           } else if (val_type == simdjson::ondemand::json_type::object) {
             auto val_obj_res = svc_val.get_object();
@@ -206,14 +200,14 @@ std::string ExtractServiceName(simdjson::ondemand::object& resource_obj) {
               if (sv_res.error() == simdjson::SUCCESS) {
                 auto str_res = sv_res.value().get_string();
                 if (str_res.error() == simdjson::SUCCESS) {
-                  return std::string(str_res.value());
+                  return str_res.value();
                 }
               }
               auto sv_snake_res = val_obj.find_field_unordered("string_value");
               if (sv_snake_res.error() == simdjson::SUCCESS) {
                 auto str_res = sv_snake_res.value().get_string();
                 if (str_res.error() == simdjson::SUCCESS) {
-                  return std::string(str_res.value());
+                  return str_res.value();
                 }
               }
             }
@@ -225,8 +219,42 @@ std::string ExtractServiceName(simdjson::ondemand::object& resource_obj) {
   return "unknown_service";
 }
 
-void PushAnyValue(lua_State* L, simdjson::ondemand::value& val,
-                  FastJsonWriter& json_writer) {
+double ParseDouble(simdjson::ondemand::value& val) {
+  auto type_res = val.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return 0.0;
+  }
+  auto type = type_res.value();
+  if (type == simdjson::ondemand::json_type::number) {
+    auto num_res = val.get_double();
+    if (num_res.error() == simdjson::SUCCESS) {
+      return num_res.value();
+    }
+  } else if (type == simdjson::ondemand::json_type::string) {
+    auto str_res = val.get_string();
+    if (str_res.error() == simdjson::SUCCESS) {
+      std::string_view sv = str_res.value();
+      while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' ||
+                             sv.front() == '\n')) {
+        sv.remove_prefix(1);
+      }
+      while (!sv.empty() &&
+             (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
+        sv.remove_suffix(1);
+      }
+      if (!sv.empty()) {
+        double d = 0.0;
+        auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), d);
+        if (ec == std::errc()) {
+          return d;
+        }
+      }
+    }
+  }
+  return 0.0;
+}
+
+void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer) {
   if (L == nullptr) {
     return;
   }
@@ -268,26 +296,7 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val,
         matched = true;
         break;
       } else if (k == "doubleValue" || k == "double_value") {
-        auto num_res = fv.get_double();
-        if (num_res.error() == simdjson::SUCCESS) {
-          lua_pushnumber(L, num_res.value());
-          matched = true;
-          break;
-        } else {
-          auto s_res = fv.get_string();
-          if (s_res.error() == simdjson::SUCCESS) {
-            double d = 0.0;
-            std::string s(s_res.value());
-            try {
-              d = std::stod(s);
-            } catch (...) {
-            }
-            lua_pushnumber(L, d);
-            matched = true;
-            break;
-          }
-        }
-        lua_pushnumber(L, 0.0);
+        lua_pushnumber(L, ParseDouble(fv));
         matched = true;
         break;
       } else if (k == "boolValue" || k == "bool_value") {
@@ -300,9 +309,8 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val,
         lua_pushboolean(L, 0);
         matched = true;
         break;
-      } else if (k == "arrayValue" || k == "array_value" ||
-                 k == "kvlistValue" || k == "kvlist_value" ||
-                 k == "bytesValue" || k == "bytes_value") {
+      } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
+                 k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
         auto raw_res = fv.raw_json();
         std::string raw_str;
         if (raw_res.error() == simdjson::SUCCESS) {
@@ -320,9 +328,8 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val,
         if (!sv.empty()) {
           lua_pushlstring(L, sv.data(), sv.size());
         } else {
-          std::string fallback = "{\"" + std::string(k) +
-                                 "\":" + (raw_str.empty() ? "{}" : raw_str) +
-                                 "}";
+          std::string fallback =
+              "{\"" + std::string(k) + "\":" + (raw_str.empty() ? "{}" : raw_str) + "}";
           lua_pushlstring(L, fallback.data(), fallback.size());
         }
         matched = true;

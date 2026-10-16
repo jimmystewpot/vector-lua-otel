@@ -65,8 +65,7 @@ class MetricsExtractorTest : public ::testing::Test {
 
 TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
   std::string json_data = ReadFixture("tests/fixtures/metrics_sample.json");
-  ASSERT_FALSE(json_data.empty())
-      << "Failed to read tests/fixtures/metrics_sample.json";
+  ASSERT_FALSE(json_data.empty()) << "Failed to read tests/fixtures/metrics_sample.json";
 
   int initial_top = lua_gettop(L_);
   auto result = ProcessMetrics(L_, json_data, 1);
@@ -187,15 +186,13 @@ TEST_F(MetricsExtractorTest, EmptyAndSparsePayloads) {
   EXPECT_EQ(res4.emitted_count, 0);
 
   // resourceMetrics with empty scopeMetrics
-  auto res5 =
-      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
+  auto res5 = ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
   EXPECT_TRUE(res5.success);
   EXPECT_EQ(res5.emitted_count, 0);
 
   // scopeMetrics with empty metrics
-  auto res6 = ProcessMetrics(
-      L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}",
-      1);
+  auto res6 =
+      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}", 1);
   EXPECT_TRUE(res6.success);
   EXPECT_EQ(res6.emitted_count, 0);
 }

@@ -44,6 +44,15 @@ TEST(TimestampTest, FormatIso8601NanoNullBuffer) {
   SUCCEED();
 }
 
+TEST(TimestampTest, FormatIso8601NanoUint64Max) {
+  // UINT64_MAX nanoseconds is year 2554: 2554-07-21T23:34:33.709551615Z
+  uint64_t ts_max = UINT64_MAX;
+  char buf[32];
+  FormatIso8601Nano(ts_max, buf);
+  EXPECT_STREQ(buf, "2554-07-21T23:34:33.709551615Z");
+  EXPECT_EQ(FormatIso8601Nano(ts_max), "2554-07-21T23:34:33.709551615Z");
+}
+
 TEST(TimestampTest, CurrentTimeUnixNanoNonZero) {
   uint64_t now1 = CurrentTimeUnixNano();
   // Ensure timestamp is strictly in the plausible current epoch range (> year

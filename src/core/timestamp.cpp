@@ -1,6 +1,7 @@
 #include "vector_otel/core/timestamp.hpp"
 
 #include <chrono>
+#include <cstring>
 
 namespace vector_otel {
 namespace core {
@@ -20,6 +21,11 @@ void FormatIso8601Nano(uint64_t unix_nanos, char* out_buf_32bytes) {
   const hh_mm_ss hms{tp - dp};
 
   const int y = static_cast<int>(ymd.year());
+  if (y < 1000 || y > 9999) {
+    std::memcpy(out_buf_32bytes, "1970-01-01T00:00:00.000000000Z", 30);
+    out_buf_32bytes[30] = '\0';
+    return;
+  }
   const unsigned m = static_cast<unsigned>(ymd.month());
   const unsigned d = static_cast<unsigned>(ymd.day());
   const long long hh = hms.hours().count();
@@ -64,8 +70,7 @@ std::string FormatIso8601Nano(uint64_t unix_nanos) {
 
 uint64_t CurrentTimeUnixNano() {
   const auto now = std::chrono::system_clock::now().time_since_epoch();
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
 }  // namespace core

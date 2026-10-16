@@ -138,6 +138,16 @@ assert(count == 0 and err == nil, "Empty table traces must return 0, nil")
 count, err = vo.metrics.process({}, dummy_emit)
 assert(count == 0 and err == nil, "Empty table metrics must return 0, nil")
 
+-- Test 6: Protected emit callback error returns failure tuple without crashing
+local failing_emit = function(ev)
+    error("downstream backpressure: buffer full")
+end
+local log_sample = [[{"resourceLogs": [{"scopeLogs": [{"logRecords": [{"body": {"stringValue": "hi"}}]}]}]}]]
+count, err, emitted = vo.logs.process(log_sample, failing_emit)
+assert(count == nil, "failing emit must return nil count")
+assert(type(err) == "string" and err:find("downstream backpressure"), "error must capture emit error message, got: " .. tostring(err))
+assert(emitted == 0, "emitted count must be 0")
+
 print("   Error contracts passed.")
 
 --------------------------------------------------------------------------------

@@ -45,9 +45,9 @@ Every modification to this repository **must** strictly adhere to the following 
    - `simdjson::ondemand` requires 64 bytes (`simdjson::SIMDJSON_PADDING`) beyond the input string to prevent buffer over-reads during SIMD vector loads.
    - Input strings passed from Lua (`lua_tolstring`) must be inspected and safely copied to a padded `thread_local` buffer if not already padded.
 
-7. **Top-Level `source:` Initialization in Vector Transforms**:
+7. **Top-Level `source:` Initialisation in Vector Transforms**:
    - Modifying `package.cpath` and calling `require("vector_otel")` must occur strictly in the top-level `source:` block.
-   - **Never** call `require()` or alter `package.cpath` inside `hooks.process`. This would trigger repetitive module table initialization and cause memory leaks.
+   - **Never** call `require()` or alter `package.cpath` inside `hooks.process`. This would trigger repetitive module table initialisation and cause memory leaks.
 
 ---
 
@@ -96,7 +96,7 @@ Every modification to this repository **must** strictly adhere to the following 
 │   └── googletest.cmake                # FetchContent for GoogleTest
 ├── include/vector_otel/
 │   ├── core/
-│   │   ├── fast_json_writer.hpp        # Allocation-free JSON serializer
+│   │   ├── fast_json_writer.hpp        # Allocation-free JSON serialiser
 │   │   ├── lua_bridge.hpp              # Lua stack management & batch emitter
 │   │   ├── otlp_common.hpp             # Shared AnyValue decoding & attributes
 │   │   ├── parser.hpp                  # simdjson ondemand & padding manager
@@ -174,7 +174,7 @@ clang-format --dry-run --Werror -style=Google \
   - `test: ...` for adding or refactoring tests
   - `docs: ...` for documentation additions or corrections
   - `bench: ...` for benchmark harness updates
-  - `refactor: ...` for code refactoring without behavior changes
+  - `refactor: ...` for code refactoring without behaviour changes
   - `build: ...` for CMake or dependency updates
 - Keep commits focused and atomic.
 - Superpowers artifacts in `.superpowers/` and plan notes in `docs/superpowers/` are local working artifacts and should never be committed to repository history unless explicitly instructed.

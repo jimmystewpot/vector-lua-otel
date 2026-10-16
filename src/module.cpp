@@ -14,10 +14,9 @@ extern "C" {
 
 namespace {
 
-using ExtractorStringFn = vector_otel::extractors::ExtractionResult (*)(
-    lua_State*, std::string_view, int);
-using ExtractorTableFn =
-    vector_otel::extractors::ExtractionResult (*)(lua_State*, int, int);
+using ExtractorStringFn = vector_otel::extractors::ExtractionResult (*)(lua_State*,
+                                                                        std::string_view, int);
+using ExtractorTableFn = vector_otel::extractors::ExtractionResult (*)(lua_State*, int, int);
 
 template <ExtractorStringFn StringExtractor, ExtractorTableFn TableExtractor>
 int ProcessDispatcher(lua_State* L) {

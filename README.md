@@ -15,7 +15,7 @@
 - [Architecture and Data Flow](#architecture-and-data-flow)
 - [Performance and Benchmarks](#performance-and-benchmarks)
   - [Throughput & Speedup Comparison](#table-1-throughput-and-speedup-comparison)
-  - [Memory Utilization & Allocation Footprint](#table-2-memory-utilization--allocation-footprint)
+  - [Memory Utilisation & Allocation Footprint](#table-2-memory-utilisation--allocation-footprint)
   - [Key Takeaways](#key-takeaways)
 - [Prerequisites and Toolchain](#prerequisites-and-toolchain)
 - [Build and Installation](#build-and-installation)
@@ -49,7 +49,7 @@ When receiving OTLP JSON batches through Vector's HTTP, Kafka, or file sources, 
 3. **Loss of 64-bit Integer Precision**: Standard JSON parsers often cast 64-bit numbers (`timeUnixNano`, `duration`, `intValue`) to 64-bit floating-point doubles, corrupting high-precision nanosecond timestamps beyond 53 bits.
 
 **vector-lua-otel solves this by:**
-- Utilizing **simdjson 5.0.5 On-Demand** parsing with AVX-512, AVX2, SSE4.2, and ARM NEON hardware acceleration.
+- Utilising **simdjson 5.0.5 On-Demand** parsing with AVX-512, AVX2, SSE4.2, and ARM NEON hardware acceleration.
 - Maintaining **$O(1)$ streaming memory**: extracting and emitting records incrementally without buffering the batch in C++ or Lua.
 - Reusing thread-local string buffers and zero-copy string views to achieve **zero heap allocations in hot extraction loops**.
 - Preserving **exact 64-bit integers** (via Lua 5.4 native integer support) and formatting all timestamps as **ISO-8601 UTC strings with 9 fractional digits** (nanosecond precision).
@@ -103,7 +103,7 @@ The diagram below illustrates the end-to-end data lifecycle from input source th
 
 ## Performance and Benchmarks
 
-Benchmarked on Linux x86-64 (24 cores) using Vector 0.59.0 and a 100,000-record OTLP logs fixture across batch sizes ($N \in \{1, 16, 128\}$), measuring both processing throughput and process memory footprints (Peak Max RSS and Minor Page Faults via `/usr/bin/time -v`):
+Benchmarked on Linux x86-64 (16 cores) using Vector 0.59.0 and a 100,000-record OTLP logs fixture across batch sizes ($N \in \{1, 16, 128\}$), measuring both processing throughput and process memory footprints (Peak Max RSS and Minor Page Faults via `/usr/bin/time -v`):
 
 ### Table 1: Throughput and Speedup Comparison
 
@@ -113,7 +113,7 @@ Benchmarked on Linux x86-64 (24 cores) using Vector 0.59.0 and a 100,000-record 
 | **16** | 100,000 | 60.1 MB | 81,208 | 81,779 | 1.01x | 81,286 | 1.00x |
 | **128** | 100,096 | 56.0 MB | 16,750 | 82,051 | **4.90x** | 82,299 | **4.91x** |
 
-### Table 2: Memory Utilization & Allocation Footprint
+### Table 2: Memory Utilisation & Allocation Footprint
 
 | Batch Size ($N$) | VRL Max RSS (MB) | Lua $N=1$ RSS (MB) | Lua Matched RSS (MB) | Memory Reduction | VRL Page Faults | Lua $N=1$ Faults | Lua Matched Faults | Faults Reduction |
 |:---|:---|:---|:---|:---|:---|:---|:---|:---|
@@ -191,7 +191,7 @@ Pass these options to `cmake -B build`:
 | Flag | Default | Description |
 |:---|:---|:---|
 | `-DCMAKE_BUILD_TYPE` | `Release` | Build mode (`Release`, `Debug`, `RelWithDebInfo`) |
-| `-DENABLE_NATIVE_TUNING=ON` | `OFF` | Enables `-march=native` compiler optimizations |
+| `-DENABLE_NATIVE_TUNING=ON` | `OFF` | Enables `-march=native` compiler optimisations |
 | `-DVECTOR_OTEL_EMIT_BATCH_SIZE=N`| `1` | Compile-time emit batch size ($N \ge 1$) |
 
 ---
@@ -201,7 +201,7 @@ Pass these options to `cmake -B build`:
 Vector's Lua transform version 2 (`version = "2"`) executes in a persistent Lua state. `package.cpath` and module loading **must** occur in the top-level `source:` script, outside the per-event `process()` hook.
 
 `vector_otel.so` supports **dual-mode ingestion**:
-- **Decoded Lua Table Mode**: Vector's industry-standard [`opentelemetry` source](https://vector.dev/docs/reference/configuration/sources/opentelemetry/) with [`use_otlp_decoding: true`](https://vector.dev/docs/reference/configuration/sources/opentelemetry/#use_otlp_decoding) parses incoming Protobuf/gRPC or HTTP payloads into native Lua tables (`event.log.resourceLogs`, `resourceSpans`, `resourceMetrics`). `vector_otel.so` traverses these tables directly in C++ with zero intermediate JSON serialization.
+- **Decoded Lua Table Mode**: Vector's industry-standard [`opentelemetry` source](https://vector.dev/docs/reference/configuration/sources/opentelemetry/) with [`use_otlp_decoding: true`](https://vector.dev/docs/reference/configuration/sources/opentelemetry/#use_otlp_decoding) parses incoming Protobuf/gRPC or HTTP payloads into native Lua tables (`event.log.resourceLogs`, `resourceSpans`, `resourceMetrics`). `vector_otel.so` traverses these tables directly in C++ with zero intermediate JSON serialisation.
 - **Raw JSON String Mode**: When receiving raw JSON / NDJSON strings via HTTP server, Kafka, or stdin (`event.log.message`), `vector_otel.so` executes SIMD-accelerated on-demand parsing via `simdjson`.
 
 ### YAML Configuration (Industry Standard: OTLP Source -> Lua Transform -> S3 Parquet Sink)
@@ -228,7 +228,7 @@ transforms:
       -- Prepend path to vector_otel.so
       package.cpath = "/usr/local/lib/lua/5.4/?.so;/opt/vector/lib/?.so;" .. package.cpath
 
-      -- Require the extractor submodule once during initialization
+      -- Require the extractor submodule once during initialisation
       local otel_logs = require("vector_otel").logs
 
       function process(event, emit)
@@ -340,7 +340,7 @@ level = 3
 
 ### Configuration Invariants
 
-1. **Top-Level `source:` Initialization**:
+1. **Top-Level `source:` Initialisation**:
    - `package.cpath` modifications and `require("vector_otel")` calls must happen **once** in the top-level script block.
    - **Never** call `require()` or alter `package.cpath` inside `hooks.process`. Doing so causes severe CPU overhead and memory leaks.
 2. **Error Handling (`if not count then`)**:

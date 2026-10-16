@@ -11,8 +11,7 @@
 namespace vector_otel {
 namespace core {
 
-bool GetTableField(lua_State* L, int table_idx, const char* name1,
-                   const char* name2) {
+bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2) {
   int abs_idx = lua_absindex(L, table_idx);
   lua_getfield(L, abs_idx, name1);
   if (!lua_isnil(L, -1)) {
@@ -29,8 +28,8 @@ bool GetTableField(lua_State* L, int table_idx, const char* name1,
   return false;
 }
 
-std::string ReadTableString(lua_State* L, int table_idx, const char* name1,
-                            const char* name2, std::string_view default_val) {
+std::string ReadTableString(lua_State* L, int table_idx, const char* name1, const char* name2,
+                            std::string_view default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     if (lua_isstring(L, -1)) {
       size_t len = 0;
@@ -44,8 +43,8 @@ std::string ReadTableString(lua_State* L, int table_idx, const char* name1,
   return std::string(default_val);
 }
 
-int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1,
-                       const char* name2, int64_t default_val) {
+int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2,
+                       int64_t default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
     if (t == LUA_TNUMBER) {
@@ -69,8 +68,8 @@ int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1,
   return default_val;
 }
 
-uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1,
-                         const char* name2, uint64_t default_val) {
+uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1, const char* name2,
+                         uint64_t default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
     if (t == LUA_TNUMBER) {
@@ -94,8 +93,8 @@ uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1,
   return default_val;
 }
 
-double ReadTableDouble(lua_State* L, int table_idx, const char* name1,
-                       const char* name2, double default_val) {
+double ReadTableDouble(lua_State* L, int table_idx, const char* name1, const char* name2,
+                       double default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
     if (t == LUA_TNUMBER) {
@@ -157,17 +156,14 @@ int64_t ParseTableSeverityNumber(lua_State* L, int val_idx) {
 }
 
 uint64_t ReadTableTimestampNano(lua_State* L, int rec_idx) {
-  uint64_t t_ns =
-      ReadTableUint64(L, rec_idx, "timeUnixNano", "time_unix_nano", 0);
+  uint64_t t_ns = ReadTableUint64(L, rec_idx, "timeUnixNano", "time_unix_nano", 0);
   if (t_ns == 0) {
-    t_ns = ReadTableUint64(L, rec_idx, "observedTimeUnixNano",
-                           "observed_time_unix_nano", 0);
+    t_ns = ReadTableUint64(L, rec_idx, "observedTimeUnixNano", "observed_time_unix_nano", 0);
   }
   return t_ns;
 }
 
-void SerializeLuaValueToJson(lua_State* L, int val_idx,
-                             FastJsonWriter& writer) {
+void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer) {
   int abs_idx = lua_absindex(L, val_idx);
   int type = lua_type(L, abs_idx);
 
@@ -195,9 +191,8 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx,
       return;
     }
     if (GetTableField(L, abs_idx, "intValue", "int_value")) {
-      int64_t v = lua_isinteger(L, -1)
-                      ? lua_tointeger(L, -1)
-                      : std::strtoll(lua_tostring(L, -1), nullptr, 10);
+      int64_t v = lua_isinteger(L, -1) ? lua_tointeger(L, -1)
+                                       : std::strtoll(lua_tostring(L, -1), nullptr, 10);
       writer.Int64(v);
       lua_pop(L, 1);
       return;
@@ -297,8 +292,7 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx,
   }
 }
 
-std::string ReadTableBodyString(lua_State* L, int rec_idx,
-                                FastJsonWriter& writer) {
+std::string ReadTableBodyString(lua_State* L, int rec_idx, FastJsonWriter& writer) {
   if (GetTableField(L, rec_idx, "body")) {
     int body_idx = lua_absindex(L, -1);
     if (lua_isstring(L, body_idx)) {
@@ -358,8 +352,7 @@ std::string ExtractTableServiceName(lua_State* L, int res_idx) {
             if (lua_isstring(L, val_idx)) {
               service_name = lua_tostring(L, val_idx);
             } else if (lua_istable(L, val_idx)) {
-              std::string s =
-                  ReadTableString(L, val_idx, "stringValue", "string_value");
+              std::string s = ReadTableString(L, val_idx, "stringValue", "string_value");
               if (!s.empty()) service_name = std::move(s);
             }
             lua_pop(L, 1);
@@ -387,8 +380,7 @@ std::string ExtractTableServiceName(lua_State* L, int res_idx) {
   return service_name;
 }
 
-static void PushSingleAttributeValue(lua_State* L, int val_idx,
-                                     FastJsonWriter& writer) {
+static void PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& writer) {
   int abs_idx = lua_absindex(L, val_idx);
   int type = lua_type(L, abs_idx);
 
@@ -416,7 +408,7 @@ static void PushSingleAttributeValue(lua_State* L, int val_idx,
     if (GetTableField(L, abs_idx, "doubleValue", "double_value")) {
       return;
     }
-    // Complex value -> serialize to JSON string
+    // Complex value -> serialise to JSON string
     writer.Reset();
     SerializeLuaValueToJson(L, abs_idx, writer);
     lua_pushlstring(L, writer.Str().data(), writer.Str().size());
@@ -483,8 +475,7 @@ void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
       lua_newtable(L);
       int ev_obj_idx = lua_absindex(L, -1);
 
-      uint64_t t_ns =
-          ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
+      uint64_t t_ns = ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
       char ts_buf[32];
       FormatIso8601Nano(t_ns, ts_buf);
       lua_pushlstring(L, ts_buf, 30);
@@ -524,8 +515,7 @@ void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer) {
       lua_newtable(L);
       int link_obj_idx = lua_absindex(L, -1);
 
-      std::string trace_id =
-          ReadTableString(L, item_idx, "traceId", "trace_id");
+      std::string trace_id = ReadTableString(L, item_idx, "traceId", "trace_id");
       lua_pushlstring(L, trace_id.data(), trace_id.size());
       lua_setfield(L, link_obj_idx, "TraceId");
 
@@ -533,8 +523,7 @@ void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer) {
       lua_pushlstring(L, span_id.data(), span_id.size());
       lua_setfield(L, link_obj_idx, "SpanId");
 
-      std::string trace_state =
-          ReadTableString(L, item_idx, "traceState", "trace_state");
+      std::string trace_state = ReadTableString(L, item_idx, "traceState", "trace_state");
       lua_pushlstring(L, trace_state.data(), trace_state.size());
       lua_setfield(L, link_obj_idx, "TraceState");
 

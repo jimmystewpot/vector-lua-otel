@@ -331,6 +331,56 @@ TEST(LuaBridgeStandaloneTest, CompileTimeBatchSizeConstant) {
   EXPECT_EQ(kCompileTimeBatchSize, VECTOR_OTEL_EMIT_BATCH_SIZE);
 }
 
+TEST_F(LuaBridgeTest, ProtectedEmitCatchesLuaError) {
+  const char* error_script = R"(
+    function failing_emit(event)
+      error("downstream sink queue full")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, error_script), LUA_OK);
+
+  lua_getglobal(L_, "failing_emit");
+  int fail_emit_idx = lua_gettop(L_);
+
+  LuaEmitter emitter(L_, fail_emit_idx, 1);
+  EXPECT_FALSE(emitter.HasError());
+
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-svc");
+  emitter.EndRecord();
+
+  EXPECT_TRUE(emitter.HasError());
+  EXPECT_NE(emitter.ErrorMessage().find("downstream sink queue full"), std::string_view::npos);
+  EXPECT_EQ(emitter.EmittedCount(), 0);
+
+  // Subsequent records and flush should safely no-op without crashing
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-svc-2");
+  emitter.EndRecord();
+  emitter.Flush();
+
+  lua_pop(L_, 1);  // pop failing_emit
+}
+
+TEST_F(LuaBridgeTest, CustomRecordFieldName) {
+  LuaEmitter emitter(L_, 1, 1, "trace");
+  emitter.StartRecord();
+  emitter.SetString("SpanName", "GET /api");
+  emitter.EndRecord();
+  emitter.Flush();
+
+  EXPECT_FALSE(emitter.HasError());
+  EXPECT_EQ(emitter.EmittedCount(), 1);
+
+  const char* verify_script = R"(
+    local ev = emitted[#emitted]
+    assert(ev.trace ~= nil, "ev.trace must exist")
+    assert(ev.trace.SpanName == "GET /api", "SpanName mismatch")
+    assert(ev.log == nil, "ev.log must not exist")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace core
 }  // namespace vector_otel

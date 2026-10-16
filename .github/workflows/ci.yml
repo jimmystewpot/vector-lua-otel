@@ -51,7 +51,7 @@ jobs:
             g++
 
       - name: Check formatting
-        run: find include src -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
+        run: find include src tests/cpp -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
 
       - name: Configure and build with CMake
         run: |

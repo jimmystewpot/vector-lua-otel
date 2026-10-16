@@ -16,8 +16,7 @@ TEST(OtelParserTest, UnpaddedStringViewSlice) {
 
   // 1. Raw buffer without null termination or trailing padding (exactly 13
   // bytes)
-  const char raw_unpadded[] = {'{', '"', 'a', '"', ':', ' ', '1',
-                               '2', '3', '4', '5', '}', '!'};
+  const char raw_unpadded[] = {'{', '"', 'a', '"', ':', ' ', '1', '2', '3', '4', '5', '}', '!'};
   std::string_view unpadded_slice(raw_unpadded, 12);  // exactly `{"a": 12345}`
 
   auto doc_res = parser.Iterate(unpadded_slice);
@@ -120,8 +119,7 @@ TEST(OtelParserTest, MultiPassThreadLocalReuseNoRealloc) {
 
   // Passes 2 to 1000: Reuse thread-local parser without reallocation
   for (int i = 2; i <= 1000; ++i) {
-    std::string json =
-        "{\"counter\":" + std::to_string(i) + ",\"status\":\"active\"}";
+    std::string json = "{\"counter\":" + std::to_string(i) + ",\"status\":\"active\"}";
     auto doc_res = parser.Iterate(json);
     ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
     auto doc = std::move(doc_res.value());
@@ -146,14 +144,13 @@ TEST(OtelParserTest, MultiThreadIsolation) {
     threads.emplace_back([t, &thread_buffers, &threads_ready, &can_exit]() {
       OtelParser local_parser;
       for (int i = 0; i < 50; ++i) {
-        std::string json = "{\"thread_id\":" + std::to_string(t) +
-                           ",\"iter\":" + std::to_string(i) + "}";
+        std::string json =
+            "{\"thread_id\":" + std::to_string(t) + ",\"iter\":" + std::to_string(i) + "}";
         auto doc_res = local_parser.Iterate(json);
         ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
         auto doc = std::move(doc_res.value());
         int64_t thread_id = -1;
-        ASSERT_EQ(doc["thread_id"].get_int64().get(thread_id),
-                  simdjson::SUCCESS);
+        ASSERT_EQ(doc["thread_id"].get_int64().get(thread_id), simdjson::SUCCESS);
         EXPECT_EQ(thread_id, t);
       }
       thread_buffers[t] = OtelParser::ThreadLocalBufferData();
@@ -188,8 +185,7 @@ TEST(OtelParserTest, SafelyPaddedInputZeroCopy) {
   OtelParser parser;
 
   // 1. simdjson::padded_string
-  simdjson::padded_string ps(
-      std::string_view("{\"padded\":true,\"value\":999}"));
+  simdjson::padded_string ps(std::string_view("{\"padded\":true,\"value\":999}"));
   auto doc1_res = parser.Iterate(simdjson::padded_string_view(ps));
   ASSERT_EQ(doc1_res.error(), simdjson::SUCCESS);
   auto doc1 = std::move(doc1_res.value());

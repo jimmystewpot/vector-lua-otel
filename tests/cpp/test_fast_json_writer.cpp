@@ -33,8 +33,7 @@ TEST(FastJsonWriterTest, SimpleObject) {
   writer.Bool(true);
   writer.EndObject();
 
-  EXPECT_EQ(writer.Str(),
-            "{\"name\":\"vector\",\"version\":1,\"active\":true}");
+  EXPECT_EQ(writer.Str(), "{\"name\":\"vector\",\"version\":1,\"active\":true}");
 }
 
 TEST(FastJsonWriterTest, Int64Boundaries) {
@@ -47,9 +46,7 @@ TEST(FastJsonWriterTest, Int64Boundaries) {
   writer.Uint64(std::numeric_limits<uint64_t>::max());  // 18446744073709551615
   writer.EndArray();
 
-  EXPECT_EQ(
-      writer.Str(),
-      "[-9223372036854775808,9223372036854775807,0,-1,18446744073709551615]");
+  EXPECT_EQ(writer.Str(), "[-9223372036854775808,9223372036854775807,0,-1,18446744073709551615]");
 }
 
 TEST(FastJsonWriterTest, Escaping) {

@@ -53,7 +53,7 @@ sinks:
 - `SeverityNumber`: 64-bit signed integer (`int64`) (range 1–24).
 
 ### 3. Attribute Maps
-- `ResourceAttributes`, `ScopeAttributes`, `LogAttributes`, and `SpanAttributes` are serialized as compact JSON strings inside Parquet strings (`binary (STRING)`), ensuring full compatibility across query engines without schema evolution issues.
+- `ResourceAttributes`, `ScopeAttributes`, `LogAttributes`, and `SpanAttributes` are serialised as compact JSON strings inside Parquet strings (`binary (STRING)`), ensuring full compatibility across query engines without schema evolution issues.
 
 ---
 
