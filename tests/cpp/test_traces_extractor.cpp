@@ -267,9 +267,8 @@ TEST_F(TracesExtractorTest, EmptyAndMissingBatches) {
   EXPECT_EQ(r2.emitted_count, 0);
 
   // 3. ResourceSpans with empty scopeSpans
-  auto r3 = ProcessTraces(
-      L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}",
-      emit_idx_);
+  auto r3 =
+      ProcessTraces(L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}", emit_idx_);
   EXPECT_TRUE(r3.success);
   EXPECT_EQ(r3.emitted_count, 0);
 

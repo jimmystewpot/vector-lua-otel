@@ -382,8 +382,7 @@ TEST_F(LogsExtractorTest, EmptyBatches) {
 
   // Resource with empty scopeLogs
   {
-    auto res = ProcessLogs(
-        L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
+    auto res = ProcessLogs(L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
     EXPECT_TRUE(res.success);
     EXPECT_EQ(res.emitted_count, 0);
   }

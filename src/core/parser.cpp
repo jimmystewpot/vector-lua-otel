@@ -17,7 +17,7 @@ simdjson::simdjson_result<simdjson::ondemand::document> IterateWithThreadLocalPa
     return simdjson::CAPACITY;
   }
   const size_t needed_capacity = json_str.size() + simdjson::SIMDJSON_PADDING;
-  if (tls_padded_buffer.capacity() < needed_capacity) {
+  if (tls_padded_buffer.capacity() < needed_capacity) [[unlikely]] {
     tls_padded_buffer.reserve(needed_capacity);
   }
   tls_padded_buffer.assign(json_str.data(), json_str.size());
@@ -34,7 +34,7 @@ simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
 
 simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
     simdjson::padded_string_view json_str) {
-  if (json_str.has_sufficient_padding()) {
+  if (json_str.has_sufficient_padding()) [[likely]] {
     return parser_.iterate(json_str);
   }
   return IterateWithThreadLocalPadding(parser_, std::string_view(json_str.data(), json_str.size()));
@@ -49,7 +49,7 @@ const char* OtelParser::ThreadLocalBufferData() noexcept {
 constexpr size_t kMaxRetainedBufferCapacity = 16 * 1024 * 1024;  // 16 MB
 
 void OtelParser::TrimThreadLocalBuffer() noexcept {
-  if (tls_padded_buffer.capacity() > kMaxRetainedBufferCapacity) {
+  if (tls_padded_buffer.capacity() > kMaxRetainedBufferCapacity) [[unlikely]] {
     std::string().swap(tls_padded_buffer);
   }
 }

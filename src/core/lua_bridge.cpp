@@ -25,17 +25,17 @@ LuaEmitter::LuaEmitter(lua_State* L, int emit_index, size_t batch_size,
 }
 
 void LuaEmitter::StartRecord() {
-  if (L_ == nullptr || in_record_ || has_error_) {
+  if (L_ == nullptr || in_record_ || has_error_) [[unlikely]] {
     return;
   }
-  if (!lua_checkstack(L_, 10)) {
+  if (!lua_checkstack(L_, 10)) [[unlikely]] {
     has_error_ = true;
     error_message_ = "out of lua stack space during StartRecord";
     return;
   }
   in_record_ = true;
 
-  if (batch_size_ == 1) {
+  if (batch_size_ == 1) [[likely]] {
     // Flat single event mode (N = 1)
     // Pre-push emit function, event table, and record table
     lua_pushvalue(L_, emit_index_);  // emit function
@@ -48,18 +48,16 @@ void LuaEmitter::StartRecord() {
     if (current_batch_count_ == 0) {
       // Allocate batch event table structure:
       // event = { [record_field_name] = { records = pre_allocated_array } }
-      lua_createtable(L_, 0, 1);                              // event table
-      lua_createtable(L_, 0, 1);                              // container table
-      lua_createtable(L_, static_cast<int>(batch_size_), 0);  // records array
-      records_ref_.reset(
-          L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops records array
+      lua_createtable(L_, 0, 1);                                // event table
+      lua_createtable(L_, 0, 1);                                // container table
+      lua_createtable(L_, static_cast<int>(batch_size_), 0);    // records array
+      records_ref_.reset(L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops records array
       lua_rawgeti(L_, LUA_REGISTRYINDEX, records_ref_.get());
       lua_setfield(L_, -2, "records");
       lua_pushlstring(L_, record_field_name_.data(), record_field_name_.size());
       lua_insert(L_, -2);
       lua_rawset(L_, -3);  // event[record_field_name] = container
-      event_ref_.reset(L_,
-                       luaL_ref(L_, LUA_REGISTRYINDEX));  // pops event table
+      event_ref_.reset(L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops event table
     }
     // Create new row table
     lua_createtable(L_, 0, 32);
@@ -68,7 +66,7 @@ void LuaEmitter::StartRecord() {
 }
 
 void LuaEmitter::SetString(std::string_view key, std::string_view val) {
-  if (L_ == nullptr || !in_record_ || has_error_) {
+  if (L_ == nullptr || !in_record_ || has_error_) [[unlikely]] {
     return;
   }
   lua_pushlstring(L_, key.data(), key.size());
@@ -77,7 +75,7 @@ void LuaEmitter::SetString(std::string_view key, std::string_view val) {
 }
 
 void LuaEmitter::SetInt64(std::string_view key, int64_t val) {
-  if (L_ == nullptr || !in_record_ || has_error_) {
+  if (L_ == nullptr || !in_record_ || has_error_) [[unlikely]] {
     return;
   }
   lua_pushlstring(L_, key.data(), key.size());
@@ -86,7 +84,7 @@ void LuaEmitter::SetInt64(std::string_view key, int64_t val) {
 }
 
 void LuaEmitter::SetUint64(std::string_view key, uint64_t val) {
-  if (L_ == nullptr || !in_record_ || has_error_) {
+  if (L_ == nullptr || !in_record_ || has_error_) [[unlikely]] {
     return;
   }
   lua_pushlstring(L_, key.data(), key.size());
@@ -95,7 +93,7 @@ void LuaEmitter::SetUint64(std::string_view key, uint64_t val) {
 }
 
 void LuaEmitter::SetDouble(std::string_view key, double val) {
-  if (L_ == nullptr || !in_record_ || has_error_) {
+  if (L_ == nullptr || !in_record_ || has_error_) [[unlikely]] {
     return;
   }
   lua_pushlstring(L_, key.data(), key.size());
@@ -104,7 +102,7 @@ void LuaEmitter::SetDouble(std::string_view key, double val) {
 }
 
 void LuaEmitter::SetBool(std::string_view key, bool val) {
-  if (L_ == nullptr || !in_record_ || has_error_) {
+  if (L_ == nullptr || !in_record_ || has_error_) [[unlikely]] {
     return;
   }
   lua_pushlstring(L_, key.data(), key.size());
@@ -113,10 +111,10 @@ void LuaEmitter::SetBool(std::string_view key, bool val) {
 }
 
 void LuaEmitter::SetTableFromStack(std::string_view key) {
-  if (L_ == nullptr) {
+  if (L_ == nullptr) [[unlikely]] {
     return;
   }
-  if (!in_record_ || has_error_) {
+  if (!in_record_ || has_error_) [[unlikely]] {
     lua_pop(L_, 1);
     return;
   }
@@ -127,16 +125,16 @@ void LuaEmitter::SetTableFromStack(std::string_view key) {
 }
 
 void LuaEmitter::EndRecord() {
-  if (L_ == nullptr) {
+  if (L_ == nullptr) [[unlikely]] {
     ++emitted_count_;
     return;
   }
-  if (!in_record_ || has_error_) {
+  if (!in_record_ || has_error_) [[unlikely]] {
     return;
   }
   in_record_ = false;
 
-  if (batch_size_ == 1) {
+  if (batch_size_ == 1) [[likely]] {
     // Stack: emit func, event, record
     lua_pushlstring(L_, record_field_name_.data(), record_field_name_.size());
     lua_insert(L_, -2);
@@ -145,7 +143,7 @@ void LuaEmitter::EndRecord() {
     const int status = lua_pcall(L_, 1, 0, 0);  // protected call emit(event)
     record_index_ = 0;
     event_index_ = 0;
-    if (status != LUA_OK) {
+    if (status != LUA_OK) [[unlikely]] {
       has_error_ = true;
       size_t len = 0;
       const char* err = lua_tolstring(L_, -1, &len);
@@ -176,10 +174,10 @@ void LuaEmitter::EndRecord() {
 }
 
 void LuaEmitter::EmitCurrentBatch() {
-  if (L_ == nullptr || current_batch_count_ == 0 || has_error_) {
+  if (L_ == nullptr || current_batch_count_ == 0 || has_error_) [[unlikely]] {
     return;
   }
-  if (!lua_checkstack(L_, 4)) {
+  if (!lua_checkstack(L_, 4)) [[unlikely]] {
     has_error_ = true;
     error_message_ = "out of lua stack space during batch emit";
     return;
@@ -190,7 +188,7 @@ void LuaEmitter::EmitCurrentBatch() {
   records_ref_.reset();
   const int status = lua_pcall(L_, 1, 0, 0);  // protected call emit(event)
   current_batch_count_ = 0;
-  if (status != LUA_OK) {
+  if (status != LUA_OK) [[unlikely]] {
     has_error_ = true;
     size_t len = 0;
     const char* err = lua_tolstring(L_, -1, &len);
@@ -204,7 +202,7 @@ void LuaEmitter::EmitCurrentBatch() {
 }
 
 void LuaEmitter::Flush() {
-  if (L_ == nullptr || has_error_) {
+  if (L_ == nullptr || has_error_) [[unlikely]] {
     return;
   }
   if (batch_size_ > 1 && current_batch_count_ > 0) {

@@ -350,8 +350,7 @@ TEST_F(LuaBridgeTest, ProtectedEmitCatchesLuaError) {
   emitter.EndRecord();
 
   EXPECT_TRUE(emitter.HasError());
-  EXPECT_NE(emitter.ErrorMessage().find("downstream sink queue full"),
-            std::string_view::npos);
+  EXPECT_NE(emitter.ErrorMessage().find("downstream sink queue full"), std::string_view::npos);
   EXPECT_EQ(emitter.EmittedCount(), 0);
 
   // Subsequent records and flush should safely no-op without crashing

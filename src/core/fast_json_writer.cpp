@@ -12,7 +12,7 @@ void FastJsonWriter::Reset() {
 }
 
 void FastJsonWriter::BeforeValue() {
-  if (!stack_.empty()) {
+  if (!stack_.empty()) [[likely]] {
     auto& top = stack_.back();
     if (top.type == ContainerType::kArray) {
       if (!top.empty) {
@@ -33,7 +33,7 @@ void FastJsonWriter::AppendEscapedString(std::string_view sv) {
     size_t i = start;
     while (i < len) {
       const auto c = static_cast<unsigned char>(sv[i]);
-      if (c == '"' || c == '\\' || c < 0x20) {
+      if (c == '"' || c == '\\' || c < 0x20) [[unlikely]] {
         break;
       }
       ++i;
@@ -41,7 +41,7 @@ void FastJsonWriter::AppendEscapedString(std::string_view sv) {
     if (i > start) {
       buffer_.insert(buffer_.end(), sv.data() + start, sv.data() + i);
     }
-    if (i < len) {
+    if (i < len) [[unlikely]] {
       const auto c = static_cast<unsigned char>(sv[i]);
       switch (c) {
         case '"':
@@ -96,7 +96,7 @@ void FastJsonWriter::StartObject() {
 }
 
 void FastJsonWriter::EndObject() {
-  if (!stack_.empty() && stack_.back().type == ContainerType::kObject) {
+  if (!stack_.empty() && stack_.back().type == ContainerType::kObject) [[likely]] {
     stack_.pop_back();
   }
   buffer_.push_back('}');
@@ -109,14 +109,14 @@ void FastJsonWriter::StartArray() {
 }
 
 void FastJsonWriter::EndArray() {
-  if (!stack_.empty() && stack_.back().type == ContainerType::kArray) {
+  if (!stack_.empty() && stack_.back().type == ContainerType::kArray) [[likely]] {
     stack_.pop_back();
   }
   buffer_.push_back(']');
 }
 
 void FastJsonWriter::Key(std::string_view key) {
-  if (!stack_.empty() && stack_.back().type == ContainerType::kObject) {
+  if (!stack_.empty() && stack_.back().type == ContainerType::kObject) [[likely]] {
     if (!stack_.back().empty) {
       buffer_.push_back(',');
     }
@@ -152,7 +152,7 @@ void FastJsonWriter::Uint64(uint64_t val) {
 
 void FastJsonWriter::Double(double val) {
   BeforeValue();
-  if (std::isnan(val) || std::isinf(val)) {
+  if (std::isnan(val) || std::isinf(val)) [[unlikely]] {
     buffer_.insert(buffer_.end(), {'n', 'u', 'l', 'l'});
     return;
   }
