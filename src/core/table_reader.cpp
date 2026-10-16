@@ -212,15 +212,25 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, 
   } else if (type == LUA_TTABLE) {
     // Check if it's an OTLP AnyValue wrapper:
     if (GetTableField(L, abs_idx, "stringValue", "string_value")) {
-      size_t len = 0;
-      const char* s = lua_tolstring(L, -1, &len);
-      writer.String(std::string_view(s, len));
+      if (lua_type(L, -1) == LUA_TSTRING) {
+        size_t len = 0;
+        const char* s = lua_tolstring(L, -1, &len);
+        writer.String(std::string_view(s, len));
+      } else {
+        writer.String("");
+      }
       lua_pop(L, 1);
       return;
     }
     if (GetTableField(L, abs_idx, "intValue", "int_value")) {
-      int64_t v = lua_isinteger(L, -1) ? lua_tointeger(L, -1)
-                                       : std::strtoll(lua_tostring(L, -1), nullptr, 10);
+      int64_t v = 0;
+      if (lua_isinteger(L, -1)) {
+        v = lua_tointeger(L, -1);
+      } else if (lua_type(L, -1) == LUA_TNUMBER) {
+        v = static_cast<int64_t>(lua_tonumber(L, -1));
+      } else if (lua_type(L, -1) == LUA_TSTRING) {
+        v = std::strtoll(lua_tostring(L, -1), nullptr, 10);
+      }
       writer.Int64(v);
       lua_pop(L, 1);
       return;
@@ -231,27 +241,39 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, 
       return;
     }
     if (GetTableField(L, abs_idx, "doubleValue", "double_value")) {
-      writer.Double(lua_tonumber(L, -1));
+      double v = 0.0;
+      if (lua_type(L, -1) == LUA_TNUMBER) {
+        v = lua_tonumber(L, -1);
+      } else if (lua_type(L, -1) == LUA_TSTRING) {
+        v = std::strtod(lua_tostring(L, -1), nullptr);
+      }
+      writer.Double(v);
       lua_pop(L, 1);
       return;
     }
     if (GetTableField(L, abs_idx, "bytesValue", "bytes_value")) {
-      size_t len = 0;
-      const char* s = lua_tolstring(L, -1, &len);
-      writer.String(std::string_view(s, len));
+      if (lua_type(L, -1) == LUA_TSTRING) {
+        size_t len = 0;
+        const char* s = lua_tolstring(L, -1, &len);
+        writer.String(std::string_view(s, len));
+      } else {
+        writer.String("");
+      }
       lua_pop(L, 1);
       return;
     }
     if (GetTableField(L, abs_idx, "arrayValue", "array_value")) {
       int arr_idx = lua_absindex(L, -1);
-      if (GetTableField(L, arr_idx, "values")) {
+      if (lua_istable(L, arr_idx) && GetTableField(L, arr_idx, "values")) {
         int vals_idx = lua_absindex(L, -1);
         writer.StartArray();
-        lua_Integer len = luaL_len(L, vals_idx);
-        for (lua_Integer i = 1; i <= len; ++i) {
-          lua_rawgeti(L, vals_idx, i);
-          SerializeLuaValueToJson(L, -1, writer, depth + 1);
-          lua_pop(L, 1);
+        if (lua_istable(L, vals_idx)) {
+          lua_Integer len = luaL_len(L, vals_idx);
+          for (lua_Integer i = 1; i <= len; ++i) {
+            lua_rawgeti(L, vals_idx, i);
+            SerializeLuaValueToJson(L, -1, writer, depth + 1);
+            lua_pop(L, 1);
+          }
         }
         writer.EndArray();
         lua_pop(L, 1);  // pop values
@@ -264,32 +286,36 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, 
     }
     if (GetTableField(L, abs_idx, "kvlistValue", "kvlist_value")) {
       int kv_idx = lua_absindex(L, -1);
-      if (GetTableField(L, kv_idx, "values")) {
+      if (lua_istable(L, kv_idx) && GetTableField(L, kv_idx, "values")) {
         int vals_idx = lua_absindex(L, -1);
         writer.StartObject();
-        lua_Integer len = luaL_len(L, vals_idx);
-        for (lua_Integer i = 1; i <= len; ++i) {
-          lua_rawgeti(L, vals_idx, i);
-          int item_idx = lua_absindex(L, -1);
-          if (GetTableField(L, item_idx, "key")) {
-            if (lua_isstring(L, -1)) {
-              size_t klen = 0;
-              const char* ks = lua_tolstring(L, -1, &klen);
-              writer.Key(std::string_view(ks, klen));
-            } else {
-              writer.Key("");
+        if (lua_istable(L, vals_idx)) {
+          lua_Integer len = luaL_len(L, vals_idx);
+          for (lua_Integer i = 1; i <= len; ++i) {
+            lua_rawgeti(L, vals_idx, i);
+            int item_idx = lua_absindex(L, -1);
+            if (lua_istable(L, item_idx)) {
+              if (GetTableField(L, item_idx, "key")) {
+                if (lua_type(L, -1) == LUA_TSTRING) {
+                  size_t klen = 0;
+                  const char* ks = lua_tolstring(L, -1, &klen);
+                  writer.Key(std::string_view(ks, klen));
+                } else {
+                  writer.Key("");
+                }
+                lua_pop(L, 1);
+              } else {
+                writer.Key("");
+              }
+              if (GetTableField(L, item_idx, "value")) {
+                SerializeLuaValueToJson(L, -1, writer, depth + 1);
+                lua_pop(L, 1);
+              } else {
+                writer.Null();
+              }
             }
-            lua_pop(L, 1);
-          } else {
-            writer.Key("");
+            lua_pop(L, 1);  // pop item
           }
-          if (GetTableField(L, item_idx, "value")) {
-            SerializeLuaValueToJson(L, -1, writer, depth + 1);
-            lua_pop(L, 1);
-          } else {
-            writer.Null();
-          }
-          lua_pop(L, 1);  // pop item
         }
         writer.EndObject();
         lua_pop(L, 1);  // pop values
@@ -372,11 +398,14 @@ std::string ReadTableBodyString(lua_State* L, int rec_idx, FastJsonWriter& write
       return res;
     } else if (lua_istable(L, body_idx)) {
       if (GetTableField(L, body_idx, "stringValue", "string_value")) {
-        size_t len = 0;
-        const char* s = lua_tolstring(L, -1, &len);
-        std::string res(s, len);
-        lua_pop(L, 2);  // pop stringValue and body
-        return res;
+        if (lua_type(L, -1) == LUA_TSTRING) {
+          size_t len = 0;
+          const char* s = lua_tolstring(L, -1, &len);
+          std::string res(s, len);
+          lua_pop(L, 2);  // pop stringValue and body
+          return res;
+        }
+        lua_pop(L, 1);  // pop non-string stringValue
       }
       writer.Reset();
       SerializeLuaValueToJson(L, body_idx, writer);
@@ -406,11 +435,14 @@ void CopyTableBody(lua_State* L, int rec_idx, FastJsonWriter& writer, LuaEmitter
       return;
     } else if (lua_istable(L, body_idx)) {
       if (GetTableField(L, body_idx, "stringValue", "string_value")) {
-        size_t len = 0;
-        const char* s = lua_tolstring(L, -1, &len);
-        emitter.SetString("Body", std::string_view(s, len));
-        lua_pop(L, 2);  // pop stringValue and body
-        return;
+        if (lua_type(L, -1) == LUA_TSTRING) {
+          size_t len = 0;
+          const char* s = lua_tolstring(L, -1, &len);
+          emitter.SetString("Body", std::string_view(s, len));
+          lua_pop(L, 2);  // pop stringValue and body
+          return;
+        }
+        lua_pop(L, 1);  // pop non-string stringValue
       }
       writer.Reset();
       SerializeLuaValueToJson(L, body_idx, writer);
@@ -455,7 +487,7 @@ std::string ExtractTableServiceName(lua_State* L, int res_idx) {
         if (k == "service.name" || k == "service_name") {
           if (GetTableField(L, item_idx, "value")) {
             int val_idx = lua_absindex(L, -1);
-            if (lua_isstring(L, val_idx)) {
+            if (lua_type(L, val_idx) == LUA_TSTRING) {
               service_name = lua_tostring(L, val_idx);
             } else if (lua_istable(L, val_idx)) {
               std::string s = ReadTableString(L, val_idx, "stringValue", "string_value");
@@ -472,7 +504,7 @@ std::string ExtractTableServiceName(lua_State* L, int res_idx) {
   } else {
     // Direct map: attrs["service.name"]
     if (GetTableField(L, attrs_idx, "service.name", "service_name")) {
-      if (lua_isstring(L, -1)) {
+      if (lua_type(L, -1) == LUA_TSTRING) {
         service_name = lua_tostring(L, -1);
       } else if (lua_istable(L, -1)) {
         std::string s = ReadTableString(L, -1, "stringValue", "string_value");
@@ -498,20 +530,51 @@ static void PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& 
     lua_pushvalue(L, abs_idx);
   } else if (type == LUA_TTABLE) {
     if (GetTableField(L, abs_idx, "stringValue", "string_value")) {
-      return;  // value is already on stack
+      if (lua_type(L, -1) == LUA_TSTRING) {
+        return;  // value is already on stack
+      }
+      lua_pop(L, 1);
+      lua_pushliteral(L, "");
+      return;
     }
     if (GetTableField(L, abs_idx, "intValue", "int_value")) {
-      if (lua_isstring(L, -1)) {
+      if (lua_isinteger(L, -1)) {
+        return;
+      } else if (lua_type(L, -1) == LUA_TNUMBER) {
+        int64_t v = static_cast<int64_t>(lua_tonumber(L, -1));
+        lua_pop(L, 1);
+        lua_pushinteger(L, v);
+        return;
+      } else if (lua_type(L, -1) == LUA_TSTRING) {
         int64_t v = std::strtoll(lua_tostring(L, -1), nullptr, 10);
         lua_pop(L, 1);
         lua_pushinteger(L, v);
+        return;
       }
+      lua_pop(L, 1);
+      lua_pushinteger(L, 0);
       return;
     }
     if (GetTableField(L, abs_idx, "boolValue", "bool_value")) {
+      if (lua_type(L, -1) == LUA_TBOOLEAN) {
+        return;
+      }
+      bool b = lua_toboolean(L, -1) != 0;
+      lua_pop(L, 1);
+      lua_pushboolean(L, b ? 1 : 0);
       return;
     }
     if (GetTableField(L, abs_idx, "doubleValue", "double_value")) {
+      if (lua_type(L, -1) == LUA_TNUMBER) {
+        return;
+      } else if (lua_type(L, -1) == LUA_TSTRING) {
+        double d = std::strtod(lua_tostring(L, -1), nullptr);
+        lua_pop(L, 1);
+        lua_pushnumber(L, d);
+        return;
+      }
+      lua_pop(L, 1);
+      lua_pushnumber(L, 0.0);
       return;
     }
     // Complex value -> serialise to JSON string
@@ -538,7 +601,9 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
     lua_rawgeti(L, abs_idx, 1);
     if (lua_istable(L, -1)) {
       if (GetTableField(L, -1, "key")) {
-        is_kv_array = true;
+        if (lua_type(L, -1) == LUA_TSTRING) {
+          is_kv_array = true;
+        }
         lua_pop(L, 1);  // pop key field
       }
     }
@@ -551,12 +616,17 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
       lua_rawgeti(L, abs_idx, i);
       if (lua_istable(L, -1)) {
         int item_idx = lua_absindex(L, -1);
-        std::string key = ReadTableString(L, item_idx, "key");
-        if (!key.empty()) {
-          if (GetTableField(L, item_idx, "value")) {
-            PushSingleAttributeValue(L, -1, writer);
-            lua_setfield(L, out_table_idx, key.c_str());
-            lua_pop(L, 1);  // pop value
+        if (GetTableField(L, item_idx, "key")) {
+          if (lua_type(L, -1) == LUA_TSTRING && lua_rawlen(L, -1) > 0) {
+            if (GetTableField(L, item_idx, "value")) {
+              PushSingleAttributeValue(L, -1, writer);
+              lua_remove(L, -2);  // remove raw value, leaving [key, converted_val]
+              lua_rawset(L, out_table_idx);
+            } else {
+              lua_pop(L, 1);  // pop key
+            }
+          } else {
+            lua_pop(L, 1);  // pop key
           }
         }
       }
@@ -567,19 +637,31 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
     lua_pushnil(L);
     while (lua_next(L, abs_idx) != 0) {
       if (lua_type(L, -2) == LUA_TSTRING) {
-        size_t klen = 0;
-        const char* ks = lua_tolstring(L, -2, &klen);
-        PushSingleAttributeValue(L, -1, writer);
-        lua_setfield(L, out_table_idx, ks);
+        lua_pushvalue(L, -2);
+        PushSingleAttributeValue(L, -2, writer);
+        lua_rawset(L, out_table_idx);
       } else if (lua_type(L, -2) == LUA_TNUMBER) {
         lua_pushvalue(L, -2);
         lua_tolstring(L, -1, nullptr);
         PushSingleAttributeValue(L, -2, writer);
-        lua_settable(L, out_table_idx);
+        lua_rawset(L, out_table_idx);
       }
       lua_pop(L, 1);  // pop value, keep key for next iteration
     }
   }
+}
+
+static void CopyTableFieldToTable(lua_State* L, int src_idx, const char* name1, const char* name2,
+                                  int dst_idx, const char* dst_field) {
+  if (GetTableField(L, src_idx, name1, name2)) {
+    if (lua_type(L, -1) == LUA_TSTRING) {
+      lua_setfield(L, dst_idx, dst_field);
+      return;
+    }
+    lua_pop(L, 1);
+  }
+  lua_pushliteral(L, "");
+  lua_setfield(L, dst_idx, dst_field);
 }
 
 void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
@@ -603,9 +685,7 @@ void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
       lua_pushlstring(L, ts_buf, 30);
       lua_setfield(L, ev_obj_idx, "Timestamp");
 
-      std::string name = ReadTableString(L, item_idx, "name");
-      lua_pushlstring(L, name.data(), name.size());
-      lua_setfield(L, ev_obj_idx, "Name");
+      CopyTableFieldToTable(L, item_idx, "name", nullptr, ev_obj_idx, "Name");
 
       if (GetTableField(L, item_idx, "attributes")) {
         PushTableAttributes(L, -1, writer);
@@ -637,17 +717,9 @@ void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer) {
       lua_newtable(L);
       int link_obj_idx = lua_absindex(L, -1);
 
-      std::string trace_id = ReadTableString(L, item_idx, "traceId", "trace_id");
-      lua_pushlstring(L, trace_id.data(), trace_id.size());
-      lua_setfield(L, link_obj_idx, "TraceId");
-
-      std::string span_id = ReadTableString(L, item_idx, "spanId", "span_id");
-      lua_pushlstring(L, span_id.data(), span_id.size());
-      lua_setfield(L, link_obj_idx, "SpanId");
-
-      std::string trace_state = ReadTableString(L, item_idx, "traceState", "trace_state");
-      lua_pushlstring(L, trace_state.data(), trace_state.size());
-      lua_setfield(L, link_obj_idx, "TraceState");
+      CopyTableFieldToTable(L, item_idx, "traceId", "trace_id", link_obj_idx, "TraceId");
+      CopyTableFieldToTable(L, item_idx, "spanId", "span_id", link_obj_idx, "SpanId");
+      CopyTableFieldToTable(L, item_idx, "traceState", "trace_state", link_obj_idx, "TraceState");
 
       if (GetTableField(L, item_idx, "attributes")) {
         PushTableAttributes(L, -1, writer);
