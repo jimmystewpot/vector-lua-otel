@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -10,9 +11,14 @@ namespace core {
 
 class FastJsonWriter {
  public:
-  FastJsonWriter() = default;
+  static constexpr size_t kMaxRetainedCapacity = 16 * 1024 * 1024;
+
+  FastJsonWriter();
 
   void Reset();
+  void Trim() noexcept;
+  size_t Capacity() const noexcept { return buffer_.capacity(); }
+
   void StartObject();
   void EndObject();
   void StartArray();
@@ -39,9 +45,9 @@ class FastJsonWriter {
   };
 
   void BeforeValue();
-  void AppendEscapedString(std::string_view sv);
+  void WriteEscapedString(std::string_view sv);
 
-  std::vector<char> buffer_;
+  std::string buffer_;
   std::vector<ContainerState> stack_;
 };
 

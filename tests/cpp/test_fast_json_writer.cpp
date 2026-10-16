@@ -159,5 +159,37 @@ TEST(FastJsonWriterTest, ResetAndReuse) {
   EXPECT_EQ(writer.Str(), "[\"second\"]");
 }
 
+TEST(FastJsonWriterTest, InitialReservationAndTrimOversizedBuffer) {
+  core::FastJsonWriter writer;
+  EXPECT_GE(writer.Capacity(), 4096u);
+
+  std::string huge(17 * 1024 * 1024, 'a');
+  writer.String(huge);
+  EXPECT_GT(writer.Capacity(), core::FastJsonWriter::kMaxRetainedCapacity);
+
+  writer.Trim();
+  EXPECT_LE(writer.Capacity(), 4096u);
+  EXPECT_GE(writer.Capacity(), 4096u);
+  EXPECT_EQ(writer.Str(), "");
+}
+
+TEST(FastJsonWriterTest, WriteEscapedStringMixedChunksAndControlChars) {
+  FastJsonWriter writer;
+  writer.StartArray();
+  writer.String("plain_ascii_span_without_escapes");
+  writer.String("chunk1\"chunk2\\chunk3\nchunk4\tchunk5\rchunk6\bchunk7\fend");
+  writer.String(std::string_view("\x00prefix\x07middle\x1bsuffix\x1f", 22));
+  writer.String("\"\\");
+  writer.String("");
+  writer.EndArray();
+
+  EXPECT_EQ(writer.Str(),
+            "[\"plain_ascii_span_without_escapes\","
+            "\"chunk1\\\"chunk2\\\\chunk3\\nchunk4\\tchunk5\\rchunk6\\bchunk7\\fend\","
+            "\"\\u0000prefix\\u0007middle\\u001bsuffix\\u001f\","
+            "\"\\\"\\\\\","
+            "\"\"]");
+}
+
 }  // namespace core
 }  // namespace vector_otel

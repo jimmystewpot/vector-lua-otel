@@ -2,13 +2,28 @@
 
 #include <charconv>
 #include <cmath>
+#include <utility>
 
 namespace vector_otel {
 namespace core {
 
+FastJsonWriter::FastJsonWriter() {
+  buffer_.reserve(4096);
+  stack_.reserve(32);
+}
+
 void FastJsonWriter::Reset() {
   buffer_.clear();
   stack_.clear();
+}
+
+void FastJsonWriter::Trim() noexcept {
+  if (buffer_.capacity() > kMaxRetainedCapacity) {
+    std::string trimmed;
+    trimmed.reserve(4096);
+    buffer_ = std::move(trimmed);
+    stack_.clear();
+  }
 }
 
 void FastJsonWriter::BeforeValue() {
@@ -23,68 +38,55 @@ void FastJsonWriter::BeforeValue() {
   }
 }
 
-void FastJsonWriter::AppendEscapedString(std::string_view sv) {
+void FastJsonWriter::WriteEscapedString(std::string_view sv) {
+  buffer_.reserve(buffer_.size() + sv.size() + 2);
   buffer_.push_back('"');
   static constexpr char kHexDigits[] = "0123456789abcdef";
 
-  size_t start = 0;
+  size_t chunk_start = 0;
   const size_t len = sv.size();
-  while (start < len) {
-    size_t i = start;
-    while (i < len) {
-      const auto c = static_cast<unsigned char>(sv[i]);
-      if (c == '"' || c == '\\' || c < 0x20) [[unlikely]] {
-        break;
+  size_t i = 0;
+  while (i < len) {
+    const auto c = static_cast<unsigned char>(sv[i]);
+    if (c == '"' || c == '\\' || c < 0x20) [[unlikely]] {
+      if (i > chunk_start) {
+        buffer_.append(sv.data() + chunk_start, i - chunk_start);
       }
-      ++i;
-    }
-    if (i > start) {
-      buffer_.insert(buffer_.end(), sv.data() + start, sv.data() + i);
-    }
-    if (i < len) [[unlikely]] {
-      const auto c = static_cast<unsigned char>(sv[i]);
       switch (c) {
         case '"':
-          buffer_.push_back('\\');
-          buffer_.push_back('"');
+          buffer_.append("\\\"", 2);
           break;
         case '\\':
-          buffer_.push_back('\\');
-          buffer_.push_back('\\');
+          buffer_.append("\\\\", 2);
           break;
         case '\b':
-          buffer_.push_back('\\');
-          buffer_.push_back('b');
+          buffer_.append("\\b", 2);
           break;
         case '\f':
-          buffer_.push_back('\\');
-          buffer_.push_back('f');
+          buffer_.append("\\f", 2);
           break;
         case '\n':
-          buffer_.push_back('\\');
-          buffer_.push_back('n');
+          buffer_.append("\\n", 2);
           break;
         case '\r':
-          buffer_.push_back('\\');
-          buffer_.push_back('r');
+          buffer_.append("\\r", 2);
           break;
         case '\t':
-          buffer_.push_back('\\');
-          buffer_.push_back('t');
+          buffer_.append("\\t", 2);
           break;
-        default:
-          buffer_.push_back('\\');
-          buffer_.push_back('u');
-          buffer_.push_back('0');
-          buffer_.push_back('0');
-          buffer_.push_back(kHexDigits[(c >> 4) & 0x0f]);
-          buffer_.push_back(kHexDigits[c & 0x0f]);
+        default: {
+          const char hex_esc[6] = {
+              '\\', 'u', '0', '0', kHexDigits[(c >> 4) & 0x0f], kHexDigits[c & 0x0f]};
+          buffer_.append(hex_esc, 6);
           break;
+        }
       }
-      start = i + 1;
-    } else {
-      start = i;
+      chunk_start = i + 1;
     }
+    ++i;
+  }
+  if (i > chunk_start) {
+    buffer_.append(sv.data() + chunk_start, i - chunk_start);
   }
   buffer_.push_back('"');
 }
@@ -122,57 +124,57 @@ void FastJsonWriter::Key(std::string_view key) {
     }
     stack_.back().empty = false;
   }
-  AppendEscapedString(key);
+  WriteEscapedString(key);
   buffer_.push_back(':');
 }
 
 void FastJsonWriter::String(std::string_view val) {
   BeforeValue();
-  AppendEscapedString(val);
+  WriteEscapedString(val);
 }
 
 void FastJsonWriter::RawJson(std::string_view raw) {
   BeforeValue();
-  buffer_.insert(buffer_.end(), raw.begin(), raw.end());
+  buffer_.append(raw.data(), raw.size());
 }
 
 void FastJsonWriter::Int64(int64_t val) {
   BeforeValue();
   char buf[32];
   const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
-  buffer_.insert(buffer_.end(), buf, ptr);
+  buffer_.append(buf, static_cast<size_t>(ptr - buf));
 }
 
 void FastJsonWriter::Uint64(uint64_t val) {
   BeforeValue();
   char buf[32];
   const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
-  buffer_.insert(buffer_.end(), buf, ptr);
+  buffer_.append(buf, static_cast<size_t>(ptr - buf));
 }
 
 void FastJsonWriter::Double(double val) {
   BeforeValue();
   if (std::isnan(val) || std::isinf(val)) [[unlikely]] {
-    buffer_.insert(buffer_.end(), {'n', 'u', 'l', 'l'});
+    buffer_.append("null", 4);
     return;
   }
   char buf[64];
   const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
-  buffer_.insert(buffer_.end(), buf, ptr);
+  buffer_.append(buf, static_cast<size_t>(ptr - buf));
 }
 
 void FastJsonWriter::Bool(bool val) {
   BeforeValue();
   if (val) {
-    buffer_.insert(buffer_.end(), {'t', 'r', 'u', 'e'});
+    buffer_.append("true", 4);
   } else {
-    buffer_.insert(buffer_.end(), {'f', 'a', 'l', 's', 'e'});
+    buffer_.append("false", 5);
   }
 }
 
 void FastJsonWriter::Null() {
   BeforeValue();
-  buffer_.insert(buffer_.end(), {'n', 'u', 'l', 'l'});
+  buffer_.append("null", 4);
 }
 
 std::string_view FastJsonWriter::Str() const {
