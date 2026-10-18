@@ -75,8 +75,12 @@ void FastJsonWriter::WriteEscapedString(std::string_view sv) {
           buffer_.append("\\t", 2);
           break;
         default: {
-          const std::array<char, 6> hex_esc = {
-              '\\', 'u', '0', '0', kHexDigits[(c >> 4) & 0x0f], kHexDigits[c & 0x0f]};
+          const std::array<char, 6> hex_esc = {'\\',
+                                               'u',
+                                               '0',
+                                               '0',
+                                               kHexDigits[(c >> 4) & 0x0f],
+                                               kHexDigits[c & 0x0f]};
           buffer_.append(hex_esc.data(), hex_esc.size());
           break;
         }
@@ -98,7 +102,8 @@ void FastJsonWriter::StartObject() {
 }
 
 void FastJsonWriter::EndObject() {
-  if (!stack_.empty() && stack_.back().type == ContainerType::kObject) [[likely]] {
+  if (!stack_.empty() && stack_.back().type == ContainerType::kObject)
+      [[likely]] {
     stack_.pop_back();
   }
   buffer_.push_back('}');
@@ -111,14 +116,16 @@ void FastJsonWriter::StartArray() {
 }
 
 void FastJsonWriter::EndArray() {
-  if (!stack_.empty() && stack_.back().type == ContainerType::kArray) [[likely]] {
+  if (!stack_.empty() && stack_.back().type == ContainerType::kArray)
+      [[likely]] {
     stack_.pop_back();
   }
   buffer_.push_back(']');
 }
 
 void FastJsonWriter::Key(std::string_view key) {
-  if (!stack_.empty() && stack_.back().type == ContainerType::kObject) [[likely]] {
+  if (!stack_.empty() && stack_.back().type == ContainerType::kObject)
+      [[likely]] {
     if (!stack_.back().empty) {
       buffer_.push_back(',');
     }
@@ -141,14 +148,16 @@ void FastJsonWriter::RawJson(std::string_view raw) {
 void FastJsonWriter::Int64(int64_t val) {
   BeforeValue();
   std::array<char, 32> buf;
-  const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), val);
+  const auto [ptr, ec] =
+      std::to_chars(buf.data(), buf.data() + buf.size(), val);
   buffer_.append(buf.data(), static_cast<size_t>(ptr - buf.data()));
 }
 
 void FastJsonWriter::Uint64(uint64_t val) {
   BeforeValue();
   std::array<char, 32> buf;
-  const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), val);
+  const auto [ptr, ec] =
+      std::to_chars(buf.data(), buf.data() + buf.size(), val);
   buffer_.append(buf.data(), static_cast<size_t>(ptr - buf.data()));
 }
 
@@ -159,7 +168,8 @@ void FastJsonWriter::Double(double val) {
     return;
   }
   std::array<char, 64> buf;
-  const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), val);
+  const auto [ptr, ec] =
+      std::to_chars(buf.data(), buf.data() + buf.size(), val);
   buffer_.append(buf.data(), static_cast<size_t>(ptr - buf.data()));
 }
 

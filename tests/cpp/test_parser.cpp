@@ -19,7 +19,8 @@ TEST(OtelParserTest, UnpaddedStringViewSlice) {
 
   // 1. Raw buffer without null termination or trailing padding (exactly 13
   // bytes)
-  const char raw_unpadded[] = {'{', '"', 'a', '"', ':', ' ', '1', '2', '3', '4', '5', '}', '!'};
+  const char raw_unpadded[] = {'{', '"', 'a', '"', ':', ' ', '1',
+                               '2', '3', '4', '5', '}', '!'};
   std::string_view unpadded_slice(raw_unpadded, 12);  // exactly `{"a": 12345}`
 
   auto doc_res = parser.Iterate(unpadded_slice);
@@ -122,7 +123,8 @@ TEST(OtelParserTest, MultiPassThreadLocalReuseNoRealloc) {
 
   // Passes 2 to 1000: Reuse thread-local parser without reallocation
   for (int i = 2; i <= 1000; ++i) {
-    std::string json = "{\"counter\":" + std::to_string(i) + ",\"status\":\"active\"}";
+    std::string json =
+        "{\"counter\":" + std::to_string(i) + ",\"status\":\"active\"}";
     auto doc_res = parser.Iterate(json);
     ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
     auto doc = std::move(doc_res.value());
@@ -147,13 +149,14 @@ TEST(OtelParserTest, MultiThreadIsolation) {
     threads.emplace_back([t, &thread_buffers, &threads_ready, &can_exit]() {
       OtelParser local_parser;
       for (int i = 0; i < 50; ++i) {
-        std::string json =
-            "{\"thread_id\":" + std::to_string(t) + ",\"iter\":" + std::to_string(i) + "}";
+        std::string json = "{\"thread_id\":" + std::to_string(t) +
+                           ",\"iter\":" + std::to_string(i) + "}";
         auto doc_res = local_parser.Iterate(json);
         ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
         auto doc = std::move(doc_res.value());
         int64_t thread_id = -1;
-        ASSERT_EQ(doc["thread_id"].get_int64().get(thread_id), simdjson::SUCCESS);
+        ASSERT_EQ(doc["thread_id"].get_int64().get(thread_id),
+                  simdjson::SUCCESS);
         EXPECT_EQ(thread_id, t);
       }
       thread_buffers[t] = OtelParser::ThreadLocalBufferData();
@@ -188,7 +191,8 @@ TEST(OtelParserTest, SafelyPaddedInputZeroCopy) {
   OtelParser parser;
 
   // 1. simdjson::padded_string
-  simdjson::padded_string ps(std::string_view("{\"padded\":true,\"value\":999}"));
+  simdjson::padded_string ps(
+      std::string_view("{\"padded\":true,\"value\":999}"));
   auto doc1_res = parser.Iterate(simdjson::padded_string_view(ps));
   ASSERT_EQ(doc1_res.error(), simdjson::SUCCESS);
   auto doc1 = std::move(doc1_res.value());
@@ -227,11 +231,11 @@ TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
   core::OtelParser parser;
 
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-  // Allocate virtual address space without physical RAM allocation to test oversized payload
-  // safely.
+  // Allocate virtual address space without physical RAM allocation to test
+  // oversized payload safely.
   const size_t test_size = core::OtelParser::kMaxPayloadSize + 4096;
-  void* mem = mmap(nullptr, test_size + simdjson::SIMDJSON_PADDING, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void* mem = mmap(nullptr, test_size + simdjson::SIMDJSON_PADDING,
+                   PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (mem != MAP_FAILED) {
     char* buf = static_cast<char*>(mem);
     buf[0] = '{';
@@ -243,8 +247,8 @@ TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
     EXPECT_EQ(doc_res1.error(), simdjson::CAPACITY);
 
     // 2. Test simdjson::padded_string_view overload with sufficient padding
-    simdjson::padded_string_view oversized_padded(buf, test_size,
-                                                  test_size + simdjson::SIMDJSON_PADDING);
+    simdjson::padded_string_view oversized_padded(
+        buf, test_size, test_size + simdjson::SIMDJSON_PADDING);
     auto doc_res2 = parser.Iterate(oversized_padded);
     EXPECT_EQ(doc_res2.error(), simdjson::CAPACITY);
 
@@ -279,7 +283,8 @@ TEST_F(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
 
 TEST_F(ParserTest, SharedInstanceTrimsParserCapacityAboveThreshold) {
   auto& parser = core::OtelParser::Instance();
-  std::string large_json = R"({"key":")" + std::string(17 * 1024 * 1024, 'x') + R"("})";
+  std::string large_json =
+      R"({"key":")" + std::string(17 * 1024 * 1024, 'x') + R"("})";
   auto doc_res = parser.Iterate(std::string_view(large_json));
   ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
   EXPECT_GT(parser.Capacity(), core::OtelParser::kMaxRetainedBufferCapacity);

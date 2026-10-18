@@ -82,7 +82,8 @@ std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
 
 }  // namespace
 
-ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_idx) {
+ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json,
+                             int emit_idx) {
   auto& parser = core::OtelParser::Instance();
   static thread_local core::FastJsonWriter writer;
   static thread_local core::FastJsonWriter body_writer;
@@ -90,7 +91,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
   writer.Reset();
   body_writer.Reset();
   struct WriterTrimGuard {
-    explicit WriterTrimGuard(core::FastJsonWriter& writer1, core::FastJsonWriter& writer2)
+    explicit WriterTrimGuard(core::FastJsonWriter& writer1,
+                             core::FastJsonWriter& writer2)
         : w1(writer1), w2(writer2) {}
     WriterTrimGuard(const WriterTrimGuard&) = delete;
     WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
@@ -104,13 +106,15 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
   auto doc_res = parser.Iterate(raw_json);
   if (doc_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
+    return ExtractionResult{
+        false, std::string(simdjson::error_message(doc_res.error())), 0};
   }
 
   auto doc = std::move(doc_res.value());
   auto doc_obj_res = doc.get_object();
   if (doc_obj_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
+    return ExtractionResult{
+        false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
   }
   auto doc_obj = doc_obj_res.value();
 
@@ -137,8 +141,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
   for (auto rl_elem_res : rl_arr_res.value()) {
     if (rl_elem_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(rl_elem_res.error())),
-                              emitter.EmittedCount()};
+      return ExtractionResult{
+          false, std::string(simdjson::error_message(rl_elem_res.error())),
+          emitter.EmittedCount()};
     }
     auto rl_val_item = rl_elem_res.value();
     auto rl_obj_res = rl_val_item.get_object();
@@ -206,8 +211,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
     for (auto sl_elem_res : sl_arr_res.value()) {
       if (sl_elem_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(sl_elem_res.error())),
-                                emitter.EmittedCount()};
+        return ExtractionResult{
+            false, std::string(simdjson::error_message(sl_elem_res.error())),
+            emitter.EmittedCount()};
       }
       auto sl_val_item = sl_elem_res.value();
       auto sl_obj_res = sl_val_item.get_object();
@@ -250,7 +256,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
             } else {
               lua_newtable(L);
             }
-            scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+            scope_attrs_scoped =
+                ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
           }
         }
       }
@@ -276,8 +283,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
       for (auto rec_elem_res : recs_arr_res.value()) {
         if (rec_elem_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(rec_elem_res.error())),
-                                  emitter.EmittedCount()};
+          return ExtractionResult{
+              false, std::string(simdjson::error_message(rec_elem_res.error())),
+              emitter.EmittedCount()};
         }
         auto rec_val_item = rec_elem_res.value();
         auto rec_obj_res = rec_val_item.get_object();
@@ -309,7 +317,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
           if (k == "timeUnixNano" || k == "time_unix_nano") {
             t_ns = core::ParseUint64(fv);
-          } else if (k == "observedTimeUnixNano" || k == "observed_time_unix_nano") {
+          } else if (k == "observedTimeUnixNano" ||
+                     k == "observed_time_unix_nano") {
             obs_t_ns = core::ParseUint64(fv);
           } else if (k == "traceId" || k == "trace_id") {
             auto s_res = fv.get_string();
@@ -340,7 +349,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
           } else if (k == "attributes") {
             if (L != nullptr) {
               core::PushAttributesTable(L, fv, writer);
-              log_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+              log_attrs_scoped =
+                  ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
               has_log_attrs = true;
             }
           }
@@ -401,7 +411,8 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
 
   emitter.Flush();
   if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                            emitter.EmittedCount()};
   }
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
@@ -417,7 +428,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
   static thread_local core::FastJsonWriter writer;
   writer.Reset();
   struct TableScopeGuard {
-    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
+    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w)
+        : L(l), top(t), writer(w) {}
     TableScopeGuard(const TableScopeGuard&) = delete;
     TableScopeGuard& operator=(const TableScopeGuard&) = delete;
     ~TableScopeGuard() noexcept {
@@ -554,22 +566,26 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
 
             // 2. TraceId
-            core::CopyStringField(L, rec_obj_idx, "traceId", "trace_id", emitter, "TraceId");
+            core::CopyStringField(L, rec_obj_idx, "traceId", "trace_id",
+                                  emitter, "TraceId");
 
             // 3. SpanId
-            core::CopyStringField(L, rec_obj_idx, "spanId", "span_id", emitter, "SpanId");
+            core::CopyStringField(L, rec_obj_idx, "spanId", "span_id", emitter,
+                                  "SpanId");
 
             // 4. TraceFlags
-            emitter.SetInt64("TraceFlags",
-                             core::ReadTableInt64(L, rec_obj_idx, "flags", "traceFlags"));
+            emitter.SetInt64(
+                "TraceFlags",
+                core::ReadTableInt64(L, rec_obj_idx, "flags", "traceFlags"));
 
             // 5. SeverityText
-            core::CopyStringField(L, rec_obj_idx, "severityText", "severity_text", emitter,
-                                  "SeverityText");
+            core::CopyStringField(L, rec_obj_idx, "severityText",
+                                  "severity_text", emitter, "SeverityText");
 
             // 6. SeverityNumber
             int64_t sev_num = 0;
-            if (core::GetTableField(L, rec_obj_idx, "severityNumber", "severity_number")) {
+            if (core::GetTableField(L, rec_obj_idx, "severityNumber",
+                                    "severity_number")) {
               sev_num = core::ParseTableSeverityNumber(L, -1);
               lua_pop(L, 1);
             }
@@ -616,7 +632,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             }
 
             // 16. EventName
-            core::CopyStringField(L, rec_obj_idx, "eventName", "event_name", emitter, "EventName");
+            core::CopyStringField(L, rec_obj_idx, "eventName", "event_name",
+                                  emitter, "EventName");
 
             // 17. processed_at
             emitter.SetString("processed_at", processed_at);
@@ -624,7 +641,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             emitter.EndRecord();
             lua_pop(L, 1);  // pop rec_obj
             if (emitter.HasError()) {
-              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+              return ExtractionResult{false,
+                                      std::string(emitter.ErrorMessage()),
                                       emitter.EmittedCount()};
             }
           }
@@ -639,7 +657,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
 
   emitter.Flush();
   if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                            emitter.EmittedCount()};
   }
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
