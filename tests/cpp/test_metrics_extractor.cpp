@@ -616,6 +616,559 @@ TEST_F(MetricsExtractorTest,
   EXPECT_EQ(lua_gettop(L_), initial_top);
 }
 
+TEST_F(MetricsExtractorTest, HistogramWithoutMinAndMax) {
+  // 1. JSON mode test
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "hist_no_min_max",
+          "histogram": {
+            "dataPoints": [{
+              "startTimeUnixNano": "1630000000000000000",
+              "timeUnixNano": "1630000001000000000",
+              "count": 50,
+              "sum": 12.5,
+              "bucketCounts": ["10", "40"],
+              "explicitBounds": [1.0]
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  // 2. Table mode test
+  const char* push_table_hist = R"(
+    return {
+      resourceMetrics = {
+        {
+          scopeMetrics = {
+            {
+              metrics = {
+                {
+                  name = "table_hist_no_min_max",
+                  histogram = {
+                    dataPoints = {
+                      {
+                        startTimeUnixNano = "1630000000000000000",
+                        timeUnixNano = "1630000001000000000",
+                        count = 60,
+                        sum = 18.0,
+                        bucketCounts = { 20, 40 },
+                        explicitBounds = { 2.5 }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_table_hist), LUA_OK) << lua_tostring(L_, -1);
+  auto tbl_res = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res.success) << tbl_res.error;
+  EXPECT_EQ(tbl_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
+
+    -- Event 1: JSON histogram without min/max
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "hist_no_min_max")
+    assert(e1.Histogram ~= nil, "e1 Histogram table missing")
+    assert(e1.Histogram.count == 50)
+    assert(math.abs(e1.Histogram.sum - 12.5) < 0.001)
+    assert(e1.Histogram.min == nil, "e1.Histogram.min must be nil")
+    assert(e1.Histogram.max == nil, "e1.Histogram.max must be nil")
+    assert(e1.Histogram.Min == nil, "e1.Histogram.Min must be nil")
+    assert(e1.Histogram.Max == nil, "e1.Histogram.Max must be nil")
+    assert(#e1.Histogram.bucketCounts == 2)
+    assert(e1.Histogram.bucketCounts[1] == 10 and e1.Histogram.bucketCounts[2] == 40)
+    assert(#e1.Histogram.explicitBounds == 1 and math.abs(e1.Histogram.explicitBounds[1] - 1.0) < 0.001)
+
+    -- Event 2: Table histogram without min/max
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "table_hist_no_min_max")
+    assert(e2.Histogram ~= nil, "e2 Histogram table missing")
+    assert(e2.Histogram.count == 60)
+    assert(math.abs(e2.Histogram.sum - 18.0) < 0.001)
+    assert(e2.Histogram.min == nil, "e2.Histogram.min must be nil")
+    assert(e2.Histogram.max == nil, "e2.Histogram.max must be nil")
+    assert(e2.Histogram.Min == nil, "e2.Histogram.Min must be nil")
+    assert(e2.Histogram.Max == nil, "e2.Histogram.Max must be nil")
+    assert(#e2.Histogram.bucketCounts == 2)
+    assert(e2.Histogram.bucketCounts[1] == 20 and e2.Histogram.bucketCounts[2] == 40)
+    assert(#e2.Histogram.explicitBounds == 1 and math.abs(e2.Histogram.explicitBounds[1] - 2.5) < 0.001)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "resource": {
+        "attributes": [{"key": "service.name", "value": {"stringValue": "summary-svc"}}]
+      },
+      "scopeMetrics": [{
+        "scope": {"name": "summary_scope", "version": "1.0"},
+        "metrics": [{
+          "name": "rpc_latency_summary",
+          "description": "RPC latency summary test",
+          "unit": "ms",
+          "summary": {
+            "dataPoints": [{
+              "startTimeUnixNano": "1630000000000000000",
+              "timeUnixNano": "1630000002000000000",
+              "count": 1000,
+              "sum": 50000.0,
+              "quantileValues": [
+                {"quantile": 0.5, "value": 45.0},
+                {"quantile": 0.9, "value": 90.0},
+                {"quantile": 0.99, "value": 150.0}
+              ],
+              "attributes": [{"key": "endpoint", "value": {"stringValue": "/api/v1/checkout"}}],
+              "flags": 1
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  // Table mode summary
+  const char* push_table_summary = R"(
+    return {
+      resourceMetrics = {
+        {
+          scopeMetrics = {
+            {
+              metrics = {
+                {
+                  name = "table_summary_metric",
+                  description = "Table summary metric test",
+                  unit = "s",
+                  summary = {
+                    dataPoints = {
+                      {
+                        startTimeUnixNano = "1630000000000000000",
+                        timeUnixNano = "1630000003000000000",
+                        count = 200,
+                        sum = 600.0,
+                        quantileValues = {
+                          { quantile = 0.5, value = 2.5 },
+                          { quantile = 0.95, value = 5.0 }
+                        },
+                        attributes = {
+                          { key = "handler", value = { stringValue = "login" } }
+                        },
+                        flags = 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_table_summary), LUA_OK)
+      << lua_tostring(L_, -1);
+  auto tbl_res = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res.success) << tbl_res.error;
+  EXPECT_EQ(tbl_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
+
+    -- Event 1: JSON Summary
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "rpc_latency_summary")
+    assert(e1.MetricDescription == "RPC latency summary test")
+    assert(e1.MetricUnit == "ms")
+    assert(e1.MetricType == "summary")
+    assert(e1.ServiceName == "summary-svc")
+    assert(e1.ScopeName == "summary_scope")
+    assert(e1.ScopeVersion == "1.0")
+    assert(e1.Value == nil, "Summary Value must be nil")
+    assert(e1.Histogram == nil, "Summary Histogram must be nil")
+    assert(e1.Attributes["endpoint"] == "/api/v1/checkout")
+    assert(e1.Flags == 1)
+    assert(e1.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
+    assert(e1.TimeUnix == "2021-08-26T17:46:42.000000000Z")
+
+    -- Event 2: Table Summary
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "table_summary_metric")
+    assert(e2.MetricDescription == "Table summary metric test")
+    assert(e2.MetricUnit == "s")
+    assert(e2.MetricType == "summary")
+    assert(e2.Value == nil, "Table summary Value must be nil")
+    assert(e2.Histogram == nil, "Table summary Histogram must be nil")
+    assert(e2.Attributes["handler"] == "login")
+    assert(e2.Flags == 0)
+    assert(e2.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
+    assert(e2.TimeUnix == "2021-08-26T17:46:43.000000000Z")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, ExponentialHistogramDataPointsSkippedSafely) {
+  // 1. JSON mode: exponentialHistogram along with standard gauge
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [
+          {
+            "name": "exp_hist_skipped",
+            "exponentialHistogram": {
+              "dataPoints": [{
+                "startTimeUnixNano": "1630000000000000000",
+                "timeUnixNano": "1630000001000000000",
+                "count": 10,
+                "sum": 25.0,
+                "scale": 1,
+                "zeroCount": 2,
+                "positive": {
+                  "offset": 1,
+                  "bucketCounts": ["1", "3", "4"]
+                },
+                "negative": {
+                  "offset": 0,
+                  "bucketCounts": []
+                }
+              }]
+            }
+          },
+          {
+            "name": "valid_gauge_alongside",
+            "gauge": {
+              "dataPoints": [{
+                "timeUnixNano": "1630000001000000000",
+                "asDouble": 77.5
+              }]
+            }
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  // 2. Only exponentialHistogram in JSON payload -> returns success with 0
+  // emitted
+  const std::string only_exp_json = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "only_exp_hist",
+          "exponentialHistogram": {
+            "dataPoints": [{
+              "count": 5,
+              "scale": 3,
+              "zeroCount": 1
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+  auto only_res = ProcessMetrics(L_, only_exp_json, 1);
+  EXPECT_TRUE(only_res.success);
+  EXPECT_EQ(only_res.emitted_count, 0);
+
+  // 3. Table mode: exponentialHistogram along with sum
+  const char* push_table_exp = R"(
+    return {
+      resourceMetrics = {
+        {
+          scopeMetrics = {
+            {
+              metrics = {
+                {
+                  name = "table_exp_hist",
+                  exponentialHistogram = {
+                    dataPoints = {
+                      { scale = 2, zeroCount = 0, count = 10 }
+                    }
+                  }
+                },
+                {
+                  name = "table_valid_sum",
+                  sum = {
+                    dataPoints = {
+                      { asInt = 500 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_table_exp), LUA_OK) << lua_tostring(L_, -1);
+  auto tbl_res = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res.success) << tbl_res.error;
+  EXPECT_EQ(tbl_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "valid_gauge_alongside")
+    assert(math.abs(e1.Value - 77.5) < 0.001)
+
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "table_valid_sum")
+    assert(e2.Value == 500)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, MetricDescriptionAndUnitPopulatedOrOmitted) {
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [
+          {
+            "name": "metric_with_meta",
+            "description": "Network throughput in megabits per second",
+            "unit": "Mbit/s",
+            "gauge": {
+              "dataPoints": [{"asDouble": 128.5}]
+            }
+          },
+          {
+            "name": "metric_without_meta",
+            "gauge": {
+              "dataPoints": [{"asDouble": 64.0}]
+            }
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2)
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "metric_with_meta")
+    assert(e1.MetricDescription == "Network throughput in megabits per second")
+    assert(e1.MetricUnit == "Mbit/s")
+
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "metric_without_meta")
+    assert(e2.MetricDescription == "")
+    assert(e2.MetricUnit == "")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, ExemplarsWithAsDoubleAndAsInt) {
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "metric_exemplars_mix",
+          "sum": {
+            "dataPoints": [{
+              "asInt": 1000,
+              "exemplars": [
+                {
+                  "timeUnixNano": "1630000000000000000",
+                  "traceId": "0123456789abcdef0123456789abcdef",
+                  "spanId": "0123456789abcdef",
+                  "asDouble": 12.345,
+                  "filteredAttributes": [{"key": "tag_dbl", "value": {"stringValue": "val_dbl"}}]
+                },
+                {
+                  "time_unix_nano": "1630000001000000000",
+                  "trace_id": "fedcba9876543210fedcba9876543210",
+                  "span_id": "fedcba9876543210",
+                  "asInt": "8888",
+                  "filtered_attributes": [{"key": "tag_int", "value": {"intValue": 99}}]
+                },
+                {
+                  "as_int": -42
+                }
+              ]
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+
+  auto res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    local e = emitted[1].log
+    assert(e.MetricName == "metric_exemplars_mix")
+    assert(e.Exemplars ~= nil and #e.Exemplars == 3, "expected 3 exemplars, got " .. tostring(#e.Exemplars))
+
+    -- Exemplar 1: asDouble
+    local ex1 = e.Exemplars[1]
+    assert(math.abs(ex1.Value - 12.345) < 0.001)
+    assert(math.type(ex1.Value) == "float", "ex1 Value must be float")
+    assert(ex1.TimeUnix == "2021-08-26T17:46:40.000000000Z")
+    assert(ex1.TraceId == "0123456789abcdef0123456789abcdef")
+    assert(ex1.SpanId == "0123456789abcdef")
+    assert(ex1.FilteredAttributes["tag_dbl"] == "val_dbl")
+
+    -- Exemplar 2: asInt string
+    local ex2 = e.Exemplars[2]
+    assert(ex2.Value == 8888)
+    assert(math.type(ex2.Value) == "integer", "ex2 Value must be integer")
+    assert(ex2.TimeUnix == "2021-08-26T17:46:41.000000000Z")
+    assert(ex2.TraceId == "fedcba9876543210fedcba9876543210")
+    assert(ex2.SpanId == "fedcba9876543210")
+    assert(ex2.FilteredAttributes["tag_int"] == 99)
+
+    -- Exemplar 3: as_int snake_case negative
+    local ex3 = e.Exemplars[3]
+    assert(ex3.Value == -42)
+    assert(math.type(ex3.Value) == "integer", "ex3 Value must be integer")
+    assert(ex3.TimeUnix == "")
+    assert(ex3.TraceId == "")
+    assert(ex3.SpanId == "")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [
+          {
+            "name": "delta_sum",
+            "sum": {
+              "aggregationTemporality": 1,
+              "isMonotonic": true,
+              "dataPoints": [{
+                "asInt": 150,
+                "flags": 1
+              }]
+            }
+          },
+          {
+            "name": "cumulative_hist",
+            "histogram": {
+              "aggregation_temporality": 2,
+              "dataPoints": [{
+                "count": 25,
+                "sum": 100.0,
+                "flags": 4
+              }]
+            }
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2)
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "delta_sum")
+    assert(e1.Flags == 1)
+
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "cumulative_hist")
+    assert(e2.Flags == 4)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, GaugesAndSumsIntegerVsDoubleValues) {
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [
+          {
+            "name": "gauge_int",
+            "gauge": {
+              "dataPoints": [{"asInt": "100"}]
+            }
+          },
+          {
+            "name": "gauge_double",
+            "gauge": {
+              "dataPoints": [{"asDouble": 100.5}]
+            }
+          },
+          {
+            "name": "sum_int",
+            "sum": {
+              "dataPoints": [{"as_int": -200}]
+            }
+          },
+          {
+            "name": "sum_double",
+            "sum": {
+              "dataPoints": [{"as_double": -200.75}]
+            }
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 4);
+
+  const char* verify_script = R"(
+    assert(#emitted == 4)
+    local g_int = emitted[1].log
+    assert(g_int.Value == 100)
+    assert(math.type(g_int.Value) == "integer")
+
+    local g_dbl = emitted[2].log
+    assert(math.abs(g_dbl.Value - 100.5) < 0.001)
+    assert(math.type(g_dbl.Value) == "float")
+
+    local s_int = emitted[3].log
+    assert(s_int.Value == -200)
+    assert(math.type(s_int.Value) == "integer")
+
+    local s_dbl = emitted[4].log
+    assert(math.abs(s_dbl.Value - (-200.75)) < 0.001)
+    assert(math.type(s_dbl.Value) == "float")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 
 }  // namespace extractors

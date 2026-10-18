@@ -784,5 +784,452 @@ TEST_F(OtlpCommonTest, PushAttributesTableExtractsServiceNameSinglePass) {
   }
 }
 
+TEST_F(OtlpCommonTest, TryParseDoubleWhitespaceScientificAndMalformed) {
+  auto json = R"({
+    "ws_pos": "  123.456  ",
+    "ws_tab_newline": "\t-0.5\n",
+    "ws_crlf": "\r\n  42.0  \t",
+    "sci_pos": "1e6",
+    "sci_neg": "-2.5e-3",
+    "int_str": "99",
+    "num_pos": 42.5,
+    "num_int": 100,
+    "num_neg": -3.14,
+    "bad_alpha": "not_a_number",
+    "bad_trail": "12.34bad",
+    "bad_ws_only": "   ",
+    "bad_empty": "",
+    "bad_dot_only": "-.",
+    "bad_signs": "+-12",
+    "bad_multi_dots": "1.2.3",
+    "val_bool": true,
+    "val_null": null,
+    "val_obj": {},
+    "val_arr": [1.0]
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  // Valid whitespace padded string doubles
+  {
+    double out = 0.0;
+    auto v = obj["ws_pos"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, 123.456);
+    EXPECT_DOUBLE_EQ(ParseDouble(v), 123.456);
+  }
+  {
+    double out = 0.0;
+    auto v = obj["ws_tab_newline"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, -0.5);
+    EXPECT_DOUBLE_EQ(ParseDouble(v), -0.5);
+  }
+  {
+    double out = 0.0;
+    auto v = obj["ws_crlf"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, 42.0);
+    EXPECT_DOUBLE_EQ(ParseDouble(v), 42.0);
+  }
+
+  // Valid scientific notation strings
+  {
+    double out = 0.0;
+    auto v = obj["sci_pos"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, 1000000.0);
+  }
+  {
+    double out = 0.0;
+    auto v = obj["sci_neg"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, -0.0025);
+  }
+  {
+    double out = 0.0;
+    auto v = obj["int_str"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, 99.0);
+  }
+
+  // Valid numbers
+  {
+    double out = 0.0;
+    auto v = obj["num_pos"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, 42.5);
+  }
+  {
+    double out = 0.0;
+    auto v = obj["num_int"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, 100.0);
+  }
+  {
+    double out = 0.0;
+    auto v = obj["num_neg"].value();
+    EXPECT_TRUE(TryParseDouble(v, out));
+    EXPECT_DOUBLE_EQ(out, -3.14);
+  }
+
+  // Malformed and invalid strings
+  const char* bad_keys[] = {"bad_alpha",      "bad_trail",    "bad_ws_only",
+                            "bad_empty",      "bad_dot_only", "bad_signs",
+                            "bad_multi_dots", "val_bool",     "val_null",
+                            "val_obj",        "val_arr"};
+  for (const char* k : bad_keys) {
+    double out = -999.0;
+    auto v = obj[k].value();
+    EXPECT_FALSE(TryParseDouble(v, out)) << "Expected false for key: " << k;
+    EXPECT_DOUBLE_EQ(out, -999.0) << "Output modified for key: " << k;
+    EXPECT_DOUBLE_EQ(ParseDouble(v), 0.0)
+        << "ParseDouble not zero for key: " << k;
+  }
+}
+
+TEST_F(OtlpCommonTest, ParseInt64ScientificAndBounds) {
+  auto json = R"({
+    "sci_str": "1e6",
+    "sci_neg_str": "-1e6",
+    "flt_str": "123.456",
+    "flt_neg_str": "-0.5",
+    "u64_max_str": "18446744073709551615",
+    "i64_max_plus_one_str": "9223372036854775808",
+    "overflow_str": "999999999999999999999999999999999999",
+    "underflow_str": "-999999999999999999999999999999999999",
+    "sci_num_valid": 1e6,
+    "sci_num_neg_valid": -500.0,
+    "sci_num_huge": 1e30,
+    "sci_num_huge_neg": -1e30,
+    "num_two_pow_63": 9223372036854775808.0,
+    "num_neg_two_pow_63_exact": -9223372036854775808.0,
+    "num_neg_below_min": -9223372036854777856.0
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  // Integer from_chars does not accept scientific strings
+  auto v_sci = obj["sci_str"].value();
+  EXPECT_EQ(ParseInt64(v_sci), 0);
+
+  auto v_sci_neg = obj["sci_neg_str"].value();
+  EXPECT_EQ(ParseInt64(v_sci_neg), 0);
+
+  // Floating strings fail full-string integer parsing
+  auto v_flt = obj["flt_str"].value();
+  EXPECT_EQ(ParseInt64(v_flt), 0);
+
+  auto v_flt_neg = obj["flt_neg_str"].value();
+  EXPECT_EQ(ParseInt64(v_flt_neg), 0);
+
+  // String bounds clamping and overflow
+  auto v_u64_max = obj["u64_max_str"].value();
+  EXPECT_EQ(ParseInt64(v_u64_max), INT64_MAX);
+
+  auto v_i64_plus_one = obj["i64_max_plus_one_str"].value();
+  EXPECT_EQ(ParseInt64(v_i64_plus_one), INT64_MAX);
+
+  auto v_overflow = obj["overflow_str"].value();
+  EXPECT_EQ(ParseInt64(v_overflow), 0);
+
+  auto v_underflow = obj["underflow_str"].value();
+  EXPECT_EQ(ParseInt64(v_underflow), 0);
+
+  // Number doubles in finite int64 range convert safely
+  auto v_num_valid = obj["sci_num_valid"].value();
+  EXPECT_EQ(ParseInt64(v_num_valid), 1000000);
+
+  auto v_num_neg_valid = obj["sci_num_neg_valid"].value();
+  EXPECT_EQ(ParseInt64(v_num_neg_valid), -500);
+
+  // Out of range doubles return 0 safely
+  auto v_huge = obj["sci_num_huge"].value();
+  EXPECT_EQ(ParseInt64(v_huge), 0);
+
+  auto v_huge_neg = obj["sci_num_huge_neg"].value();
+  EXPECT_EQ(ParseInt64(v_huge_neg), 0);
+
+  auto v_two_pow_63 = obj["num_two_pow_63"].value();
+  EXPECT_EQ(ParseInt64(v_two_pow_63), 0);
+
+  auto v_neg_exact = obj["num_neg_two_pow_63_exact"].value();
+  EXPECT_EQ(ParseInt64(v_neg_exact), INT64_MIN);
+
+  auto v_neg_below = obj["num_neg_below_min"].value();
+  EXPECT_EQ(ParseInt64(v_neg_below), 0);
+}
+
+TEST_F(OtlpCommonTest, PushAnyValueMixedArraysAndTypes) {
+  auto json = R"({
+    "mixed_array": [true, "sample", 123, 45.67, null, [1, 2], {"inner_k": "inner_v"}],
+    "arr_obj": {
+      "arrayValue": {
+        "values": [
+          {"stringValue": "val1"},
+          {"intValue": 42},
+          {"doubleValue": 3.14},
+          {"boolValue": false},
+          {"bytesValue": "aGVsbG8="},
+          {"arrayValue": {"values": [{"stringValue": "nested"}]}}
+        ]
+      }
+    },
+    "uint_obj": {
+      "uintValue": 100
+    },
+    "uint_snake_obj": {
+      "uint_value": "18446744073709551615"
+    }
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  // Direct mixed array pushed as JSON string
+  {
+    auto v = obj["mixed_array"].value();
+    PushAnyValue(L_, v, writer_);
+    ASSERT_TRUE(lua_isstring(L_, -1));
+    std::string s = lua_tostring(L_, -1);
+    EXPECT_NE(s.find("sample"), std::string::npos);
+    EXPECT_NE(s.find("123"), std::string::npos);
+    EXPECT_NE(s.find("inner_k"), std::string::npos);
+    lua_pop(L_, 1);
+  }
+
+  // arrayValue with multiple heterogeneous types serialized as JSON string
+  {
+    auto v = obj["arr_obj"].value();
+    PushAnyValue(L_, v, writer_);
+    ASSERT_TRUE(lua_isstring(L_, -1));
+    std::string s = lua_tostring(L_, -1);
+    EXPECT_NE(s.find("val1"), std::string::npos);
+    EXPECT_NE(s.find("42"), std::string::npos);
+    EXPECT_NE(s.find("3.14"), std::string::npos);
+    EXPECT_NE(s.find("aGVsbG8="), std::string::npos);
+    EXPECT_NE(s.find("nested"), std::string::npos);
+    lua_pop(L_, 1);
+  }
+
+  // uintValue integer
+  {
+    auto v = obj["uint_obj"].value();
+    PushAnyValue(L_, v, writer_);
+    ASSERT_TRUE(lua_isinteger(L_, -1));
+    EXPECT_EQ(lua_tointeger(L_, -1), 100);
+    lua_pop(L_, 1);
+  }
+
+  // uint_value string clamped to INT64_MAX
+  {
+    auto v = obj["uint_snake_obj"].value();
+    PushAnyValue(L_, v, writer_);
+    ASSERT_TRUE(lua_isinteger(L_, -1));
+    EXPECT_EQ(lua_tointeger(L_, -1), INT64_MAX);
+    lua_pop(L_, 1);
+  }
+}
+
+TEST_F(OtlpCommonTest, PushAttributesTableArrayAndMapFormats) {
+  // 1. Array format with mixed valid and malformed items
+  {
+    auto json = R"({
+      "attributes": [
+        {"key": "str_item", "value": {"stringValue": "text"}},
+        {"key": "int_item", "value": {"intValue": 999}},
+        {"invalid_no_key": {"stringValue": "skipped"}},
+        {"key": 12345},
+        {"key": "missing_val"}
+      ]
+    })"_padded;
+
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    PushAttributesTable(L_, attrs, writer_);
+    ASSERT_TRUE(lua_istable(L_, -1));
+
+    lua_getfield(L_, -1, "str_item");
+    EXPECT_STREQ(lua_tostring(L_, -1), "text");
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "int_item");
+    EXPECT_EQ(lua_tointeger(L_, -1), 999);
+    lua_pop(L_, 1);
+
+    lua_pop(L_, 1);  // pop table
+  }
+
+  // 2. Map format with direct scalar and object values
+  {
+    auto json = R"({
+      "attributes": {
+        "m_obj_str": {"stringValue": "map_val"},
+        "m_obj_int": {"intValue": 456},
+        "m_direct_str": "direct_hello",
+        "m_direct_int": 789,
+        "m_direct_dbl": 1.75,
+        "m_direct_bool": true,
+        "m_direct_arr": ["elem1", "elem2"]
+      }
+    })"_padded;
+
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    PushAttributesTable(L_, attrs, writer_);
+    ASSERT_TRUE(lua_istable(L_, -1));
+
+    lua_getfield(L_, -1, "m_obj_str");
+    EXPECT_STREQ(lua_tostring(L_, -1), "map_val");
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "m_obj_int");
+    EXPECT_EQ(lua_tointeger(L_, -1), 456);
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "m_direct_str");
+    EXPECT_STREQ(lua_tostring(L_, -1), "direct_hello");
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "m_direct_int");
+    EXPECT_EQ(lua_tointeger(L_, -1), 789);
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "m_direct_dbl");
+    EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 1.75);
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "m_direct_bool");
+    EXPECT_EQ(lua_toboolean(L_, -1), 1);
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "m_direct_arr");
+    ASSERT_TRUE(lua_isstring(L_, -1));
+    std::string arr_str = lua_tostring(L_, -1);
+    EXPECT_NE(arr_str.find("elem1"), std::string::npos);
+    lua_pop(L_, 1);
+
+    lua_pop(L_, 1);  // pop table
+  }
+}
+
+TEST_F(OtlpCommonTest, ExtractServiceNameEdgeCases) {
+  // Empty attributes array
+  {
+    auto json = R"({ "attributes": [] })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Missing service.name in attributes array
+  {
+    auto json = R"({
+      "attributes": [
+        {"key": "host.name", "value": {"stringValue": "server-1"}}
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Numeric service.name in array with object value -> unknown_service
+  {
+    auto json = R"({
+      "attributes": [
+        {"key": "service.name", "value": {"intValue": 404}}
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Numeric service.name in array with direct scalar -> unknown_service
+  {
+    auto json = R"({
+      "attributes": [
+        {"key": "service.name", "value": 404}
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Direct string value in array format -> returns string
+  {
+    auto json = R"({
+      "attributes": [
+        {"key": "service.name", "value": "direct-array-service"}
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "direct-array-service");
+  }
+
+  // Missing service.name in map format -> unknown_service
+  {
+    auto json = R"({
+      "attributes": { "host.name": "server-2" }
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Numeric service.name in map format -> unknown_service
+  {
+    auto json = R"({
+      "attributes": { "service.name": 999 }
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Numeric service.name in map with object value -> unknown_service
+  {
+    auto json = R"({
+      "attributes": { "service.name": {"intValue": 999} }
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Empty attributes map -> unknown_service
+  {
+    auto json = R"({ "attributes": {} })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Null attributes -> unknown_service
+  {
+    auto json = R"({ "attributes": null })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+
+  // Missing attributes field entirely -> unknown_service
+  {
+    auto json = R"({ "other_field": "val" })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    EXPECT_EQ(ExtractServiceName(obj), "unknown_service");
+  }
+}
+
 }  // namespace
 }  // namespace vector_otel::core
