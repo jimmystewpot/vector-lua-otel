@@ -15,9 +15,11 @@ extern "C" {
 
 namespace {
 
-using ExtractorStringFn = vector_otel::extractors::ExtractionResult (*)(lua_State*,
-                                                                        std::string_view, int);
-using ExtractorTableFn = vector_otel::extractors::ExtractionResult (*)(lua_State*, int, int);
+namespace core = vector_otel::core;
+namespace extractors = vector_otel::extractors;
+
+using ExtractorStringFn = extractors::ExtractionResult (*)(lua_State*, std::string_view, int);
+using ExtractorTableFn = extractors::ExtractionResult (*)(lua_State*, int, int);
 
 thread_local bool tls_active_extraction = false;
 
@@ -53,13 +55,13 @@ int ProcessDispatcher(lua_State* L) {
       return 3;
     }
 
-    vector_otel::extractors::ExtractionResult result;
+    extractors::ExtractionResult result;
     if (arg_type == LUA_TSTRING) {
       size_t len = 0;
       const char* str = lua_tolstring(L, 1, &len);
       std::string_view payload(str, len);
       result = StringExtractor(L, payload, 2);
-      vector_otel::core::OtelParser::TrimThreadLocalBuffer();
+      core::OtelParser::TrimThreadLocalBuffer();
     } else {
       result = TableExtractor(L, 1, 2);
     }
@@ -92,18 +94,15 @@ int ProcessDispatcher(lua_State* L) {
 }
 
 int ProcessLogs(lua_State* L) {
-  return ProcessDispatcher<vector_otel::extractors::ProcessLogs,
-                           vector_otel::extractors::ProcessLogsTable>(L);
+  return ProcessDispatcher<extractors::ProcessLogs, extractors::ProcessLogsTable>(L);
 }
 
 int ProcessTraces(lua_State* L) {
-  return ProcessDispatcher<vector_otel::extractors::ProcessTraces,
-                           vector_otel::extractors::ProcessTracesTable>(L);
+  return ProcessDispatcher<extractors::ProcessTraces, extractors::ProcessTracesTable>(L);
 }
 
 int ProcessMetrics(lua_State* L) {
-  return ProcessDispatcher<vector_otel::extractors::ProcessMetrics,
-                           vector_otel::extractors::ProcessMetricsTable>(L);
+  return ProcessDispatcher<extractors::ProcessMetrics, extractors::ProcessMetricsTable>(L);
 }
 
 void RegisterInPackageLoaded(lua_State* L, const char* name, int table_idx) {

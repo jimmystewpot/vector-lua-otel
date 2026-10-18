@@ -11,8 +11,7 @@ extern "C" {
 
 #include "vector_otel/core/fast_json_writer.hpp"
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 class LuaEmitter;
 
@@ -78,5 +77,4 @@ void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer);
 // Pushes an array of Links table for traces onto the Lua stack.
 void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer);
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core
