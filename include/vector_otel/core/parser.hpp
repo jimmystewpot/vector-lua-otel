@@ -4,8 +4,7 @@
 
 #include "simdjson.h"
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 class OtelParser {
  public:
@@ -32,5 +31,4 @@ class OtelParser {
   simdjson::ondemand::parser parser_{kMaxPayloadSize};
 };
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core

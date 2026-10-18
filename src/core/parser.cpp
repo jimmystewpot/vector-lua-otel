@@ -2,8 +2,7 @@
 
 #include <string>
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 namespace {
 
@@ -44,7 +43,7 @@ simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
   if (json_str.has_sufficient_padding()) [[likely]] {
     return parser_.iterate(json_str);
   }
-  return IterateWithThreadLocalPadding(parser_, json_str);
+  return IterateWithThreadLocalPadding(parser_, std::string_view(json_str.data(), json_str.size()));
 }
 
 void OtelParser::TrimCapacity() noexcept {
@@ -66,5 +65,4 @@ void OtelParser::TrimThreadLocalBuffer() noexcept {
   Instance().TrimCapacity();
 }
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core
