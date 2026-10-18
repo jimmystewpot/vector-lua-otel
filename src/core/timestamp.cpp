@@ -1,10 +1,10 @@
 #include "vector_otel/core/timestamp.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstring>
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 void FormatIso8601Nano(uint64_t unix_nanos, char* out_buf_32bytes) {
   if (out_buf_32bytes == nullptr) {
@@ -63,9 +63,9 @@ void FormatIso8601Nano(uint64_t unix_nanos, char* out_buf_32bytes) {
 }
 
 std::string FormatIso8601Nano(uint64_t unix_nanos) {
-  char buf[32];
-  FormatIso8601Nano(unix_nanos, buf);
-  return std::string(buf, 30);
+  std::array<char, 32> buf;
+  FormatIso8601Nano(unix_nanos, buf.data());
+  return std::string(buf.data(), 30);
 }
 
 uint64_t CurrentTimeUnixNano() {
@@ -73,5 +73,4 @@ uint64_t CurrentTimeUnixNano() {
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core
