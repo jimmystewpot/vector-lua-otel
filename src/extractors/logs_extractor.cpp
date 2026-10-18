@@ -1,5 +1,6 @@
 #include "vector_otel/extractors/logs_extractor.hpp"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -16,8 +17,7 @@ extern "C" {
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
-namespace vector_otel {
-namespace extractors {
+namespace vector_otel::extractors {
 
 namespace {
 
@@ -90,12 +90,16 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
   writer.Reset();
   body_writer.Reset();
   struct WriterTrimGuard {
-    core::FastJsonWriter& w1;
-    core::FastJsonWriter& w2;
+    explicit WriterTrimGuard(core::FastJsonWriter& writer1, core::FastJsonWriter& writer2)
+        : w1(writer1), w2(writer2) {}
+    WriterTrimGuard(const WriterTrimGuard&) = delete;
+    WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
     ~WriterTrimGuard() noexcept {
       w1.Trim();
       w2.Trim();
     }
+    core::FastJsonWriter& w1;
+    core::FastJsonWriter& w2;
   } trim_guard{writer, body_writer};
 
   auto doc_res = parser.Iterate(raw_json);
@@ -110,9 +114,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
   }
   auto doc_obj = doc_obj_res.value();
 
-  char proc_buf[32];
-  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf);
-  std::string_view processed_at(proc_buf, 30);
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
   core::LuaEmitter emitter(L, emit_idx);
 
   auto rl_res = doc_obj.find_field_unordered("resourceLogs");
@@ -345,11 +349,11 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
         if (t_ns == 0) {
           t_ns = obs_t_ns;
         }
-        char ts_buf[32];
-        core::FormatIso8601Nano(t_ns, ts_buf);
+        std::array<char, 32> ts_buf;
+        core::FormatIso8601Nano(t_ns, ts_buf.data());
 
         emitter.StartRecord();
-        emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
+        emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
         emitter.SetString("TraceId", trace_id);
         emitter.SetString("SpanId", span_id);
         emitter.SetInt64("TraceFlags", flags);
@@ -413,18 +417,23 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
   static thread_local core::FastJsonWriter writer;
   writer.Reset();
   struct TableScopeGuard {
+    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
+    TableScopeGuard(const TableScopeGuard&) = delete;
+    TableScopeGuard& operator=(const TableScopeGuard&) = delete;
+    ~TableScopeGuard() noexcept {
+      if (L != nullptr) {
+        lua_settop(L, top);
+      }
+      writer.Trim();
+    }
     lua_State* L;
     int top;
     core::FastJsonWriter& writer;
-    ~TableScopeGuard() noexcept {
-      lua_settop(L, top);
-      writer.Trim();
-    }
   } scope_guard{L, entry_top, writer};
 
-  char proc_buf[32];
-  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf);
-  std::string_view processed_at(proc_buf, 30);
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
   core::LuaEmitter emitter(L, abs_emit_idx);
 
   int rl_arr_idx = 0;
@@ -540,9 +549,9 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
 
             // 1. Timestamp
             uint64_t t_ns = core::ReadTableTimestampNano(L, rec_obj_idx);
-            char ts_buf[32];
-            core::FormatIso8601Nano(t_ns, ts_buf);
-            emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
+            std::array<char, 32> ts_buf;
+            core::FormatIso8601Nano(t_ns, ts_buf.data());
+            emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
 
             // 2. TraceId
             core::CopyStringField(L, rec_obj_idx, "traceId", "trace_id", emitter, "TraceId");
@@ -635,5 +644,4 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
 
-}  // namespace extractors
-}  // namespace vector_otel
+}  // namespace vector_otel::extractors
