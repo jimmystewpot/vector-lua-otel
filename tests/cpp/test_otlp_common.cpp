@@ -14,8 +14,7 @@ extern "C" {
 #include <lualib.h>
 }
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 namespace {
 
 class OtlpCommonTest : public ::testing::Test {
@@ -786,5 +785,4 @@ TEST_F(OtlpCommonTest, PushAttributesTableExtractsServiceNameSinglePass) {
 }
 
 }  // namespace
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core

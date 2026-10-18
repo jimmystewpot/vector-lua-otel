@@ -3,29 +3,17 @@
 #include <algorithm>
 #include <limits>
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 LuaEmitter::LuaEmitter(lua_State* L, int emit_index, size_t batch_size,
                        std::string_view record_field_name)
     : L_(L),
-      initial_top_(0),
-      emit_index_(0),
-      emitted_count_(0),
+      initial_top_(L != nullptr ? lua_gettop(L) : 0),
+      emit_index_(L != nullptr ? lua_absindex(L, emit_index) : 0),
       batch_size_(std::clamp<size_t>(batch_size, 1, 65536)),
       record_field_name_(record_field_name),
-      current_batch_count_(0),
-      in_record_(false),
-      has_error_(false),
-      record_index_(0),
-      event_index_(0),
       event_ref_(L, LUA_NOREF),
-      records_ref_(L, LUA_NOREF) {
-  if (L_ != nullptr) {
-    initial_top_ = lua_gettop(L_);
-    emit_index_ = lua_absindex(L_, emit_index);
-  }
-}
+      records_ref_(L, LUA_NOREF) {}
 
 void LuaEmitter::StartRecord() {
   if (L_ == nullptr || in_record_ || has_error_) [[unlikely]] {
@@ -218,5 +206,4 @@ void LuaEmitter::Flush() {
 
 int LuaEmitter::EmittedCount() const { return emitted_count_; }
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core

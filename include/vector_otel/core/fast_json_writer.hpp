@@ -6,8 +6,7 @@
 #include <string_view>
 #include <vector>
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 class FastJsonWriter {
  public:
@@ -51,5 +50,4 @@ class FastJsonWriter {
   std::vector<ContainerState> stack_;
 };
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core

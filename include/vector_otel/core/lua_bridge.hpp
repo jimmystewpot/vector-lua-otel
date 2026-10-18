@@ -14,8 +14,7 @@ extern "C" {
 #define VECTOR_OTEL_EMIT_BATCH_SIZE 1
 #endif
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 class ScopedLuaRef {
  public:
@@ -164,5 +163,4 @@ class LuaEmitter {
   ScopedLuaRef records_ref_;
 };
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core

@@ -1,11 +1,11 @@
 #include "vector_otel/core/fast_json_writer.hpp"
 
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <utility>
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 FastJsonWriter::FastJsonWriter() {
   buffer_.reserve(4096);
@@ -75,9 +75,9 @@ void FastJsonWriter::WriteEscapedString(std::string_view sv) {
           buffer_.append("\\t", 2);
           break;
         default: {
-          const char hex_esc[6] = {
+          const std::array<char, 6> hex_esc = {
               '\\', 'u', '0', '0', kHexDigits[(c >> 4) & 0x0f], kHexDigits[c & 0x0f]};
-          buffer_.append(hex_esc, 6);
+          buffer_.append(hex_esc.data(), hex_esc.size());
           break;
         }
       }
@@ -140,16 +140,16 @@ void FastJsonWriter::RawJson(std::string_view raw) {
 
 void FastJsonWriter::Int64(int64_t val) {
   BeforeValue();
-  char buf[32];
-  const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
-  buffer_.append(buf, static_cast<size_t>(ptr - buf));
+  std::array<char, 32> buf;
+  const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), val);
+  buffer_.append(buf.data(), static_cast<size_t>(ptr - buf.data()));
 }
 
 void FastJsonWriter::Uint64(uint64_t val) {
   BeforeValue();
-  char buf[32];
-  const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
-  buffer_.append(buf, static_cast<size_t>(ptr - buf));
+  std::array<char, 32> buf;
+  const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), val);
+  buffer_.append(buf.data(), static_cast<size_t>(ptr - buf.data()));
 }
 
 void FastJsonWriter::Double(double val) {
@@ -158,9 +158,9 @@ void FastJsonWriter::Double(double val) {
     buffer_.append("null", 4);
     return;
   }
-  char buf[64];
-  const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
-  buffer_.append(buf, static_cast<size_t>(ptr - buf));
+  std::array<char, 64> buf;
+  const auto [ptr, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), val);
+  buffer_.append(buf.data(), static_cast<size_t>(ptr - buf.data()));
 }
 
 void FastJsonWriter::Bool(bool val) {
@@ -181,5 +181,4 @@ std::string_view FastJsonWriter::Str() const {
   return std::string_view(buffer_.data(), buffer_.size());
 }
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core

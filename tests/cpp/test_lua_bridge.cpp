@@ -10,8 +10,7 @@ extern "C" {
 #include <lualib.h>
 }
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 namespace {
 
 class LuaBridgeTest : public ::testing::Test {
@@ -476,6 +475,11 @@ TEST_F(LuaBridgeTest, BatchSizeBoundsClamping) {
   EXPECT_EQ(emitter_max.BatchSize(), 65536u);
 }
 
+TEST_F(LuaBridgeTest, EmitterConstructsCleanlyWithoutRedundantState) {
+  core::LuaEmitter emitter(L_, 1, 1, "log");
+  EXPECT_EQ(emitter.EmittedCount(), 0);
+  EXPECT_FALSE(emitter.HasError());
+}
+
 }  // namespace
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core
