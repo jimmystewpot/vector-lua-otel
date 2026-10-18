@@ -12,8 +12,7 @@
 
 #include "vector_otel/core/parser.hpp"
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 TEST(OtelParserTest, UnpaddedStringViewSlice) {
   OtelParser parser;
@@ -210,7 +209,19 @@ TEST(OtelParserTest, SafelyPaddedInputZeroCopy) {
   EXPECT_EQ(val2, 42);
 }
 
-TEST(ParserTest, OversizedPayloadReturnsCapacityError) {
+class ParserTest : public ::testing::Test {
+ protected:
+  OtelParser parser_;
+};
+
+TEST_F(ParserTest, PaddedStringViewIterateDoesNotSlice) {
+  simdjson::padded_string valid_json(std::string_view("{\"test\": 123}"));
+  simdjson::padded_string_view psv(valid_json);
+  auto doc_res = parser_.Iterate(psv);
+  ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
+}
+
+TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
   EXPECT_EQ(core::OtelParser::kMaxPayloadSize, 512 * 1024 * 1024);
 
   core::OtelParser parser;
@@ -255,7 +266,7 @@ TEST(ParserTest, OversizedPayloadReturnsCapacityError) {
 #endif
 }
 
-TEST(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
+TEST_F(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
   core::OtelParser parser;
   std::string large_json(17 * 1024 * 1024, ' ');
   large_json.front() = '[';
@@ -266,7 +277,7 @@ TEST(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
   EXPECT_LT(core::OtelParser::ThreadLocalBufferCapacity(), 17 * 1024 * 1024);
 }
 
-TEST(ParserTest, SharedInstanceTrimsParserCapacityAboveThreshold) {
+TEST_F(ParserTest, SharedInstanceTrimsParserCapacityAboveThreshold) {
   auto& parser = core::OtelParser::Instance();
   std::string large_json = R"({"key":")" + std::string(17 * 1024 * 1024, 'x') + R"("})";
   auto doc_res = parser.Iterate(std::string_view(large_json));
@@ -277,5 +288,4 @@ TEST(ParserTest, SharedInstanceTrimsParserCapacityAboveThreshold) {
   EXPECT_LE(parser.Capacity(), core::OtelParser::kMaxRetainedBufferCapacity);
 }
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core
