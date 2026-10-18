@@ -1,5 +1,6 @@
 #include "vector_otel/core/table_reader.hpp"
 
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -9,8 +10,7 @@
 #include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
-namespace vector_otel {
-namespace core {
+namespace vector_otel::core {
 
 bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2) {
   int abs_idx = lua_absindex(L, table_idx);
@@ -680,9 +680,11 @@ void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
       int ev_obj_idx = lua_absindex(L, -1);
 
       uint64_t t_ns = ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
-      char ts_buf[32];
-      FormatIso8601Nano(t_ns, ts_buf);
-      lua_pushlstring(L, ts_buf, 30);
+      std::array<char, 32> ts_buf;
+      FormatIso8601Nano(t_ns, ts_buf.data());
+      constexpr size_t len = 30;
+      std::string_view ts_sv(ts_buf.data(), len);
+      lua_pushlstring(L, ts_sv.data(), ts_sv.size());
       lua_setfield(L, ev_obj_idx, "Timestamp");
 
       CopyTableFieldToTable(L, item_idx, "name", nullptr, ev_obj_idx, "Name");
@@ -736,5 +738,4 @@ void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer) {
   }
 }
 
-}  // namespace core
-}  // namespace vector_otel
+}  // namespace vector_otel::core
