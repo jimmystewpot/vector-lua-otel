@@ -1,5 +1,6 @@
 #include "vector_otel/extractors/traces_extractor.hpp"
 
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -14,8 +15,7 @@
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
-namespace vector_otel {
-namespace extractors {
+namespace vector_otel::extractors {
 namespace {
 
 void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& val) {
@@ -177,9 +177,9 @@ void SerializeSpanEventsValue(simdjson::ondemand::value& events_val, core::FastJ
           time_nanos = core::ParseUint64(tval);
         }
         writer.Key("Timestamp");
-        char ev_ts_buf[32];
-        core::FormatIso8601Nano(time_nanos, ev_ts_buf);
-        writer.String(std::string_view(ev_ts_buf, 30));
+        std::array<char, 32> ev_ts_buf;
+        core::FormatIso8601Nano(time_nanos, ev_ts_buf.data());
+        writer.String(std::string_view(ev_ts_buf.data(), 30));
 
         // Name
         std::string_view name = core::ExtractStringField(ev_obj, "name", "");
@@ -371,14 +371,19 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
     static thread_local core::FastJsonWriter attr_writer;
 
     struct WriterTrimGuard {
-      core::FastJsonWriter& events;
-      core::FastJsonWriter& links;
-      core::FastJsonWriter& attr;
-      ~WriterTrimGuard() {
+      explicit WriterTrimGuard(core::FastJsonWriter& events_in, core::FastJsonWriter& links_in,
+                               core::FastJsonWriter& attr_in)
+          : events(events_in), links(links_in), attr(attr_in) {}
+      WriterTrimGuard(const WriterTrimGuard&) = delete;
+      WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
+      ~WriterTrimGuard() noexcept {
         events.Trim();
         links.Trim();
         attr.Trim();
       }
+      core::FastJsonWriter& events;
+      core::FastJsonWriter& links;
+      core::FastJsonWriter& attr;
     } trim_guard{events_writer, links_writer, attr_writer};
 
     events_writer.Reset();
@@ -411,9 +416,9 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
                               std::string(simdjson::error_message(res_spans_arr_res.error())), 0};
     }
 
-    char proc_buf[32];
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf);
-    std::string_view processed_at(proc_buf, 30);
+    std::array<char, 32> proc_buf;
+    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+    std::string_view processed_at(proc_buf.data(), 30);
 
     for (auto res_span_elem : res_spans_arr_res.value()) {
       if (res_span_elem.error() != simdjson::SUCCESS) {
@@ -631,11 +636,11 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
               static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
           int64_t duration = (delta <= kMaxDuration) ? static_cast<int64_t>(delta)
                                                      : std::numeric_limits<int64_t>::max();
-          char ts_buf[32];
-          core::FormatIso8601Nano(start_time, ts_buf);
+          std::array<char, 32> ts_buf;
+          core::FormatIso8601Nano(start_time, ts_buf.data());
 
           emitter.StartRecord();
-          emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
+          emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
           emitter.SetString("TraceId", trace_id);
           emitter.SetString("SpanId", span_id);
           emitter.SetString("ParentSpanId", parent_span_id);
@@ -695,13 +700,18 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   const int entry_top = lua_gettop(L);
   static thread_local core::FastJsonWriter writer;
   struct TableScopeGuard {
-    lua_State* L;
-    int entry_top;
-    core::FastJsonWriter& writer;
-    ~TableScopeGuard() {
-      lua_settop(L, entry_top);
+    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
+    TableScopeGuard(const TableScopeGuard&) = delete;
+    TableScopeGuard& operator=(const TableScopeGuard&) = delete;
+    ~TableScopeGuard() noexcept {
+      if (L != nullptr) {
+        lua_settop(L, top);
+      }
       writer.Trim();
     }
+    lua_State* L;
+    int top;
+    core::FastJsonWriter& writer;
   } scope_guard{L, entry_top, writer};
 
   int abs_idx = lua_absindex(L, table_idx);
@@ -734,9 +744,9 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   }
 
   core::LuaEmitter emitter(L, emit_idx);
-  char proc_buf[32];
-  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf);
-  std::string_view processed_at(proc_buf, 30);
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
 
   lua_Integer rs_len = luaL_len(L, rs_arr_idx);
   for (lua_Integer i = 1; i <= rs_len; ++i) {
@@ -855,8 +865,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
                 static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
             int64_t duration = (delta <= kMaxDuration) ? static_cast<int64_t>(delta)
                                                        : std::numeric_limits<int64_t>::max();
-            char ts_buf[32];
-            core::FormatIso8601Nano(start_time, ts_buf);
+            std::array<char, 32> ts_buf;
+            core::FormatIso8601Nano(start_time, ts_buf.data());
 
             std::string_view status_code = "STATUS_CODE_UNSET";
             static thread_local std::string status_code_buf;
@@ -900,7 +910,7 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
             }
 
             emitter.StartRecord();
-            emitter.SetString("Timestamp", std::string_view(ts_buf, 30));
+            emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
             core::CopyStringField(L, span_obj_idx, "traceId", "trace_id", emitter, "TraceId");
             core::CopyStringField(L, span_obj_idx, "spanId", "span_id", emitter, "SpanId");
             core::CopyStringField(L, span_obj_idx, "parentSpanId", "parent_span_id", emitter,
@@ -977,5 +987,4 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
 
-}  // namespace extractors
-}  // namespace vector_otel
+}  // namespace vector_otel::extractors

@@ -1,6 +1,7 @@
 #include "vector_otel/extractors/metrics_extractor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -19,8 +20,7 @@ extern "C" {
 #include <lua.h>
 }
 
-namespace vector_otel {
-namespace extractors {
+namespace vector_otel::extractors {
 namespace {
 
 int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
@@ -43,7 +43,7 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
 
     lua_newtable(L);  // single exemplar table
 
-    char time_iso_buf[32];
+    std::array<char, 32> time_iso_buf;
     size_t time_iso_len = 0;
     std::string_view span_id;
     std::string_view trace_id;
@@ -64,7 +64,7 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
       if (k == "timeUnixNano" || k == "time_unix_nano") {
         uint64_t nanos = core::ParseUint64(fv);
         if (nanos > 0) {
-          core::FormatIso8601Nano(nanos, time_iso_buf);
+          core::FormatIso8601Nano(nanos, time_iso_buf.data());
           time_iso_len = 30;
         }
       } else if (k == "spanId" || k == "span_id") {
@@ -100,7 +100,7 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
     lua_setfield(L, -2, "FilteredAttributes");
 
     // Set TimeUnix
-    lua_pushlstring(L, time_iso_buf, time_iso_len);
+    lua_pushlstring(L, time_iso_buf.data(), time_iso_len);
     lua_setfield(L, -2, "TimeUnix");
 
     // Set Value
@@ -138,8 +138,11 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
   static thread_local core::FastJsonWriter json_writer;
   json_writer.Reset();
   struct WriterTrimGuard {
+    explicit WriterTrimGuard(core::FastJsonWriter& w) : writer(w) {}
+    WriterTrimGuard(const WriterTrimGuard&) = delete;
+    WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
+    ~WriterTrimGuard() noexcept { writer.Trim(); }
     core::FastJsonWriter& writer;
-    ~WriterTrimGuard() { writer.Trim(); }
   } writer_trim_guard{json_writer};
 
   auto doc_res = parser.Iterate(raw_json);
@@ -172,9 +175,9 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
       return ExtractionResult{true, "", 0};
     }
 
-    char processed_at_buf[32];
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf);
-    std::string_view processed_at(processed_at_buf, 30);
+    std::array<char, 32> processed_at_buf;
+    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf.data());
+    std::string_view processed_at(processed_at_buf.data(), 30);
 
     for (auto res_metric_elem : res_metrics_arr_res.value()) {
       if (res_metric_elem.error() != simdjson::SUCCESS) continue;
@@ -327,9 +330,9 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
             if (dp_obj_res.error() != simdjson::SUCCESS) continue;
             auto dp_obj = dp_obj_res.value();
 
-            char start_ts_buf[32];
+            std::array<char, 32> start_ts_buf;
             size_t start_ts_len = 0;
-            char time_ts_buf[32];
+            std::array<char, 32> time_ts_buf;
             size_t time_ts_len = 0;
             enum class ValueKind { kNone, kDouble, kInt64 };
             ValueKind val_kind = ValueKind::kNone;
@@ -363,13 +366,13 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
               if (k == "startTimeUnixNano" || k == "start_time_unix_nano") {
                 uint64_t nanos = core::ParseUint64(fv);
                 if (nanos > 0) {
-                  core::FormatIso8601Nano(nanos, start_ts_buf);
+                  core::FormatIso8601Nano(nanos, start_ts_buf.data());
                   start_ts_len = 30;
                 }
               } else if (k == "timeUnixNano" || k == "time_unix_nano") {
                 uint64_t nanos = core::ParseUint64(fv);
                 if (nanos > 0) {
-                  core::FormatIso8601Nano(nanos, time_ts_buf);
+                  core::FormatIso8601Nano(nanos, time_ts_buf.data());
                   time_ts_len = 30;
                 }
               } else if (k == "asDouble" || k == "as_double") {
@@ -458,8 +461,8 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
               emitter.SetTableFromStack("Attributes");
             }
 
-            emitter.SetString("StartTimeUnix", std::string_view(start_ts_buf, start_ts_len));
-            emitter.SetString("TimeUnix", std::string_view(time_ts_buf, time_ts_len));
+            emitter.SetString("StartTimeUnix", std::string_view(start_ts_buf.data(), start_ts_len));
+            emitter.SetString("TimeUnix", std::string_view(time_ts_buf.data(), time_ts_len));
 
             // Value: set for gauge/sum, omit for histogram/summary
             if (!is_histogram && !is_summary) {
@@ -567,13 +570,18 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
   static thread_local core::FastJsonWriter json_writer;
   json_writer.Reset();
   struct TableExitGuard {
+    TableExitGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
+    TableExitGuard(const TableExitGuard&) = delete;
+    TableExitGuard& operator=(const TableExitGuard&) = delete;
+    ~TableExitGuard() noexcept {
+      if (L != nullptr) {
+        lua_settop(L, top);
+      }
+      writer.Trim();
+    }
     lua_State* L;
     int top;
     core::FastJsonWriter& writer;
-    ~TableExitGuard() {
-      lua_settop(L, top);
-      writer.Trim();
-    }
   } exit_guard{L, entry_top, json_writer};
 
   int rm_arr_idx = 0;
@@ -602,9 +610,9 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
 
   core::LuaEmitter emitter(L, emit_idx);
 
-  char processed_at_buf[32];
-  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf);
-  std::string_view processed_at(processed_at_buf, 30);
+  std::array<char, 32> processed_at_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf.data());
+  std::string_view processed_at(processed_at_buf.data(), 30);
 
   lua_Integer rm_len = luaL_len(L, rm_arr_idx);
   for (lua_Integer i = 1; i <= rm_len; ++i) {
@@ -736,19 +744,19 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
 
               uint64_t start_nanos =
                   core::ReadTableUint64(L, dp_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
-              char start_ts_buf[32];
+              std::array<char, 32> start_ts_buf;
               size_t start_ts_len = 0;
               if (start_nanos > 0) {
-                core::FormatIso8601Nano(start_nanos, start_ts_buf);
+                core::FormatIso8601Nano(start_nanos, start_ts_buf.data());
                 start_ts_len = 30;
               }
 
               uint64_t time_nanos =
                   core::ReadTableUint64(L, dp_obj_idx, "timeUnixNano", "time_unix_nano");
-              char time_ts_buf[32];
+              std::array<char, 32> time_ts_buf;
               size_t time_ts_len = 0;
               if (time_nanos > 0) {
-                core::FormatIso8601Nano(time_nanos, time_ts_buf);
+                core::FormatIso8601Nano(time_nanos, time_ts_buf.data());
                 time_ts_len = 30;
               }
 
@@ -778,8 +786,9 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
                 emitter.SetTableFromStack("Attributes");
               }
 
-              emitter.SetString("StartTimeUnix", std::string_view(start_ts_buf, start_ts_len));
-              emitter.SetString("TimeUnix", std::string_view(time_ts_buf, time_ts_len));
+              emitter.SetString("StartTimeUnix",
+                                std::string_view(start_ts_buf.data(), start_ts_len));
+              emitter.SetString("TimeUnix", std::string_view(time_ts_buf.data(), time_ts_len));
 
               if (!is_histogram && !is_summary) {
                 if (core::GetTableField(L, dp_obj_idx, "asDouble", "as_double")) {
@@ -887,5 +896,4 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
   return ExtractionResult{true, "", emitter.EmittedCount()};
 }
 
-}  // namespace extractors
-}  // namespace vector_otel
+}  // namespace vector_otel::extractors
