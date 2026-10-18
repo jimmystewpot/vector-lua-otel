@@ -268,8 +268,9 @@ TEST_F(TracesExtractorTest, EmptyAndMissingBatches) {
   EXPECT_EQ(r2.emitted_count, 0);
 
   // 3. ResourceSpans with empty scopeSpans
-  auto r3 =
-      ProcessTraces(L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}", emit_idx_);
+  auto r3 = ProcessTraces(
+      L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}",
+      emit_idx_);
   EXPECT_TRUE(r3.success);
   EXPECT_EQ(r3.emitted_count, 0);
 
@@ -387,7 +388,8 @@ TEST_F(TracesExtractorTest, DurationInt64Preservation) {
 }
 
 TEST_F(TracesExtractorTest, DurationInt64OverflowClamped) {
-  // Test JSON mode with start_time = 1 and end_time = UINT64_MAX (18446744073709551615)
+  // Test JSON mode with start_time = 1 and end_time = UINT64_MAX
+  // (18446744073709551615)
   const char* overflow_json = R"({
     "resourceSpans": [{
       "resource": {},
@@ -411,7 +413,8 @@ TEST_F(TracesExtractorTest, DurationInt64OverflowClamped) {
     assert(r.Duration > 0, "Duration must not underflow to negative: " .. tostring(r.Duration))
     assert(r.Duration == math.maxinteger, "Duration must be clamped to INT64_MAX: " .. tostring(r.Duration))
   )";
-  EXPECT_EQ(luaL_dostring(L_, verify_json_script), LUA_OK) << lua_tostring(L_, -1);
+  EXPECT_EQ(luaL_dostring(L_, verify_json_script), LUA_OK)
+      << lua_tostring(L_, -1);
 
   // Clear emitted table for table mode verification
   ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
@@ -451,10 +454,12 @@ TEST_F(TracesExtractorTest, DurationInt64OverflowClamped) {
     assert(r.Duration > 0, "Duration must not underflow to negative: " .. tostring(r.Duration))
     assert(r.Duration == math.maxinteger, "Duration must be clamped to INT64_MAX: " .. tostring(r.Duration))
   )";
-  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK) << lua_tostring(L_, -1);
+  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK)
+      << lua_tostring(L_, -1);
 }
 
-TEST_F(TracesExtractorTest, ProcessTracesTablePreservesLuaStackDepthOnNestedWrapperAndError) {
+TEST_F(TracesExtractorTest,
+       ProcessTracesTablePreservesLuaStackDepthOnNestedWrapperAndError) {
   // 1. Nested { trace = { resourceSpans = { ... } } }
   const char* trace_wrapper_script = R"(
     return {

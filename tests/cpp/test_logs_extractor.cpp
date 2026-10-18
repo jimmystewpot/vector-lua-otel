@@ -382,13 +382,15 @@ TEST_F(LogsExtractorTest, EmptyBatches) {
 
   // Resource with empty scopeLogs
   {
-    auto res = ProcessLogs(L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
+    auto res = ProcessLogs(
+        L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
     EXPECT_TRUE(res.success);
     EXPECT_EQ(res.emitted_count, 0);
   }
 }
 
-TEST_F(LogsExtractorTest, ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperAndError) {
+TEST_F(LogsExtractorTest,
+       ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperAndError) {
   // 1. { log = { resourceLogs = { ... } } }
   {
     const char* setup_nested = R"(
@@ -476,8 +478,8 @@ TEST_F(LogsExtractorTest, ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperA
     lua_pop(L_, 2);
   }
 
-  // 4. ProcessLogs extracts ServiceName and ResourceAttributes when "attributes" appears
-  // before or after other fields in "resource".
+  // 4. ProcessLogs extracts ServiceName and ResourceAttributes when
+  // "attributes" appears before or after other fields in "resource".
   {
     std::string json_before = R"({
       "resourceLogs": [{

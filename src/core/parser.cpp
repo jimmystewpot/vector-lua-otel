@@ -8,10 +8,12 @@ namespace {
 
 thread_local std::string tls_padded_buffer;
 
-simdjson::simdjson_result<simdjson::ondemand::document> IterateWithThreadLocalPadding(
-    simdjson::ondemand::parser& parser, std::string_view json_str) {
+simdjson::simdjson_result<simdjson::ondemand::document>
+IterateWithThreadLocalPadding(simdjson::ondemand::parser& parser,
+                              std::string_view json_str) {
   if (json_str.size() > OtelParser::kMaxPayloadSize ||
-      json_str.size() > (std::string().max_size() - simdjson::SIMDJSON_PADDING)) [[unlikely]] {
+      json_str.size() > (std::string().max_size() - simdjson::SIMDJSON_PADDING))
+      [[unlikely]] {
     return simdjson::CAPACITY;
   }
   const size_t needed_capacity = json_str.size() + simdjson::SIMDJSON_PADDING;
@@ -20,7 +22,8 @@ simdjson::simdjson_result<simdjson::ondemand::document> IterateWithThreadLocalPa
   }
   tls_padded_buffer.assign(json_str.data(), json_str.size());
   tls_padded_buffer.append(simdjson::SIMDJSON_PADDING, '\0');
-  return parser.iterate(tls_padded_buffer.data(), json_str.size(), tls_padded_buffer.size());
+  return parser.iterate(tls_padded_buffer.data(), json_str.size(),
+                        tls_padded_buffer.size());
 }
 
 }  // namespace
@@ -43,7 +46,8 @@ simdjson::simdjson_result<simdjson::ondemand::document> OtelParser::Iterate(
   if (json_str.has_sufficient_padding()) [[likely]] {
     return parser_.iterate(json_str);
   }
-  return IterateWithThreadLocalPadding(parser_, std::string_view(json_str.data(), json_str.size()));
+  return IterateWithThreadLocalPadding(
+      parser_, std::string_view(json_str.data(), json_str.size()));
 }
 
 void OtelParser::TrimCapacity() noexcept {
@@ -52,7 +56,9 @@ void OtelParser::TrimCapacity() noexcept {
   }
 }
 
-size_t OtelParser::ThreadLocalBufferCapacity() noexcept { return tls_padded_buffer.capacity(); }
+size_t OtelParser::ThreadLocalBufferCapacity() noexcept {
+  return tls_padded_buffer.capacity();
+}
 
 const char* OtelParser::ThreadLocalBufferData() noexcept {
   return tls_padded_buffer.empty() ? nullptr : tls_padded_buffer.data();

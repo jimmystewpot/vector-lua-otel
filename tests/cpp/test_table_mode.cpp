@@ -260,7 +260,8 @@ TEST_F(TableModeTest, SerializeTableWithNumericKeysDoesNotCorruptIterator) {
   lua_pop(L_, 1);
 }
 
-TEST_F(TableModeTest, PushTableAttributesWithNumericKeysDoesNotCorruptIterator) {
+TEST_F(TableModeTest,
+       PushTableAttributesWithNumericKeysDoesNotCorruptIterator) {
   lua_newtable(L_);
   lua_pushstring(L_, "alpha");
   lua_rawseti(L_, -2, 1);
@@ -301,10 +302,14 @@ TEST_F(TableModeTest, SerializeSequentialArrayPreservedAsArray) {
 
 TEST_F(TableModeTest, MalformedAnyValueTypesDoNotCrashOrPanic) {
   const char* cases[] = {
-      "return { intValue = true }",     "return { intValue = {} }",
-      "return { stringValue = true }",  "return { bytesValue = {} }",
-      "return { arrayValue = 123 }",    "return { arrayValue = { values = 'not_a_table' } }",
-      "return { kvlistValue = false }", "return { kvlistValue = { values = { 999, 'bad' } } }",
+      "return { intValue = true }",
+      "return { intValue = {} }",
+      "return { stringValue = true }",
+      "return { bytesValue = {} }",
+      "return { arrayValue = 123 }",
+      "return { arrayValue = { values = 'not_a_table' } }",
+      "return { kvlistValue = false }",
+      "return { kvlistValue = { values = { 999, 'bad' } } }",
   };
 
   core::FastJsonWriter writer;
@@ -340,7 +345,8 @@ TEST_F(TableModeTest, MalformedAnyValueTypesDoNotCrashOrPanic) {
     EXPECT_EQ(lua_gettop(L_), top_before);
   }
 
-  // Also verify PushTableSpanEvents and PushTableSpanLinks with valid and non-string fields
+  // Also verify PushTableSpanEvents and PushTableSpanLinks with valid and
+  // non-string fields
   const char* events_script = R"(
     return {
       { timeUnixNano = 1700000000000000000, name = "ev_ok", attributes = { k = "v" } },

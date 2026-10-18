@@ -12,7 +12,8 @@
 
 namespace vector_otel::core {
 
-bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2) {
+bool GetTableField(lua_State* L, int table_idx, const char* name1,
+                   const char* name2) {
   int abs_idx = lua_absindex(L, table_idx);
   lua_getfield(L, abs_idx, name1);
   if (!lua_isnil(L, -1)) {
@@ -29,8 +30,8 @@ bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* n
   return false;
 }
 
-std::string ReadTableString(lua_State* L, int table_idx, const char* name1, const char* name2,
-                            std::string_view default_val) {
+std::string ReadTableString(lua_State* L, int table_idx, const char* name1,
+                            const char* name2, std::string_view default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     if (lua_isstring(L, -1)) {
       size_t len = 0;
@@ -44,8 +45,9 @@ std::string ReadTableString(lua_State* L, int table_idx, const char* name1, cons
   return std::string(default_val);
 }
 
-void CopyStringField(lua_State* L, int table_idx, const char* name1, const char* name2,
-                     LuaEmitter& emitter, std::string_view dst_key, std::string_view default_val) {
+void CopyStringField(lua_State* L, int table_idx, const char* name1,
+                     const char* name2, LuaEmitter& emitter,
+                     std::string_view dst_key, std::string_view default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     if (lua_isstring(L, -1)) {
       size_t len = 0;
@@ -61,8 +63,8 @@ void CopyStringField(lua_State* L, int table_idx, const char* name1, const char*
   }
 }
 
-int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2,
-                       int64_t default_val) {
+int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1,
+                       const char* name2, int64_t default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
     if (t == LUA_TNUMBER) {
@@ -86,8 +88,8 @@ int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1, const cha
   return default_val;
 }
 
-uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1, const char* name2,
-                         uint64_t default_val) {
+uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1,
+                         const char* name2, uint64_t default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
     if (t == LUA_TNUMBER) {
@@ -111,8 +113,8 @@ uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1, const c
   return default_val;
 }
 
-double ReadTableDouble(lua_State* L, int table_idx, const char* name1, const char* name2,
-                       double default_val) {
+double ReadTableDouble(lua_State* L, int table_idx, const char* name1,
+                       const char* name2, double default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
     if (t == LUA_TNUMBER) {
@@ -174,16 +176,19 @@ int64_t ParseTableSeverityNumber(lua_State* L, int val_idx) {
 }
 
 uint64_t ReadTableTimestampNano(lua_State* L, int rec_idx) {
-  uint64_t t_ns = ReadTableUint64(L, rec_idx, "timeUnixNano", "time_unix_nano", 0);
+  uint64_t t_ns =
+      ReadTableUint64(L, rec_idx, "timeUnixNano", "time_unix_nano", 0);
   if (t_ns == 0) {
-    t_ns = ReadTableUint64(L, rec_idx, "observedTimeUnixNano", "observed_time_unix_nano", 0);
+    t_ns = ReadTableUint64(L, rec_idx, "observedTimeUnixNano",
+                           "observed_time_unix_nano", 0);
   }
   return t_ns;
 }
 
 constexpr int kMaxLuaJsonDepth = 16;
 
-void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, int depth) {
+void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer,
+                             int depth) {
   if (depth >= kMaxLuaJsonDepth) {
     writer.String("[max_depth_exceeded]");
     return;
@@ -387,7 +392,8 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, 
   }
 }
 
-std::string ReadTableBodyString(lua_State* L, int rec_idx, FastJsonWriter& writer) {
+std::string ReadTableBodyString(lua_State* L, int rec_idx,
+                                FastJsonWriter& writer) {
   if (GetTableField(L, rec_idx, "body")) {
     int body_idx = lua_absindex(L, -1);
     if (lua_isstring(L, body_idx)) {
@@ -424,7 +430,8 @@ std::string ReadTableBodyString(lua_State* L, int rec_idx, FastJsonWriter& write
   return "";
 }
 
-void CopyTableBody(lua_State* L, int rec_idx, FastJsonWriter& writer, LuaEmitter& emitter) {
+void CopyTableBody(lua_State* L, int rec_idx, FastJsonWriter& writer,
+                   LuaEmitter& emitter) {
   if (GetTableField(L, rec_idx, "body")) {
     int body_idx = lua_absindex(L, -1);
     if (lua_isstring(L, body_idx)) {
@@ -490,7 +497,8 @@ std::string ExtractTableServiceName(lua_State* L, int res_idx) {
             if (lua_type(L, val_idx) == LUA_TSTRING) {
               service_name = lua_tostring(L, val_idx);
             } else if (lua_istable(L, val_idx)) {
-              std::string s = ReadTableString(L, val_idx, "stringValue", "string_value");
+              std::string s =
+                  ReadTableString(L, val_idx, "stringValue", "string_value");
               if (!s.empty()) service_name = std::move(s);
             }
             lua_pop(L, 1);
@@ -518,7 +526,8 @@ std::string ExtractTableServiceName(lua_State* L, int res_idx) {
   return service_name;
 }
 
-static void PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& writer) {
+static void PushSingleAttributeValue(lua_State* L, int val_idx,
+                                     FastJsonWriter& writer) {
   int abs_idx = lua_absindex(L, val_idx);
   int type = lua_type(L, abs_idx);
 
@@ -620,7 +629,8 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
           if (lua_type(L, -1) == LUA_TSTRING && lua_rawlen(L, -1) > 0) {
             if (GetTableField(L, item_idx, "value")) {
               PushSingleAttributeValue(L, -1, writer);
-              lua_remove(L, -2);  // remove raw value, leaving [key, converted_val]
+              lua_remove(L,
+                         -2);  // remove raw value, leaving [key, converted_val]
               lua_rawset(L, out_table_idx);
             } else {
               lua_pop(L, 1);  // pop key
@@ -651,8 +661,9 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
   }
 }
 
-static void CopyTableFieldToTable(lua_State* L, int src_idx, const char* name1, const char* name2,
-                                  int dst_idx, const char* dst_field) {
+static void CopyTableFieldToTable(lua_State* L, int src_idx, const char* name1,
+                                  const char* name2, int dst_idx,
+                                  const char* dst_field) {
   if (GetTableField(L, src_idx, name1, name2)) {
     if (lua_type(L, -1) == LUA_TSTRING) {
       lua_setfield(L, dst_idx, dst_field);
@@ -679,7 +690,8 @@ void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
       lua_newtable(L);
       int ev_obj_idx = lua_absindex(L, -1);
 
-      uint64_t t_ns = ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
+      uint64_t t_ns =
+          ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
       std::array<char, 32> ts_buf;
       FormatIso8601Nano(t_ns, ts_buf.data());
       constexpr size_t len = 30;
@@ -719,9 +731,12 @@ void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer) {
       lua_newtable(L);
       int link_obj_idx = lua_absindex(L, -1);
 
-      CopyTableFieldToTable(L, item_idx, "traceId", "trace_id", link_obj_idx, "TraceId");
-      CopyTableFieldToTable(L, item_idx, "spanId", "span_id", link_obj_idx, "SpanId");
-      CopyTableFieldToTable(L, item_idx, "traceState", "trace_state", link_obj_idx, "TraceState");
+      CopyTableFieldToTable(L, item_idx, "traceId", "trace_id", link_obj_idx,
+                            "TraceId");
+      CopyTableFieldToTable(L, item_idx, "spanId", "span_id", link_obj_idx,
+                            "SpanId");
+      CopyTableFieldToTable(L, item_idx, "traceState", "trace_state",
+                            link_obj_idx, "TraceState");
 
       if (GetTableField(L, item_idx, "attributes")) {
         PushTableAttributes(L, -1, writer);

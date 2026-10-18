@@ -65,7 +65,8 @@ class MetricsExtractorTest : public ::testing::Test {
 
 TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
   std::string json_data = ReadFixture("tests/fixtures/metrics_sample.json");
-  ASSERT_FALSE(json_data.empty()) << "Failed to read tests/fixtures/metrics_sample.json";
+  ASSERT_FALSE(json_data.empty())
+      << "Failed to read tests/fixtures/metrics_sample.json";
 
   int initial_top = lua_gettop(L_);
   auto result = ProcessMetrics(L_, json_data, 1);
@@ -186,13 +187,15 @@ TEST_F(MetricsExtractorTest, EmptyAndSparsePayloads) {
   EXPECT_EQ(res4.emitted_count, 0);
 
   // resourceMetrics with empty scopeMetrics
-  auto res5 = ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
+  auto res5 =
+      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
   EXPECT_TRUE(res5.success);
   EXPECT_EQ(res5.emitted_count, 0);
 
   // scopeMetrics with empty metrics
-  auto res6 =
-      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}", 1);
+  auto res6 = ProcessMetrics(
+      L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}",
+      1);
   EXPECT_TRUE(res6.success);
   EXPECT_EQ(res6.emitted_count, 0);
 }
@@ -472,7 +475,8 @@ TEST_F(MetricsExtractorTest, InvalidDoubleStringDoesNotSetMetricValueKind) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
-TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsHistogramCount) {
+TEST_F(MetricsExtractorTest,
+       ProcessMetricsTablePreservesLuaStackDepthAndClampsHistogramCount) {
   // 1. Test histogram count clamping in ProcessMetrics (JSON path)
   const std::string json_payload = R"({
     "resourceMetrics": [{
@@ -495,8 +499,8 @@ TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsH
   EXPECT_EQ(json_res.emitted_count, 1);
   EXPECT_EQ(lua_gettop(L_), initial_top);
 
-  // 2. Test ProcessMetricsTable with { metric = { resourceMetrics = { ... } } } and UINT64_MAX
-  // count
+  // 2. Test ProcessMetricsTable with { metric = { resourceMetrics = { ... } } }
+  // and UINT64_MAX count
   const char* push_nested_metric = R"(
     return {
       metric = {
@@ -531,7 +535,8 @@ TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsH
       }
     }
   )";
-  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK) << lua_tostring(L_, -1);
+  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK)
+      << lua_tostring(L_, -1);
   int table_top = lua_gettop(L_);
   auto tbl_res1 = ProcessMetricsTable(L_, -1, 1);
   EXPECT_TRUE(tbl_res1.success) << tbl_res1.error;
@@ -540,7 +545,8 @@ TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsH
   lua_pop(L_, 1);
   EXPECT_EQ(lua_gettop(L_), initial_top);
 
-  // Verify both JSON and Table histogram counts were clamped to INT64_MAX (9223372036854775807)
+  // Verify both JSON and Table histogram counts were clamped to INT64_MAX
+  // (9223372036854775807)
   const char* verify_clamp = R"(
     assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
     local h1 = emitted[1].log.Histogram
@@ -600,7 +606,8 @@ TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsH
   lua_getglobal(L_, "mock_emit");
   lua_replace(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK) << lua_tostring(L_, -1);
+  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK)
+      << lua_tostring(L_, -1);
   table_top = lua_gettop(L_);
   auto tbl_res3 = ProcessMetricsTable(L_, -1, 1);
   EXPECT_FALSE(tbl_res3.success);
