@@ -566,6 +566,670 @@ TEST_F(TracesExtractorTest,
   lua_pop(L_, 2);  // pop table and err_emit
 }
 
+TEST_F(TracesExtractorTest, SpanLinksParsingComprehensive) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {
+        "attributes": [{"key": "service.name", "value": {"stringValue": "link-svc"}}]
+      },
+      "scopeSpans": [{
+        "scope": {"name": "link-scope", "version": "1.0"},
+        "spans": [{
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "spanId": "00f067aa0ba902b7",
+          "name": "span-with-links",
+          "startTimeUnixNano": "1700000000000000000",
+          "endTimeUnixNano": "1700000001000000000",
+          "links": [
+            {
+              "traceId": "11112222333344445555666677778888",
+              "spanId": "1111222233334444",
+              "traceState": "rojo=1,congo=2",
+              "flags": 1,
+              "droppedAttributesCount": 2,
+              "attributes": [
+                {"key": "str_attr", "value": {"stringValue": "val1"}},
+                {"key": "int_attr", "value": {"intValue": "42"}},
+                {"key": "double_attr", "value": {"doubleValue": 3.14}},
+                {"key": "bool_attr_t", "value": {"boolValue": true}},
+                {"key": "bool_attr_f", "value": {"boolValue": false}},
+                {"key": "arr_attr", "value": {"arrayValue": [1, 2]}},
+                {"key": "kv_attr", "value": {"kvlistValue": {"k": "v"}}},
+                {"key": "bytes_attr", "value": {"bytesValue": "aGVsbG8="}},
+                {"key": "raw_str", "value": "direct_str"},
+                {"key": "raw_num", "value": 99},
+                {"key": "raw_bool", "value": true},
+                {"key": "null_attr", "value": {"unknownType": {}}}
+              ]
+            },
+            {
+              "traceId": "22223333444455556666777788889999",
+              "spanId": "2222333344445555",
+              "traceState": "state=link2",
+              "flags": 0,
+              "attributes": {
+                "peer.service": {"stringValue": "payment"},
+                "peer.port": {"intValue": 8080}
+              }
+            },
+            {
+              "traceId": "33334444555566667777888899990000",
+              "spanId": "3333444455556666",
+              "traceState": "",
+              "flags": 256
+            },
+            null,
+            "invalid_non_object_link",
+            12345
+          ]
+        }]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record")
+    local r = emitted[1].log
+    assert(type(r.Links) == "string", "Links must be a string")
+    assert(r.Links:sub(1, 1) == "[", "Links must start with [")
+    assert(r.Links:sub(-1, -1) == "]", "Links must end with ]")
+
+    -- Check first link
+    assert(r.Links:find('"TraceId":"11112222333344445555666677778888"') ~= nil, "Link 1 TraceId missing")
+    assert(r.Links:find('"SpanId":"1111222233334444"') ~= nil, "Link 1 SpanId missing")
+    assert(r.Links:find('"TraceState":"rojo=1,congo=2"') ~= nil, "Link 1 TraceState missing")
+    assert(r.Links:find('"str_attr":"val1"') ~= nil, "str_attr missing")
+    assert(r.Links:find('"int_attr":42') ~= nil, "int_attr missing")
+    assert(r.Links:find('"bool_attr_t":true') ~= nil, "bool_attr_t missing")
+    assert(r.Links:find('"bool_attr_f":false') ~= nil, "bool_attr_f missing")
+    assert(r.Links:find('"raw_str":"direct_str"') ~= nil, "raw_str missing")
+    assert(r.Links:find('"raw_num":99') ~= nil, "raw_num missing")
+    assert(r.Links:find('"null_attr":null') ~= nil, "null_attr missing")
+
+    -- Check second link with object attributes
+    assert(r.Links:find('"TraceId":"22223333444455556666777788889999"') ~= nil, "Link 2 TraceId missing")
+    assert(r.Links:find('"peer.service":"payment"') ~= nil, "peer.service missing")
+    assert(r.Links:find('"peer.port":8080') ~= nil, "peer.port missing")
+
+    -- Check third link with empty attributes
+    assert(r.Links:find('"TraceId":"33334444555566667777888899990000"') ~= nil, "Link 3 TraceId missing")
+    assert(r.Links:find('"SpanId":"3333444455556666"') ~= nil, "Link 3 SpanId missing")
+    assert(r.Links:find('"Attributes":{}') ~= nil, "Link 3 Attributes:{} missing")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, SpanEventsParsingComprehensive) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "scope": {"name": "event-scope"},
+        "spans": [{
+          "traceId": "0123456789abcdef0123456789abcdef",
+          "spanId": "0123456789abcdef",
+          "name": "span-with-events",
+          "startTimeUnixNano": "1710000000000000000",
+          "endTimeUnixNano": "1710000001000000000",
+          "events": [
+            {
+              "timeUnixNano": "1710000000123456789",
+              "name": "cache_lookup",
+              "droppedAttributesCount": 3,
+              "attributes": [
+                {"key": "hit", "value": {"boolValue": true}},
+                {"key": "key", "value": {"stringValue": "user:123"}},
+                {"key": "latency_ms", "value": {"doubleValue": 1.25}}
+              ]
+            },
+            {
+              "timeUnixNano": 1710000000500000000,
+              "name": "db_query",
+              "attributes": {
+                "query": {"stringValue": "SELECT * FROM users"},
+                "rows": {"intValue": 1}
+              }
+            },
+            {
+              "name": "event_without_time_and_attrs"
+            },
+            null,
+            "non_object_event",
+            42
+          ]
+        }]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record")
+    local r = emitted[1].log
+    assert(type(r.Events) == "string", "Events must be a string")
+    assert(r.Events:sub(1, 1) == "[", "Events must start with [")
+    assert(r.Events:sub(-1, -1) == "]", "Events must end with ]")
+
+    -- Event 1
+    assert(r.Events:find('"Timestamp":"2024%-03%-09T16:00:00.123456789Z"') ~= nil, "Event 1 Timestamp mismatch")
+    assert(r.Events:find('"Name":"cache_lookup"') ~= nil, "Event 1 Name mismatch")
+    assert(r.Events:find('"hit":true') ~= nil, "Event 1 hit missing")
+    assert(r.Events:find('"key":"user:123"') ~= nil, "Event 1 key missing")
+    assert(r.Events:find('"latency_ms":1.25') ~= nil, "Event 1 latency_ms missing")
+
+    -- Event 2 (numeric timestamp and object attributes)
+    assert(r.Events:find('"Timestamp":"2024%-03%-09T16:00:00.500000000Z"') ~= nil, "Event 2 Timestamp mismatch")
+    assert(r.Events:find('"Name":"db_query"') ~= nil, "Event 2 Name mismatch")
+    assert(r.Events:find('"query":"SELECT %* FROM users"') ~= nil, "Event 2 query missing")
+    assert(r.Events:find('"rows":1') ~= nil, "Event 2 rows missing")
+
+    -- Event 3 (missing time -> 1970 and empty attributes)
+    assert(r.Events:find('"Timestamp":"1970%-01%-01T00:00:00.000000000Z"') ~= nil, "Event 3 Timestamp mismatch")
+    assert(r.Events:find('"Name":"event_without_time_and_attrs"') ~= nil, "Event 3 Name mismatch")
+    assert(r.Events:find('"Attributes":{}') ~= nil, "Event 3 Attributes:{} missing")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, SpanStatusCodesAndMessagesComprehensive) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {"traceId": "1", "spanId": "1", "status": {"code": 1, "message": "all good"}},
+          {"traceId": "2", "spanId": "2", "status": {"code": 2, "message": "failure"}},
+          {"traceId": "3", "spanId": "3", "status": {"code": 0, "message": "unset msg"}},
+          {"traceId": "4", "spanId": "4", "status": {"code": 99, "message": "unknown num"}},
+          {"traceId": "5", "spanId": "5", "status": {"code": "STATUS_CODE_OK", "message": "msg5"}},
+          {"traceId": "6", "spanId": "6", "status": {"code": "STATUS_CODE_ERROR", "message": "msg6"}},
+          {"traceId": "7", "spanId": "7", "status": {"code": "STATUS_CODE_UNSET", "message": "msg7"}},
+          {"traceId": "8", "spanId": "8", "status": {"code": "OK", "message": "msg8"}},
+          {"traceId": "9", "spanId": "9", "status": {"code": "ERROR", "message": "msg9"}},
+          {"traceId": "10", "spanId": "10", "status": {"code": "UNSET", "message": "msg10"}},
+          {"traceId": "11", "spanId": "11", "status": {"code": "CUSTOM_STATUS", "message": "custom"}},
+          {"traceId": "12", "spanId": "12", "status": {"message": "only msg"}},
+          {"traceId": "13", "spanId": "13"}
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 13);
+
+  const char* verify_script = R"(
+    assert(#emitted == 13, "Expected 13 spans")
+    assert(emitted[1].log.StatusCode == "STATUS_CODE_OK" and emitted[1].log.StatusMessage == "all good")
+    assert(emitted[2].log.StatusCode == "STATUS_CODE_ERROR" and emitted[2].log.StatusMessage == "failure")
+    assert(emitted[3].log.StatusCode == "STATUS_CODE_UNSET" and emitted[3].log.StatusMessage == "unset msg")
+    assert(emitted[4].log.StatusCode == "STATUS_CODE_UNSET" and emitted[4].log.StatusMessage == "unknown num")
+    assert(emitted[5].log.StatusCode == "STATUS_CODE_OK" and emitted[5].log.StatusMessage == "msg5")
+    assert(emitted[6].log.StatusCode == "STATUS_CODE_ERROR" and emitted[6].log.StatusMessage == "msg6")
+    assert(emitted[7].log.StatusCode == "STATUS_CODE_UNSET" and emitted[7].log.StatusMessage == "msg7")
+    assert(emitted[8].log.StatusCode == "STATUS_CODE_OK" and emitted[8].log.StatusMessage == "msg8")
+    assert(emitted[9].log.StatusCode == "STATUS_CODE_ERROR" and emitted[9].log.StatusMessage == "msg9")
+    assert(emitted[10].log.StatusCode == "STATUS_CODE_UNSET" and emitted[10].log.StatusMessage == "msg10")
+    assert(emitted[11].log.StatusCode == "CUSTOM_STATUS" and emitted[11].log.StatusMessage == "custom")
+    assert(emitted[12].log.StatusCode == "STATUS_CODE_UNSET" and emitted[12].log.StatusMessage == "only msg")
+    assert(emitted[13].log.StatusCode == "STATUS_CODE_UNSET" and emitted[13].log.StatusMessage == "")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, SpansWithParentSpanIdTraceStateFlagsAndSnakeCase) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {
+            "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "spanId": "00f067aa0ba902b7",
+            "parentSpanId": "5fb397be34d23b0f",
+            "traceState": "rojo=1,congo=2",
+            "flags": 257,
+            "name": "child-camel"
+          },
+          {
+            "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "span_id": "bbbbbbbbbbbbbbbb",
+            "parent_span_id": "cccccccccccccccc",
+            "trace_state": "vendor=secret",
+            "start_time_unix_nano": "1700000000000000000",
+            "end_time_unix_nano": "1700000000500000000",
+            "name": "child-snake"
+          },
+          {
+            "traceId": "dddddddddddddddddddddddddddddddd",
+            "spanId": "eeeeeeeeeeeeeeee",
+            "name": "root-span"
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 3);
+
+  const char* verify_script = R"(
+    assert(#emitted == 3, "Expected 3 spans")
+
+    -- Span 1: camelCase child
+    local s1 = emitted[1].log
+    assert(s1.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert(s1.SpanId == "00f067aa0ba902b7")
+    assert(s1.ParentSpanId == "5fb397be34d23b0f")
+    assert(s1.TraceState == "rojo=1,congo=2")
+    assert(s1.SpanName == "child-camel")
+
+    -- Span 2: snake_case child
+    local s2 = emitted[2].log
+    assert(s2.TraceId == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    assert(s2.SpanId == "bbbbbbbbbbbbbbbb")
+    assert(s2.ParentSpanId == "cccccccccccccccc")
+    assert(s2.TraceState == "vendor=secret")
+    assert(s2.SpanName == "child-snake")
+    assert(s2.Duration == 500000000)
+
+    -- Span 3: root span
+    local s3 = emitted[3].log
+    assert(s3.TraceId == "dddddddddddddddddddddddddddddddd")
+    assert(s3.SpanId == "eeeeeeeeeeeeeeee")
+    assert(s3.ParentSpanId == "")
+    assert(s3.TraceState == "")
+    assert(s3.SpanName == "root-span")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, SpanDurationCalculationEdgeCases) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {"traceId": "1", "spanId": "1", "startTimeUnixNano": "2000000000", "endTimeUnixNano": "1000000000"},
+          {"traceId": "2", "spanId": "2", "startTimeUnixNano": "0", "endTimeUnixNano": "1000000000"},
+          {"traceId": "3", "spanId": "3", "startTimeUnixNano": "0", "endTimeUnixNano": "0"},
+          {"traceId": "4", "spanId": "4", "startTimeUnixNano": "1500000000", "endTimeUnixNano": "1500000000"},
+          {"traceId": "5", "spanId": "5", "endTimeUnixNano": "1000000000"},
+          {"traceId": "6", "spanId": "6", "startTimeUnixNano": "1000000000"},
+          {"traceId": "7", "spanId": "7", "start_time_unix_nano": "3000000000", "end_time_unix_nano": "2000000000"},
+          {"traceId": "8", "spanId": "8", "startTimeUnixNano": "1000000000", "endTimeUnixNano": "1000002500"}
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 8);
+
+  const char* verify_script = R"(
+    assert(#emitted == 8)
+    assert(emitted[1].log.Duration == 0, "start > end must yield Duration 0")
+    assert(emitted[2].log.Duration == 0, "start == 0 must yield Duration 0")
+    assert(emitted[3].log.Duration == 0, "both 0 must yield Duration 0")
+    assert(emitted[4].log.Duration == 0, "start == end must yield Duration 0")
+    assert(emitted[5].log.Duration == 0, "missing start must yield Duration 0")
+    assert(emitted[6].log.Duration == 0, "missing end must yield Duration 0")
+    assert(emitted[7].log.Duration == 0, "snake_case start > end must yield Duration 0")
+    assert(emitted[8].log.Duration == 2500, "normal delta mismatch: " .. tostring(emitted[8].log.Duration))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+
+  const char* table_script = R"(
+    return {
+      resourceSpans = {
+        {
+          scopeSpans = {
+            {
+              spans = {
+                { traceId = "t1", spanId = "t1", startTimeUnixNano = 2000, endTimeUnixNano = 1000 },
+                { traceId = "t2", spanId = "t2", startTimeUnixNano = 0, endTimeUnixNano = 1000 },
+                { traceId = "t3", spanId = "t3", startTimeUnixNano = 1000, endTimeUnixNano = 1000 },
+                { traceId = "t4", spanId = "t4", startTimeUnixNano = 1000, endTimeUnixNano = 1500 }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(table_res.success);
+  EXPECT_EQ(table_res.emitted_count, 4);
+  lua_pop(L_, 1);
+
+  const char* verify_table_script = R"(
+    assert(#emitted == 4)
+    assert(emitted[1].log.Duration == 0, "Table mode start > end must yield Duration 0")
+    assert(emitted[2].log.Duration == 0, "Table mode start == 0 must yield Duration 0")
+    assert(emitted[3].log.Duration == 0, "Table mode start == end must yield Duration 0")
+    assert(emitted[4].log.Duration == 500, "Table mode normal delta mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, MalformedJsonAndInvalidSchemaFieldHandling) {
+  // 1. Root JSON is not an object
+  auto r1 = ProcessTraces(L_, "[1, 2, 3]", emit_idx_);
+  EXPECT_FALSE(r1.success);
+  EXPECT_FALSE(r1.error.empty());
+  EXPECT_EQ(r1.emitted_count, 0);
+
+  auto r1b = ProcessTraces(L_, "\"a plain string\"", emit_idx_);
+  EXPECT_FALSE(r1b.success);
+  EXPECT_FALSE(r1b.error.empty());
+  EXPECT_EQ(r1b.emitted_count, 0);
+
+  // 2. resourceSpans is not an array
+  auto r2 =
+      ProcessTraces(L_, "{\"resourceSpans\": \"not_an_array\"}", emit_idx_);
+  EXPECT_FALSE(r2.success);
+  EXPECT_FALSE(r2.error.empty());
+
+  auto r2b = ProcessTraces(L_, "{\"resourceSpans\": 12345}", emit_idx_);
+  EXPECT_FALSE(r2b.success);
+  EXPECT_FALSE(r2b.error.empty());
+
+  // 3. resourceSpans array contains non-object items (should gracefully skip
+  // them)
+  const char* r3_json = R"({
+    "resourceSpans": [
+      null,
+      123,
+      "text",
+      {
+        "scopeSpans": [{
+          "spans": [{"traceId": "1", "spanId": "1"}]
+        }]
+      }
+    ]
+  })";
+  auto r3 = ProcessTraces(L_, r3_json, emit_idx_);
+  EXPECT_TRUE(r3.success);
+  EXPECT_EQ(r3.emitted_count, 1);
+
+  // 4. scopeSpans is not an array
+  auto r4 = ProcessTraces(L_, "{\"resourceSpans\": [{\"scopeSpans\": 999}]}",
+                          emit_idx_);
+  EXPECT_FALSE(r4.success);
+  EXPECT_FALSE(r4.error.empty());
+
+  // 5. scopeSpans contains non-object items (should gracefully skip them)
+  const char* r5_json = R"({
+    "resourceSpans": [{
+      "scopeSpans": [
+        null,
+        "bad_scope",
+        42,
+        {
+          "spans": [{"traceId": "2", "spanId": "2"}]
+        }
+      ]
+    }]
+  })";
+  auto r5 = ProcessTraces(L_, r5_json, emit_idx_);
+  EXPECT_TRUE(r5.success);
+  EXPECT_EQ(r5.emitted_count, 1);
+
+  // 6. spans is not an array
+  auto r6 = ProcessTraces(
+      L_, "{\"resourceSpans\": [{\"scopeSpans\": [{\"spans\": \"invalid\"}]}]}",
+      emit_idx_);
+  EXPECT_FALSE(r6.success);
+  EXPECT_FALSE(r6.error.empty());
+
+  // 7. spans contains non-object items (should gracefully skip them)
+  const char* r7_json = R"({
+    "resourceSpans": [{
+      "scopeSpans": [{
+        "spans": [
+          null,
+          "bad_span",
+          123,
+          {"traceId": "3", "spanId": "3"}
+        ]
+      }]
+    }]
+  })";
+  auto r7 = ProcessTraces(L_, r7_json, emit_idx_);
+  EXPECT_TRUE(r7.success);
+  EXPECT_EQ(r7.emitted_count, 1);
+
+  // 8. Broken JSON in the middle of a batch
+  auto r8 = ProcessTraces(L_,
+                          "{\"resourceSpans\": [{\"scopeSpans\": [{\"spans\": "
+                          "[{\"traceId\": \"4\"}, {BROKEN",
+                          emit_idx_);
+  EXPECT_FALSE(r8.success);
+
+  // 9. Table mode with non-table payload
+  lua_pushnumber(L_, 42.5);
+  int num_idx = lua_gettop(L_);
+  auto r9 = ProcessTracesTable(L_, num_idx, emit_idx_);
+  EXPECT_FALSE(r9.success);
+  EXPECT_EQ(r9.error, "payload must be a table");
+  EXPECT_EQ(r9.emitted_count, 0);
+  lua_pop(L_, 1);
+
+  // 10. Lua emit failure during ProcessTraces
+  const char* err_script = R"(
+    function fail_emit(event)
+      error("emit callback error")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, err_script), LUA_OK);
+  lua_getglobal(L_, "fail_emit");
+  int fail_emit_idx = lua_gettop(L_);
+
+  const char* single_span_json = R"({
+    "resourceSpans": [{
+      "scopeSpans": [{
+        "spans": [{"traceId": "5", "spanId": "5"}]
+      }]
+    }]
+  })";
+  auto r10 = ProcessTraces(L_, single_span_json, fail_emit_idx);
+  EXPECT_FALSE(r10.success);
+  EXPECT_FALSE(r10.error.empty());
+  lua_pop(L_, 1);
+}
+
+TEST_F(TracesExtractorTest, AnyValueSnakeCaseAndComplexVariantsInAttributes) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"string_value": "anyvalue-svc"}},
+          {"key": "str_snake", "value": {"string_value": "hello_snake"}},
+          {"key": "int_snake", "value": {"int_value": 42}},
+          {"key": "double_snake", "value": {"double_value": 2.718}},
+          {"key": "bool_t_snake", "value": {"bool_value": true}},
+          {"key": "bool_f_snake", "value": {"bool_value": false}},
+          {"key": "arr_snake", "value": {"array_value": [10, 20]}},
+          {"key": "kv_snake", "value": {"kvlist_value": {"k2": "v2"}}},
+          {"key": "bytes_snake", "value": {"bytes_value": "Ynl0ZXM="}}
+        ]
+      },
+      "scopeSpans": [{
+        "spans": [{
+          "traceId": "abc",
+          "spanId": "def",
+          "attributes": [
+            {"key": "s_str", "value": {"string_value": "span_str"}},
+            {"key": "s_int", "value": {"int_value": 100}},
+            {"key": "s_double", "value": {"double_value": 1.414}},
+            {"key": "s_bool", "value": {"bool_value": true}}
+          ]
+        }]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.ServiceName == "anyvalue-svc")
+    assert(r.ResourceAttributes.str_snake == "hello_snake")
+    assert(r.ResourceAttributes.int_snake == 42)
+    assert(r.ResourceAttributes.double_snake == 2.718)
+    assert(r.ResourceAttributes.bool_t_snake == true)
+    assert(r.ResourceAttributes.bool_f_snake == false)
+    assert(r.SpanAttributes.s_str == "span_str")
+    assert(r.SpanAttributes.s_int == 100)
+    assert(r.SpanAttributes.s_double == 1.414)
+    assert(r.SpanAttributes.s_bool == true)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, SpanKindVariantsAndTableModeComprehensive) {
+  // Test short-form kinds: INTERNAL, SERVER, CLIENT, PRODUCER, CONSUMER,
+  // UNSPECIFIED, CUSTOM
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {"traceId": "1", "spanId": "1", "kind": "INTERNAL"},
+          {"traceId": "2", "spanId": "2", "kind": "SERVER"},
+          {"traceId": "3", "spanId": "3", "kind": "CLIENT"},
+          {"traceId": "4", "spanId": "4", "kind": "PRODUCER"},
+          {"traceId": "5", "spanId": "5", "kind": "CONSUMER"},
+          {"traceId": "6", "spanId": "6", "kind": "UNSPECIFIED"},
+          {"traceId": "7", "spanId": "7", "kind": "CUSTOM_PROXY"}
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 7);
+
+  const char* verify_script = R"(
+    assert(#emitted == 7)
+    assert(emitted[1].log.SpanKind == "SPAN_KIND_INTERNAL")
+    assert(emitted[2].log.SpanKind == "SPAN_KIND_SERVER")
+    assert(emitted[3].log.SpanKind == "SPAN_KIND_CLIENT")
+    assert(emitted[4].log.SpanKind == "SPAN_KIND_PRODUCER")
+    assert(emitted[5].log.SpanKind == "SPAN_KIND_CONSUMER")
+    assert(emitted[6].log.SpanKind == "SPAN_KIND_UNSPECIFIED")
+    assert(emitted[7].log.SpanKind == "CUSTOM_PROXY")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+
+  // Table mode comprehensive test with snake_case fields and direct array
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* table_script = R"(
+    return {
+      resource_spans = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "tbl-svc" } }
+            }
+          },
+          scope_spans = {
+            {
+              scope = { name = "tbl-scope", version = "2.0" },
+              spans = {
+                {
+                  trace_id = "1111",
+                  span_id = "2222",
+                  parent_span_id = "3333",
+                  trace_state = "vendor=tbl",
+                  name = "table-span",
+                  kind = "SERVER",
+                  status = { code = "OK", message = "table ok" },
+                  start_time_unix_nano = 1000000000,
+                  end_time_unix_nano = 1000000500,
+                  attributes = {
+                    { key = "env", value = { stringValue = "stage" } },
+                    { key = "port", value = { intValue = 9000 } }
+                  },
+                  events = {
+                    { name = "ev_tbl", timeUnixNano = 1000000100 }
+                  },
+                  links = {
+                    { traceId = "linked_tr", spanId = "linked_sp" }
+                  }
+                },
+                {
+                  traceId = "4444",
+                  spanId = "5555",
+                  kind = 1,
+                  status = { code = 2, message = "table err" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(table_res.success);
+  EXPECT_EQ(table_res.emitted_count, 2);
+  lua_pop(L_, 1);
+
+  const char* verify_table_script = R"(
+    assert(#emitted == 2)
+    local s1 = emitted[1].log
+    assert(s1.ServiceName == "tbl-svc")
+    assert(s1.ScopeName == "tbl-scope")
+    assert(s1.ScopeVersion == "2.0")
+    assert(s1.TraceId == "1111")
+    assert(s1.SpanId == "2222")
+    assert(s1.ParentSpanId == "3333")
+    assert(s1.TraceState == "vendor=tbl")
+    assert(s1.SpanName == "table-span")
+    assert(s1.SpanKind == "SPAN_KIND_SERVER")
+    assert(s1.StatusCode == "STATUS_CODE_OK")
+    assert(s1.StatusMessage == "table ok")
+    assert(s1.Duration == 500)
+    assert(s1.SpanAttributes.env == "stage")
+    assert(s1.SpanAttributes.port == 9000)
+    assert(s1.Events:find("ev_tbl") ~= nil)
+    assert(s1.Links:find("linked_tr") ~= nil)
+
+    local s2 = emitted[2].log
+    assert(s2.TraceId == "4444")
+    assert(s2.SpanId == "5555")
+    assert(s2.SpanKind == "SPAN_KIND_INTERNAL")
+    assert(s2.StatusCode == "STATUS_CODE_ERROR")
+    assert(s2.StatusMessage == "table err")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel
