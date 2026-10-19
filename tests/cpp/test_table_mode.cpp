@@ -280,7 +280,8 @@ TEST_F(TableModeTest, SerializeTableWithNumericKeysDoesNotCorruptIterator) {
   lua_pop(L_, 1);
 }
 
-TEST_F(TableModeTest, PushTableAttributesWithNumericKeysDoesNotCorruptIterator) {
+TEST_F(TableModeTest,
+       PushTableAttributesWithNumericKeysDoesNotCorruptIterator) {
   lua_newtable(L_);
   lua_pushstring(L_, "alpha");
   lua_rawseti(L_, -2, 1);
@@ -321,10 +322,14 @@ TEST_F(TableModeTest, SerializeSequentialArrayPreservedAsArray) {
 
 TEST_F(TableModeTest, MalformedAnyValueTypesDoNotCrashOrPanic) {
   const char* cases[] = {
-      "return { intValue = true }",     "return { intValue = {} }",
-      "return { stringValue = true }",  "return { bytesValue = {} }",
-      "return { arrayValue = 123 }",    "return { arrayValue = { values = 'not_a_table' } }",
-      "return { kvlistValue = false }", "return { kvlistValue = { values = { 999, 'bad' } } }",
+      "return { intValue = true }",
+      "return { intValue = {} }",
+      "return { stringValue = true }",
+      "return { bytesValue = {} }",
+      "return { arrayValue = 123 }",
+      "return { arrayValue = { values = 'not_a_table' } }",
+      "return { kvlistValue = false }",
+      "return { kvlistValue = { values = { 999, 'bad' } } }",
   };
 
   core::FastJsonWriter writer;
@@ -491,12 +496,14 @@ TEST_F(TableModeTest, BytesValueAnyValueBodyAndAttributes) {
 
   // Direct check of ReadTableBodyString with bytesValue and bytes_value
   core::FastJsonWriter writer;
-  ASSERT_EQ(luaL_dostring(L_, "return { body = { bytesValue = 'SGVsbG8=' } }"), LUA_OK);
+  ASSERT_EQ(luaL_dostring(L_, "return { body = { bytesValue = 'SGVsbG8=' } }"),
+            LUA_OK);
   std::string body1 = core::ReadTableBodyString(L_, -1, writer);
   EXPECT_NE(body1.find("SGVsbG8="), std::string::npos);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_, "return { body = { bytes_value = 'V29ybGQ=' } }"), LUA_OK);
+  ASSERT_EQ(luaL_dostring(L_, "return { body = { bytes_value = 'V29ybGQ=' } }"),
+            LUA_OK);
   std::string body2 = core::ReadTableBodyString(L_, -1, writer);
   EXPECT_NE(body2.find("V29ybGQ="), std::string::npos);
   lua_pop(L_, 1);
@@ -581,9 +588,10 @@ TEST_F(TableModeTest, EmptyAttributesResourceLogsAndScopes) {
   lua_pop(L_, 1);
 
   // Empty scopeLogs
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceLogs = { { resource = { attributes = {} }, "
-                          "scopeLogs = {} } } }"),
+  ASSERT_EQ(luaL_dostring(
+                L_,
+                "return { resourceLogs = { { resource = { attributes = {} }, "
+                "scopeLogs = {} } } }"),
             LUA_OK);
   auto res_logs2 = extractors::ProcessLogsTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_logs2.success);
@@ -591,19 +599,22 @@ TEST_F(TableModeTest, EmptyAttributesResourceLogsAndScopes) {
   lua_pop(L_, 1);
 
   // Empty logRecords
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceLogs = { { scopeLogs = { { scope = { attributes = "
-                          "{} }, logRecords = {} } } } } }"),
-            LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(
+          L_,
+          "return { resourceLogs = { { scopeLogs = { { scope = { attributes = "
+          "{} }, logRecords = {} } } } } }"),
+      LUA_OK);
   auto res_logs3 = extractors::ProcessLogsTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_logs3.success);
   EXPECT_EQ(res_logs3.emitted_count, 0);
   lua_pop(L_, 1);
 
   // Log record with empty attributes and missing resource/scope
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceLogs = { { scopeLogs = { { logRecords = { { "
-                          "body = 'no res/scope', attributes = {} } } } } } } }"),
+  ASSERT_EQ(luaL_dostring(
+                L_,
+                "return { resourceLogs = { { scopeLogs = { { logRecords = { { "
+                "body = 'no res/scope', attributes = {} } } } } } } }"),
             LUA_OK);
   auto res_logs4 = extractors::ProcessLogsTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_logs4.success);
@@ -618,28 +629,31 @@ TEST_F(TableModeTest, EmptyAttributesResourceLogsAndScopes) {
   EXPECT_EQ(res_traces1.emitted_count, 0);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceSpans = { { resource = { attributes = {} }, "
-                          "scopeSpans = {} } } }"),
+  ASSERT_EQ(luaL_dostring(
+                L_,
+                "return { resourceSpans = { { resource = { attributes = {} }, "
+                "scopeSpans = {} } } }"),
             LUA_OK);
   auto res_traces2 = extractors::ProcessTracesTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_traces2.success);
   EXPECT_EQ(res_traces2.emitted_count, 0);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceSpans = { { scopeSpans = { { scope = { "
-                          "attributes = {} }, spans = {} } } } } }"),
-            LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(L_,
+                    "return { resourceSpans = { { scopeSpans = { { scope = { "
+                    "attributes = {} }, spans = {} } } } } }"),
+      LUA_OK);
   auto res_traces3 = extractors::ProcessTracesTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_traces3.success);
   EXPECT_EQ(res_traces3.emitted_count, 0);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceSpans = { { scopeSpans = { { spans = { { "
-                          "name = 'empty_span', attributes = {} } } } } } } }"),
-            LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(L_,
+                    "return { resourceSpans = { { scopeSpans = { { spans = { { "
+                    "name = 'empty_span', attributes = {} } } } } } } }"),
+      LUA_OK);
   auto res_traces4 = extractors::ProcessTracesTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_traces4.success);
   EXPECT_EQ(res_traces4.emitted_count, 1);
@@ -653,38 +667,45 @@ TEST_F(TableModeTest, EmptyAttributesResourceLogsAndScopes) {
   EXPECT_EQ(res_metrics1.emitted_count, 0);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceMetrics = { { resource = { attributes = {} }, "
-                          "scopeMetrics = {} } } }"),
-            LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(
+          L_,
+          "return { resourceMetrics = { { resource = { attributes = {} }, "
+          "scopeMetrics = {} } } }"),
+      LUA_OK);
   auto res_metrics2 = extractors::ProcessMetricsTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_metrics2.success);
   EXPECT_EQ(res_metrics2.emitted_count, 0);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceMetrics = { { scopeMetrics = { { scope = { "
-                          "attributes = {} }, metrics = {} } } } } }"),
+  ASSERT_EQ(luaL_dostring(
+                L_,
+                "return { resourceMetrics = { { scopeMetrics = { { scope = { "
+                "attributes = {} }, metrics = {} } } } } }"),
             LUA_OK);
   auto res_metrics3 = extractors::ProcessMetricsTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_metrics3.success);
   EXPECT_EQ(res_metrics3.emitted_count, 0);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceMetrics = { { scopeMetrics = { { metrics = { { "
-                          "name = 'empty_m', gauge = { dataPoints = {} } } } } } } } }"),
-            LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(
+          L_,
+          "return { resourceMetrics = { { scopeMetrics = { { metrics = { { "
+          "name = 'empty_m', gauge = { dataPoints = {} } } } } } } } }"),
+      LUA_OK);
   auto res_metrics4 = extractors::ProcessMetricsTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_metrics4.success);
   EXPECT_EQ(res_metrics4.emitted_count, 0);
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_,
-                          "return { resourceMetrics = { { scopeMetrics = { { metrics = { { "
-                          "name = 'm_with_empty_attrs', gauge = { dataPoints = { { asInt = 1, "
-                          "attributes = {} } } } } } } } } } }"),
-            LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(
+          L_,
+          "return { resourceMetrics = { { scopeMetrics = { { metrics = { { "
+          "name = 'm_with_empty_attrs', gauge = { dataPoints = { { asInt = 1, "
+          "attributes = {} } } } } } } } } } }"),
+      LUA_OK);
   auto res_metrics5 = extractors::ProcessMetricsTable(L_, -1, emit_idx_);
   EXPECT_TRUE(res_metrics5.success);
   EXPECT_EQ(res_metrics5.emitted_count, 1);
@@ -831,7 +852,8 @@ TEST_F(TableModeTest, MalformedTableTypesAndNonTableAttributes) {
   lua_pop(L_, 2);
 }
 
-TEST_F(TableModeTest, SpanEventsTableModeCustomAttributesTimestampAndDroppedCount) {
+TEST_F(TableModeTest,
+       SpanEventsTableModeCustomAttributesTimestampAndDroppedCount) {
   core::FastJsonWriter writer;
 
   // Direct test of PushTableSpanEvents
@@ -1188,17 +1210,21 @@ TEST_F(TableModeTest, TableReaderPrimitivesAndSeverityNumberCoverage) {
   EXPECT_EQ(core::ReadTableUint64(L_, t_idx, "f_float"), 200ULL);
   EXPECT_EQ(core::ReadTableUint64(L_, t_idx, "f_str_num"), 300ULL);
   EXPECT_EQ(core::ReadTableUint64(L_, t_idx, "f_bad_str", nullptr, 0ULL), 0ULL);
-  EXPECT_EQ(core::ReadTableUint64(L_, t_idx, "f_missing", nullptr, 999ULL), 999ULL);
+  EXPECT_EQ(core::ReadTableUint64(L_, t_idx, "f_missing", nullptr, 999ULL),
+            999ULL);
 
   EXPECT_DOUBLE_EQ(core::ReadTableDouble(L_, t_idx, "f_float"), 200.5);
   EXPECT_DOUBLE_EQ(core::ReadTableDouble(L_, t_idx, "f_str_num"), 300.0);
-  EXPECT_DOUBLE_EQ(core::ReadTableDouble(L_, t_idx, "f_bad_str", nullptr, 0.0), 0.0);
-  EXPECT_DOUBLE_EQ(core::ReadTableDouble(L_, t_idx, "f_missing", nullptr, 1.5), 1.5);
+  EXPECT_DOUBLE_EQ(core::ReadTableDouble(L_, t_idx, "f_bad_str", nullptr, 0.0),
+                   0.0);
+  EXPECT_DOUBLE_EQ(core::ReadTableDouble(L_, t_idx, "f_missing", nullptr, 1.5),
+                   1.5);
 
   EXPECT_EQ(core::ReadTableString(L_, t_idx, "f_str"), "hello");
   EXPECT_EQ(core::ReadTableString(L_, t_idx, "f_missing", "f_str"), "hello");
   EXPECT_EQ(core::ReadTableString(L_, t_idx, "f_bool", nullptr, "def"), "def");
-  EXPECT_EQ(core::ReadTableString(L_, t_idx, "f_missing", nullptr, "def"), "def");
+  EXPECT_EQ(core::ReadTableString(L_, t_idx, "f_missing", nullptr, "def"),
+            "def");
 
   EXPECT_TRUE(core::GetTableField(L_, t_idx, "f_str"));
   lua_pop(L_, 1);
@@ -1209,33 +1235,34 @@ TEST_F(TableModeTest, TableReaderPrimitivesAndSeverityNumberCoverage) {
   lua_pop(L_, 1);  // pop table
 
   // Severity Number test for all string enum names
-  const std::pair<const char*, int64_t> severities[] = {{"SEVERITY_NUMBER_TRACE", 1},
-                                                        {"SEVERITY_NUMBER_TRACE2", 2},
-                                                        {"SEVERITY_NUMBER_TRACE3", 3},
-                                                        {"SEVERITY_NUMBER_TRACE4", 4},
-                                                        {"SEVERITY_NUMBER_DEBUG", 5},
-                                                        {"SEVERITY_NUMBER_DEBUG2", 6},
-                                                        {"SEVERITY_NUMBER_DEBUG3", 7},
-                                                        {"SEVERITY_NUMBER_DEBUG4", 8},
-                                                        {"SEVERITY_NUMBER_INFO", 9},
-                                                        {"SEVERITY_NUMBER_INFO2", 10},
-                                                        {"SEVERITY_NUMBER_INFO3", 11},
-                                                        {"SEVERITY_NUMBER_INFO4", 12},
-                                                        {"SEVERITY_NUMBER_WARN", 13},
-                                                        {"SEVERITY_NUMBER_WARN2", 14},
-                                                        {"SEVERITY_NUMBER_WARN3", 15},
-                                                        {"SEVERITY_NUMBER_WARN4", 16},
-                                                        {"SEVERITY_NUMBER_ERROR", 17},
-                                                        {"SEVERITY_NUMBER_ERROR2", 18},
-                                                        {"SEVERITY_NUMBER_ERROR3", 19},
-                                                        {"SEVERITY_NUMBER_ERROR4", 20},
-                                                        {"SEVERITY_NUMBER_FATAL", 21},
-                                                        {"SEVERITY_NUMBER_FATAL2", 22},
-                                                        {"SEVERITY_NUMBER_FATAL3", 23},
-                                                        {"SEVERITY_NUMBER_FATAL4", 24},
-                                                        {"17", 17},
-                                                        {"99", 99},
-                                                        {"NOT_A_SEV", 0}};
+  const std::pair<const char*, int64_t> severities[] = {
+      {"SEVERITY_NUMBER_TRACE", 1},
+      {"SEVERITY_NUMBER_TRACE2", 2},
+      {"SEVERITY_NUMBER_TRACE3", 3},
+      {"SEVERITY_NUMBER_TRACE4", 4},
+      {"SEVERITY_NUMBER_DEBUG", 5},
+      {"SEVERITY_NUMBER_DEBUG2", 6},
+      {"SEVERITY_NUMBER_DEBUG3", 7},
+      {"SEVERITY_NUMBER_DEBUG4", 8},
+      {"SEVERITY_NUMBER_INFO", 9},
+      {"SEVERITY_NUMBER_INFO2", 10},
+      {"SEVERITY_NUMBER_INFO3", 11},
+      {"SEVERITY_NUMBER_INFO4", 12},
+      {"SEVERITY_NUMBER_WARN", 13},
+      {"SEVERITY_NUMBER_WARN2", 14},
+      {"SEVERITY_NUMBER_WARN3", 15},
+      {"SEVERITY_NUMBER_WARN4", 16},
+      {"SEVERITY_NUMBER_ERROR", 17},
+      {"SEVERITY_NUMBER_ERROR2", 18},
+      {"SEVERITY_NUMBER_ERROR3", 19},
+      {"SEVERITY_NUMBER_ERROR4", 20},
+      {"SEVERITY_NUMBER_FATAL", 21},
+      {"SEVERITY_NUMBER_FATAL2", 22},
+      {"SEVERITY_NUMBER_FATAL3", 23},
+      {"SEVERITY_NUMBER_FATAL4", 24},
+      {"17", 17},
+      {"99", 99},
+      {"NOT_A_SEV", 0}};
 
   for (const auto& [name, expected] : severities) {
     lua_pushstring(L_, name);
@@ -1383,15 +1410,20 @@ TEST_F(TableModeTest, TableReaderServiceNameAndBodyCoverage) {
   EXPECT_EQ(core::ReadTableBodyString(L_, -1, writer), "plain text");
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_, "return { body = { stringValue = 'otlp text' } }"), LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(L_, "return { body = { stringValue = 'otlp text' } }"),
+      LUA_OK);
   EXPECT_EQ(core::ReadTableBodyString(L_, -1, writer), "otlp text");
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_, "return { body = { string_value = 'snake text' } }"), LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(L_, "return { body = { string_value = 'snake text' } }"),
+      LUA_OK);
   EXPECT_EQ(core::ReadTableBodyString(L_, -1, writer), "snake text");
   lua_pop(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_, "return { body = { stringValue = 123 } }"), LUA_OK);
+  ASSERT_EQ(luaL_dostring(L_, "return { body = { stringValue = 123 } }"),
+            LUA_OK);
   EXPECT_EQ(core::ReadTableBodyString(L_, -1, writer), "\"\"");
   lua_pop(L_, 1);
 
@@ -1404,7 +1436,8 @@ TEST_F(TableModeTest, TableReaderServiceNameAndBodyCoverage) {
                           "200 } }"),
             LUA_OK);
   std::string struct_body = core::ReadTableBodyString(L_, -1, writer);
-  EXPECT_NE(struct_body.find("\"message\":\"json payload\""), std::string::npos);
+  EXPECT_NE(struct_body.find("\"message\":\"json payload\""),
+            std::string::npos);
   EXPECT_NE(struct_body.find("\"code\":200"), std::string::npos);
   lua_pop(L_, 1);
 
@@ -1806,7 +1839,8 @@ TEST_F(TableModeTest, ReadTableStringViewReturnsZeroCopyView) {
   lua_pop(L_, 1);
 
   std::string scratch;
-  std::string_view sv = core::ReadTableStringView(L_, -1, "name", nullptr, scratch, "default");
+  std::string_view sv =
+      core::ReadTableStringView(L_, -1, "name", nullptr, scratch, "default");
   EXPECT_EQ(sv, "zero_copy_payload");
   EXPECT_EQ(sv.data(), expected_ptr);
   EXPECT_TRUE(scratch.empty());
@@ -1820,7 +1854,8 @@ TEST_F(TableModeTest, ReadTableStringViewCoercesNumbersViaScratch) {
   int top_before = lua_gettop(L_);
 
   std::string scratch;
-  std::string_view sv = core::ReadTableStringView(L_, -1, "name", nullptr, scratch, "default");
+  std::string_view sv =
+      core::ReadTableStringView(L_, -1, "name", nullptr, scratch, "default");
   EXPECT_EQ(sv, "999");
   EXPECT_EQ(sv.data(), scratch.data());
   EXPECT_EQ(lua_gettop(L_), top_before);
@@ -1836,24 +1871,27 @@ TEST_F(TableModeTest, ReadTableStringViewCoercesNumbersViaScratch) {
 TEST_F(TableModeTest, ReadTableStringViewFallsBackToSecondName) {
   ASSERT_EQ(luaL_dostring(L_, "return { snake_key = 'fallback_val' }"), LUA_OK);
   std::string scratch;
-  std::string_view sv =
-      core::ReadTableStringView(L_, -1, "camelKey", "snake_key", scratch, "default_val");
+  std::string_view sv = core::ReadTableStringView(
+      L_, -1, "camelKey", "snake_key", scratch, "default_val");
   EXPECT_EQ(sv, "fallback_val");
 
-  std::string_view missing_sv =
-      core::ReadTableStringView(L_, -1, "missing1", "missing2", scratch, "default_val");
+  std::string_view missing_sv = core::ReadTableStringView(
+      L_, -1, "missing1", "missing2", scratch, "default_val");
   EXPECT_EQ(missing_sv, "default_val");
   lua_pop(L_, 1);
 }
 
 TEST_F(TableModeTest, ReadTableStringViewIgnoresMetamethods) {
-  ASSERT_EQ(luaL_dostring(L_, "return setmetatable({}, {__index = function() error('boom') end})"),
-            LUA_OK);
+  ASSERT_EQ(
+      luaL_dostring(
+          L_,
+          "return setmetatable({}, {__index = function() error('boom') end})"),
+      LUA_OK);
   int top_before = lua_gettop(L_);
 
   std::string scratch;
-  std::string_view sv =
-      core::ReadTableStringView(L_, -1, "any_key", "other_key", scratch, "safe_default");
+  std::string_view sv = core::ReadTableStringView(
+      L_, -1, "any_key", "other_key", scratch, "safe_default");
   EXPECT_EQ(sv, "safe_default");
   EXPECT_EQ(lua_gettop(L_), top_before);
   lua_pop(L_, 1);
@@ -1866,7 +1904,8 @@ TEST_F(TableModeTest, ReadTableStringViewSurvivesGcWhileTableAnchored) {
   lua_setfield(L_, -2, "long_field");
 
   std::string scratch;
-  std::string_view sv = core::ReadTableStringView(L_, -1, "long_field", nullptr, scratch);
+  std::string_view sv =
+      core::ReadTableStringView(L_, -1, "long_field", nullptr, scratch);
   lua_gc(L_, LUA_GCCOLLECT, 0);
   EXPECT_EQ(sv, long_str);
   lua_pop(L_, 1);
@@ -1904,7 +1943,8 @@ TEST_F(TableModeTest, ExtractTableServiceNameViewMatchesStringVariant) {
     int top_before = lua_gettop(L_);
 
     std::string scratch;
-    std::string_view view_res = core::ExtractTableServiceNameView(L_, -1, scratch);
+    std::string_view view_res =
+        core::ExtractTableServiceNameView(L_, -1, scratch);
     std::string str_res = core::ExtractTableServiceName(L_, -1);
 
     EXPECT_EQ(view_res, str_res) << "Mismatch on case: " << expr;

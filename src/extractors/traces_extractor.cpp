@@ -733,7 +733,6 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   static thread_local std::string tls_service_scratch;
   static thread_local std::string tls_scope_name_scratch;
   static thread_local std::string tls_scope_ver_scratch;
-  static thread_local std::string tls_field_scratch;
   static thread_local std::string tls_status_msg_scratch;
   static thread_local std::string span_kind_buf;
   static thread_local std::string status_code_buf;
@@ -755,7 +754,6 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
       trim_scratch(tls_service_scratch);
       trim_scratch(tls_scope_name_scratch);
       trim_scratch(tls_scope_ver_scratch);
-      trim_scratch(tls_field_scratch);
       trim_scratch(tls_status_msg_scratch);
       trim_scratch(span_kind_buf);
       trim_scratch(status_code_buf);

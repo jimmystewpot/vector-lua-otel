@@ -382,13 +382,15 @@ TEST_F(LogsExtractorTest, EmptyBatches) {
 
   // Resource with empty scopeLogs
   {
-    auto res = ProcessLogs(L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
+    auto res = ProcessLogs(
+        L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
     EXPECT_TRUE(res.success);
     EXPECT_EQ(res.emitted_count, 0);
   }
 }
 
-TEST_F(LogsExtractorTest, ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperAndError) {
+TEST_F(LogsExtractorTest,
+       ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperAndError) {
   // 1. { log = { resourceLogs = { ... } } }
   {
     const char* setup_nested = R"(
@@ -646,14 +648,15 @@ TEST_F(LogsExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
   // 80-char service.name string (non-interned long string in Lua 5.4) followed
   // by a duplicate service.name with intValue 42.
   const std::string long_svc(80, 's');
-  std::string json = R"({"resourceLogs":[{"resource":{"attributes":[)"
-                     R"({"key":"service.name","value":{"stringValue":")" +
-                     long_svc +
-                     R"("}},{"key":"service.name","value":{"intValue":"42"}})"
-                     R"(]},"scopeLogs":[{"logRecords":[)"
-                     R"({"timeUnixNano":"1700000000000000000","body":{"stringValue":"rec1"}},)"
-                     R"({"timeUnixNano":"1700000000000000001","body":{"stringValue":"rec2"}})"
-                     R"(]}]}]})";
+  std::string json =
+      R"({"resourceLogs":[{"resource":{"attributes":[)"
+      R"({"key":"service.name","value":{"stringValue":")" +
+      long_svc +
+      R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+      R"(]},"scopeLogs":[{"logRecords":[)"
+      R"({"timeUnixNano":"1700000000000000000","body":{"stringValue":"rec1"}},)"
+      R"({"timeUnixNano":"1700000000000000001","body":{"stringValue":"rec2"}})"
+      R"(]}]}]})";
 
   auto res = ProcessLogs(L_, json, gc_emit_idx);
   lua_pop(L_, 1);
@@ -675,7 +678,8 @@ TEST_F(LogsExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
-TEST_F(LogsExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderGc) {
+TEST_F(LogsExtractorTest,
+       DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderGc) {
   const char* gc_emit_script = R"(
     uaf_emitted = {}
     function uaf_gc_emit(event)
@@ -688,14 +692,15 @@ TEST_F(LogsExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderG
   int gc_emit_idx = lua_gettop(L_);
 
   const std::string long_svc(64, 'a');
-  std::string json = R"({"resourceLogs":[{"resource":{"attributes":[)"
-                     R"({"key":"service.name","value":{"stringValue":")" +
-                     long_svc +
-                     R"("}},{"key":"service.name","value":{"intValue":"42"}})"
-                     R"(]},"scopeLogs":[{"logRecords":[)"
-                     R"({"timeUnixNano":"1700000000000000000","body":{"stringValue":"first"}},)"
-                     R"({"timeUnixNano":"1700000000000000001","body":{"stringValue":"second"}})"
-                     R"(]}]}]})";
+  std::string json =
+      R"({"resourceLogs":[{"resource":{"attributes":[)"
+      R"({"key":"service.name","value":{"stringValue":")" +
+      long_svc +
+      R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+      R"(]},"scopeLogs":[{"logRecords":[)"
+      R"({"timeUnixNano":"1700000000000000000","body":{"stringValue":"first"}},)"
+      R"({"timeUnixNano":"1700000000000000001","body":{"stringValue":"second"}})"
+      R"(]}]}]})";
 
   auto res = ProcessLogs(L_, json, gc_emit_idx);
   lua_pop(L_, 1);
