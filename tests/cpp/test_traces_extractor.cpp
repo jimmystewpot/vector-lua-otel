@@ -1230,6 +1230,194 @@ TEST_F(TracesExtractorTest, SpanKindVariantsAndTableModeComprehensive) {
       << lua_tostring(L_, -1);
 }
 
+TEST_F(TracesExtractorTest, EventsFieldOrderDoesNotChangeOutput) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {
+            "traceId": "11112222333344445555666677778888",
+            "spanId": "1111222233334444",
+            "events": [
+              {
+                "timeUnixNano": "1000",
+                "name": "ev_order_test",
+                "attributes": [
+                  {"key": "k1", "value": {"stringValue": "v1"}},
+                  {"key": "k2", "value": {"intValue": "42"}}
+                ]
+              }
+            ]
+          },
+          {
+            "traceId": "11112222333344445555666677778888",
+            "spanId": "2222333344445555",
+            "events": [
+              {
+                "attributes": [
+                  {"key": "k1", "value": {"stringValue": "v1"}},
+                  {"key": "k2", "value": {"intValue": "42"}}
+                ],
+                "name": "ev_order_test",
+                "timeUnixNano": "1000"
+              }
+            ]
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2, "Expected 2 spans")
+    local r_a = emitted[1].log
+    local r_b = emitted[2].log
+    assert(r_a.Events == r_b.Events,
+           "Events mismatch across field orders: " .. tostring(r_a.Events) .. " vs " .. tostring(r_b.Events))
+    assert(r_a.Events:find("ev_order_test", 1, true) ~= nil, "Missing event name")
+    assert(r_a.Events:find("1970-01-01T00:00:00.000001000Z", 1, true) ~= nil, "Missing formatted timestamp")
+    assert(r_a.Events == '[{"Timestamp":"1970-01-01T00:00:00.000001000Z","Name":"ev_order_test","Attributes":{"k1":"v1","k2":42}}]',
+           "Unexpected Events JSON: " .. tostring(r_a.Events))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, LinksFieldOrderDoesNotChangeOutput) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {
+            "traceId": "11112222333344445555666677778888",
+            "spanId": "1111222233334444",
+            "links": [
+              {
+                "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "spanId": "00f067aa0ba902b7",
+                "traceState": "rojo=1",
+                "attributes": [
+                  {"key": "lk", "value": {"stringValue": "lv"}}
+                ]
+              }
+            ]
+          },
+          {
+            "traceId": "11112222333344445555666677778888",
+            "spanId": "2222333344445555",
+            "links": [
+              {
+                "attributes": [
+                  {"key": "lk", "value": {"stringValue": "lv"}}
+                ],
+                "traceState": "rojo=1",
+                "spanId": "00f067aa0ba902b7",
+                "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+              }
+            ]
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2, "Expected 2 spans")
+    local r_a = emitted[1].log
+    local r_b = emitted[2].log
+    assert(r_a.Links == r_b.Links,
+           "Links mismatch across field orders: " .. tostring(r_a.Links) .. " vs " .. tostring(r_b.Links))
+    assert(r_a.Links == '[{"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736","SpanId":"00f067aa0ba902b7","TraceState":"rojo=1","Attributes":{"lk":"lv"}}]',
+           "Unexpected Links JSON: " .. tostring(r_a.Links))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, EventsMissingFieldsUseDefaults) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {
+            "traceId": "11112222333344445555666677778888",
+            "spanId": "1111222233334444",
+            "events": [
+              {"name": "only_name"}
+            ],
+            "links": [
+              {"traceId": "only_trace_id"}
+            ]
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 span")
+    local r = emitted[1].log
+    assert(r.Events:find('"Attributes":{}', 1, true) ~= nil, "Missing default Attributes in Events: " .. tostring(r.Events))
+    assert(r.Events == '[{"Timestamp":"1970-01-01T00:00:00.000000000Z","Name":"only_name","Attributes":{}}]',
+           "Unexpected Events default output: " .. tostring(r.Events))
+    assert(r.Links:find('"Attributes":{}', 1, true) ~= nil, "Missing default Attributes in Links: " .. tostring(r.Links))
+    assert(r.Links == '[{"TraceId":"only_trace_id","SpanId":"","TraceState":"","Attributes":{}}]',
+           "Unexpected Links default output: " .. tostring(r.Links))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, EventsAndLinksMissingFieldsUseDefaults) {
+  const char* json = R"({
+    "resourceSpans": [{
+      "resource": {},
+      "scopeSpans": [{
+        "spans": [
+          {
+            "traceId": "11112222333344445555666677778888",
+            "spanId": "1111222233334444",
+            "events": [
+              {"name": "only_name"},
+              {}
+            ],
+            "links": [
+              {"traceId": "only_trace_id"},
+              {}
+            ]
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 span")
+    local r = emitted[1].log
+    assert(r.Events == '[{"Timestamp":"1970-01-01T00:00:00.000000000Z","Name":"only_name","Attributes":{}},{"Timestamp":"1970-01-01T00:00:00.000000000Z","Name":"","Attributes":{}}]',
+           "Unexpected Events default output: " .. tostring(r.Events))
+    assert(r.Links == '[{"TraceId":"only_trace_id","SpanId":"","TraceState":"","Attributes":{}},{"TraceId":"","SpanId":"","TraceState":"","Attributes":{}}]',
+           "Unexpected Links default output: " .. tostring(r.Links))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel
