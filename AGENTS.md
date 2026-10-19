@@ -164,6 +164,15 @@ clang-format --dry-run --Werror -style=Google \
 ```
 **Expected**: Clean format with 0 errors.
 
+### Step 5: Sanitiser Run (Optional)
+```bash
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
+cmake --build build-asan -j$(nproc)
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir build-asan --output-on-failure
+```
+**Expected**: 100% tests passing (`vector_otel_tests`) with 0 ASAN/UBSAN errors.
+*(Note: `tests/lua/run_tests.sh` is not run under ASAN because loading an ASAN-instrumented `vector_otel.so` into an uninstrumented system `lua5.4` binary requires `LD_PRELOAD` of the ASAN runtime.)*
+
 ---
 
 ## 5. Git Commit & PR Conventions
