@@ -49,6 +49,26 @@ class TableModeTest : public ::testing::Test {
     }
   }
 
+  extractors::ExtractionResult RunLogsTable(const char* lua_input) {
+    int rc = luaL_dostring(L_, R"(
+      emitted = {}
+      function test_collect_emit(ev)
+        emitted[#emitted + 1] = ev
+      end
+    )");
+    EXPECT_EQ(rc, LUA_OK);
+    lua_getglobal(L_, "test_collect_emit");
+    int emit_idx = lua_gettop(L_);
+
+    rc = luaL_dostring(L_, lua_input);
+    EXPECT_EQ(rc, LUA_OK);
+    int table_idx = lua_gettop(L_);
+
+    auto res = extractors::ProcessLogsTable(L_, table_idx, emit_idx);
+    lua_pop(L_, 2);  // pop table and test_collect_emit
+    return res;
+  }
+
   lua_State* L_{nullptr};
   int emit_idx_{0};
 };
@@ -1182,7 +1202,7 @@ TEST_F(TableModeTest, TableReaderPrimitivesAndSeverityNumberCoverage) {
   EXPECT_EQ(core::ReadTableInt64(L_, t_idx, "f_int"), 100);
   EXPECT_EQ(core::ReadTableInt64(L_, t_idx, "f_float"), 200);
   EXPECT_EQ(core::ReadTableInt64(L_, t_idx, "f_str_num"), 300);
-  EXPECT_EQ(core::ReadTableInt64(L_, t_idx, "f_bad_str", nullptr, -1), 0);
+  EXPECT_EQ(core::ReadTableInt64(L_, t_idx, "f_bad_str", nullptr, -1), -1);
   EXPECT_EQ(core::ReadTableInt64(L_, t_idx, "f_missing", nullptr, -42), -42);
   EXPECT_EQ(core::ReadTableInt64(L_, t_idx, "f_missing", "f_int"), 100);
 
@@ -1573,6 +1593,241 @@ TEST_F(TableModeTest, AlternativeRootKeysAndSpanKindStatusVariations) {
   EXPECT_TRUE(res_metrics.success);
   EXPECT_EQ(res_metrics.emitted_count, 5);
   lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest, NonFiniteAndOutOfRangeNumbersFallBackToDefaults) {
+  const char* script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  timeUnixNano = 1e30,
+                  severityNumber = 0/0,
+                  flags = math.huge
+                },
+                {
+                  timeUnixNano = -5.0,
+                  observedTimeUnixNano = -1,
+                  severityNumber = -1e30,
+                  flags = -1e30
+                },
+                {
+                  timeUnixNano = -math.huge
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+
+  auto res = RunLogsTable(script);
+  ASSERT_TRUE(res.success);
+  ASSERT_EQ(res.emitted_count, 3);
+
+  lua_getglobal(L_, "emitted");
+  ASSERT_TRUE(lua_istable(L_, -1));
+  int emitted_idx = lua_gettop(L_);
+
+  for (int i = 1; i <= 3; ++i) {
+    lua_rawgeti(L_, emitted_idx, i);
+    ASSERT_TRUE(lua_istable(L_, -1));
+    lua_getfield(L_, -1, "log");
+    ASSERT_TRUE(lua_istable(L_, -1));
+
+    lua_getfield(L_, -1, "Timestamp");
+    EXPECT_STREQ(lua_tostring(L_, -1), "1970-01-01T00:00:00.000000000Z");
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "SeverityNumber");
+    EXPECT_EQ(lua_tointeger(L_, -1), 0);
+    lua_pop(L_, 1);
+
+    lua_getfield(L_, -1, "TraceFlags");
+    EXPECT_EQ(lua_tointeger(L_, -1), 0);
+    lua_pop(L_, 1);
+
+    lua_pop(L_, 2);  // pop log and emitted[i]
+  }
+  lua_pop(L_, 1);  // pop emitted
+
+  // Also directly verify ReadTableUint64 rejects negative integer (-1)
+  lua_newtable(L_);
+  lua_pushinteger(L_, -1);
+  lua_setfield(L_, -2, "flags");
+  EXPECT_EQ(core::ReadTableUint64(L_, -1, "flags", nullptr, 0ULL), 0ULL);
+  lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest, NumericStringRules) {
+  const char* script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                { timeUnixNano = "12abc" },
+                { timeUnixNano = "99999999999999999999" },
+                { severityNumber = "inf" },
+                { severityNumber = "nan" },
+                { timeUnixNano = "+5" },
+                { timeUnixNano = "  7  " },
+                { timeUnixNano = "7\0009" }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+
+  auto res = RunLogsTable(script);
+  ASSERT_TRUE(res.success);
+  ASSERT_EQ(res.emitted_count, 7);
+
+  lua_getglobal(L_, "emitted");
+  ASSERT_TRUE(lua_istable(L_, -1));
+  int emitted_idx = lua_gettop(L_);
+
+  auto get_log_str = [&](int idx, const char* key) -> std::string {
+    lua_rawgeti(L_, emitted_idx, idx);
+    lua_getfield(L_, -1, "log");
+    lua_getfield(L_, -1, key);
+    std::string val = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "";
+    lua_pop(L_, 3);
+    return val;
+  };
+  auto get_log_int = [&](int idx, const char* key) -> int64_t {
+    lua_rawgeti(L_, emitted_idx, idx);
+    lua_getfield(L_, -1, "log");
+    lua_getfield(L_, -1, key);
+    int64_t val = lua_tointeger(L_, -1);
+    lua_pop(L_, 3);
+    return val;
+  };
+
+  EXPECT_EQ(get_log_str(1, "Timestamp"), "1970-01-01T00:00:00.000000000Z");
+  EXPECT_EQ(get_log_str(2, "Timestamp"), "1970-01-01T00:00:00.000000000Z");
+  EXPECT_EQ(get_log_int(3, "SeverityNumber"), 0);
+  EXPECT_EQ(get_log_int(4, "SeverityNumber"), 0);
+  EXPECT_EQ(get_log_str(5, "Timestamp"), "1970-01-01T00:00:00.000000005Z");
+  EXPECT_EQ(get_log_str(6, "Timestamp"), "1970-01-01T00:00:00.000000007Z");
+  EXPECT_EQ(get_log_str(7, "Timestamp"), "1970-01-01T00:00:00.000000000Z");
+
+  lua_pop(L_, 1);  // pop emitted
+}
+
+TEST_F(TableModeTest, AttributeIntAndDoubleValueStrictness) {
+  const char* script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  attributes = {
+                    { key = "a", value = { intValue = "7x" } },
+                    { key = "b", value = { intValue = "7" } },
+                    { key = "c", value = { intValue = 1e30 } },
+                    { key = "d", value = { doubleValue = "3.14pi" } },
+                    { key = "e", value = { doubleValue = " 2.5 " } },
+                    {
+                      key = "arr",
+                      value = {
+                        arrayValue = {
+                          values = {
+                            { intValue = "7x" },
+                            { intValue = "7" },
+                            { intValue = 1e30 },
+                            { doubleValue = "3.14pi" },
+                            { doubleValue = " 2.5 " }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+
+  auto res = RunLogsTable(script);
+  ASSERT_TRUE(res.success);
+  ASSERT_EQ(res.emitted_count, 1);
+
+  lua_getglobal(L_, "emitted");
+  lua_rawgeti(L_, -1, 1);
+  lua_getfield(L_, -1, "log");
+  lua_getfield(L_, -1, "LogAttributes");
+  ASSERT_TRUE(lua_istable(L_, -1));
+  int attrs_idx = lua_gettop(L_);
+
+  lua_getfield(L_, attrs_idx, "a");
+  EXPECT_EQ(lua_tointeger(L_, -1), 0);
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, attrs_idx, "b");
+  EXPECT_EQ(lua_tointeger(L_, -1), 7);
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, attrs_idx, "c");
+  EXPECT_EQ(lua_tointeger(L_, -1), 0);
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, attrs_idx, "d");
+  EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 0.0);
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, attrs_idx, "e");
+  EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 2.5);
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, attrs_idx, "arr");
+  EXPECT_STREQ(lua_tostring(L_, -1), "[0,7,0,0,2.5]");
+  lua_pop(L_, 1);
+
+  lua_pop(L_, 4);  // pop LogAttributes, log, emitted[1], emitted
+}
+
+TEST_F(TableModeTest, SeverityEnumStringWithEmbeddedNulIsNotMatched) {
+  const char* script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  severityNumber = "SEVERITY_NUMBER_INFO\0x"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+
+  auto res = RunLogsTable(script);
+  ASSERT_TRUE(res.success);
+  ASSERT_EQ(res.emitted_count, 1);
+
+  lua_getglobal(L_, "emitted");
+  lua_rawgeti(L_, -1, 1);
+  lua_getfield(L_, -1, "log");
+  lua_getfield(L_, -1, "SeverityNumber");
+  EXPECT_EQ(lua_tointeger(L_, -1), 0);
+  lua_pop(L_, 4);
 }
 
 }  // namespace

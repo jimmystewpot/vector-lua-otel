@@ -1,8 +1,9 @@
 #include "vector_otel/core/table_reader.hpp"
 
 #include <array>
-#include <cstdlib>
-#include <cstring>
+#include <charconv>
+#include <cmath>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -11,6 +12,103 @@
 #include "vector_otel/core/timestamp.hpp"
 
 namespace vector_otel::core {
+
+namespace {
+
+bool PrepareNumericStringView(lua_State* L, int idx, std::string_view& out) {
+  if (lua_type(L, idx) != LUA_TSTRING) {
+    return false;
+  }
+  size_t len = 0;
+  const char* s = lua_tolstring(L, idx, &len);
+  if (s == nullptr) {
+    return false;
+  }
+  std::string_view sv(s, len);
+  while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' ||
+                         sv.front() == '\r' || sv.front() == '\n')) {
+    sv.remove_prefix(1);
+  }
+  while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' ||
+                         sv.back() == '\r' || sv.back() == '\n')) {
+    sv.remove_suffix(1);
+  }
+  if (!sv.empty() && sv.front() == '+') {
+    sv.remove_prefix(1);
+    if (!sv.empty() && sv.front() == '-') {
+      return false;
+    }
+  }
+  if (sv.empty()) {
+    return false;
+  }
+  out = sv;
+  return true;
+}
+
+bool LuaFloatToInt64(double d, int64_t& out) {
+  if (std::isfinite(d) && d >= -9223372036854775808.0 &&
+      d < 9223372036854775808.0) {
+    out = static_cast<int64_t>(d);
+    return true;
+  }
+  return false;
+}
+
+bool LuaFloatToUint64(double d, uint64_t& out) {
+  if (std::isfinite(d) && d >= 0.0 && d < 18446744073709551616.0) {
+    out = static_cast<uint64_t>(d);
+    return true;
+  }
+  return false;
+}
+
+bool ParseLuaStringInt64(lua_State* L, int idx, int64_t& out) {
+  std::string_view sv;
+  if (!PrepareNumericStringView(L, idx, sv)) {
+    return false;
+  }
+  int64_t val = 0;
+  const char* end = sv.data() + sv.size();
+  auto [ptr, ec] = std::from_chars(sv.data(), end, val);
+  if (ec == std::errc() && ptr == end) {
+    out = val;
+    return true;
+  }
+  return false;
+}
+
+bool ParseLuaStringUint64(lua_State* L, int idx, uint64_t& out) {
+  std::string_view sv;
+  if (!PrepareNumericStringView(L, idx, sv)) {
+    return false;
+  }
+  uint64_t val = 0;
+  const char* end = sv.data() + sv.size();
+  auto [ptr, ec] = std::from_chars(sv.data(), end, val);
+  if (ec == std::errc() && ptr == end) {
+    out = val;
+    return true;
+  }
+  return false;
+}
+
+bool ParseLuaStringDouble(lua_State* L, int idx, double& out) {
+  std::string_view sv;
+  if (!PrepareNumericStringView(L, idx, sv)) {
+    return false;
+  }
+  double val = 0.0;
+  const char* end = sv.data() + sv.size();
+  auto [ptr, ec] = std::from_chars(sv.data(), end, val);
+  if (ec == std::errc() && ptr == end && std::isfinite(val)) {
+    out = val;
+    return true;
+  }
+  return false;
+}
+
+}  // namespace
 
 bool GetTableField(lua_State* L, int table_idx, const char* name1,
                    const char* name2) {
@@ -67,23 +165,18 @@ int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1,
                        const char* name2, int64_t default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
+    int64_t v = default_val;
     if (t == LUA_TNUMBER) {
       if (lua_isinteger(L, -1)) {
-        int64_t v = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        return v;
+        v = lua_tointeger(L, -1);
+      } else {
+        LuaFloatToInt64(lua_tonumber(L, -1), v);
       }
-      int64_t v = static_cast<int64_t>(lua_tonumber(L, -1));
-      lua_pop(L, 1);
-      return v;
     } else if (t == LUA_TSTRING) {
-      const char* s = lua_tostring(L, -1);
-      char* end = nullptr;
-      int64_t v = std::strtoll(s, &end, 10);
-      lua_pop(L, 1);
-      return v;
+      ParseLuaStringInt64(L, -1, v);
     }
     lua_pop(L, 1);
+    return v;
   }
   return default_val;
 }
@@ -92,23 +185,21 @@ uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1,
                          const char* name2, uint64_t default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
+    uint64_t v = default_val;
     if (t == LUA_TNUMBER) {
       if (lua_isinteger(L, -1)) {
-        uint64_t v = static_cast<uint64_t>(lua_tointeger(L, -1));
-        lua_pop(L, 1);
-        return v;
+        lua_Integer iv = lua_tointeger(L, -1);
+        if (iv >= 0) {
+          v = static_cast<uint64_t>(iv);
+        }
+      } else {
+        LuaFloatToUint64(lua_tonumber(L, -1), v);
       }
-      uint64_t v = static_cast<uint64_t>(lua_tonumber(L, -1));
-      lua_pop(L, 1);
-      return v;
     } else if (t == LUA_TSTRING) {
-      const char* s = lua_tostring(L, -1);
-      char* end = nullptr;
-      uint64_t v = std::strtoull(s, &end, 10);
-      lua_pop(L, 1);
-      return v;
+      ParseLuaStringUint64(L, -1, v);
     }
     lua_pop(L, 1);
+    return v;
   }
   return default_val;
 }
@@ -117,18 +208,17 @@ double ReadTableDouble(lua_State* L, int table_idx, const char* name1,
                        const char* name2, double default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
     int t = lua_type(L, -1);
+    double v = default_val;
     if (t == LUA_TNUMBER) {
-      double v = lua_tonumber(L, -1);
-      lua_pop(L, 1);
-      return v;
+      double d = lua_tonumber(L, -1);
+      if (std::isfinite(d)) {
+        v = d;
+      }
     } else if (t == LUA_TSTRING) {
-      const char* s = lua_tostring(L, -1);
-      char* end = nullptr;
-      double v = std::strtod(s, &end);
-      lua_pop(L, 1);
-      return v;
+      ParseLuaStringDouble(L, -1, v);
     }
     lua_pop(L, 1);
+    return v;
   }
   return default_val;
 }
@@ -140,37 +230,40 @@ int64_t ParseTableSeverityNumber(lua_State* L, int val_idx) {
     if (lua_isinteger(L, abs_idx)) {
       return lua_tointeger(L, abs_idx);
     }
-    return static_cast<int64_t>(lua_tonumber(L, abs_idx));
+    int64_t v = 0;
+    LuaFloatToInt64(lua_tonumber(L, abs_idx), v);
+    return v;
   }
   if (t == LUA_TSTRING) {
-    const char* s = lua_tostring(L, abs_idx);
-    if (std::strcmp(s, "SEVERITY_NUMBER_TRACE") == 0) return 1;
-    if (std::strcmp(s, "SEVERITY_NUMBER_TRACE2") == 0) return 2;
-    if (std::strcmp(s, "SEVERITY_NUMBER_TRACE3") == 0) return 3;
-    if (std::strcmp(s, "SEVERITY_NUMBER_TRACE4") == 0) return 4;
-    if (std::strcmp(s, "SEVERITY_NUMBER_DEBUG") == 0) return 5;
-    if (std::strcmp(s, "SEVERITY_NUMBER_DEBUG2") == 0) return 6;
-    if (std::strcmp(s, "SEVERITY_NUMBER_DEBUG3") == 0) return 7;
-    if (std::strcmp(s, "SEVERITY_NUMBER_DEBUG4") == 0) return 8;
-    if (std::strcmp(s, "SEVERITY_NUMBER_INFO") == 0) return 9;
-    if (std::strcmp(s, "SEVERITY_NUMBER_INFO2") == 0) return 10;
-    if (std::strcmp(s, "SEVERITY_NUMBER_INFO3") == 0) return 11;
-    if (std::strcmp(s, "SEVERITY_NUMBER_INFO4") == 0) return 12;
-    if (std::strcmp(s, "SEVERITY_NUMBER_WARN") == 0) return 13;
-    if (std::strcmp(s, "SEVERITY_NUMBER_WARN2") == 0) return 14;
-    if (std::strcmp(s, "SEVERITY_NUMBER_WARN3") == 0) return 15;
-    if (std::strcmp(s, "SEVERITY_NUMBER_WARN4") == 0) return 16;
-    if (std::strcmp(s, "SEVERITY_NUMBER_ERROR") == 0) return 17;
-    if (std::strcmp(s, "SEVERITY_NUMBER_ERROR2") == 0) return 18;
-    if (std::strcmp(s, "SEVERITY_NUMBER_ERROR3") == 0) return 19;
-    if (std::strcmp(s, "SEVERITY_NUMBER_ERROR4") == 0) return 20;
-    if (std::strcmp(s, "SEVERITY_NUMBER_FATAL") == 0) return 21;
-    if (std::strcmp(s, "SEVERITY_NUMBER_FATAL2") == 0) return 22;
-    if (std::strcmp(s, "SEVERITY_NUMBER_FATAL3") == 0) return 23;
-    if (std::strcmp(s, "SEVERITY_NUMBER_FATAL4") == 0) return 24;
-    char* end = nullptr;
-    int64_t v = std::strtoll(s, &end, 10);
-    if (end != s) return v;
+    size_t len = 0;
+    const char* s = lua_tolstring(L, abs_idx, &len);
+    std::string_view sv(s, len);
+    if (sv == "SEVERITY_NUMBER_TRACE") return 1;
+    if (sv == "SEVERITY_NUMBER_TRACE2") return 2;
+    if (sv == "SEVERITY_NUMBER_TRACE3") return 3;
+    if (sv == "SEVERITY_NUMBER_TRACE4") return 4;
+    if (sv == "SEVERITY_NUMBER_DEBUG") return 5;
+    if (sv == "SEVERITY_NUMBER_DEBUG2") return 6;
+    if (sv == "SEVERITY_NUMBER_DEBUG3") return 7;
+    if (sv == "SEVERITY_NUMBER_DEBUG4") return 8;
+    if (sv == "SEVERITY_NUMBER_INFO") return 9;
+    if (sv == "SEVERITY_NUMBER_INFO2") return 10;
+    if (sv == "SEVERITY_NUMBER_INFO3") return 11;
+    if (sv == "SEVERITY_NUMBER_INFO4") return 12;
+    if (sv == "SEVERITY_NUMBER_WARN") return 13;
+    if (sv == "SEVERITY_NUMBER_WARN2") return 14;
+    if (sv == "SEVERITY_NUMBER_WARN3") return 15;
+    if (sv == "SEVERITY_NUMBER_WARN4") return 16;
+    if (sv == "SEVERITY_NUMBER_ERROR") return 17;
+    if (sv == "SEVERITY_NUMBER_ERROR2") return 18;
+    if (sv == "SEVERITY_NUMBER_ERROR3") return 19;
+    if (sv == "SEVERITY_NUMBER_ERROR4") return 20;
+    if (sv == "SEVERITY_NUMBER_FATAL") return 21;
+    if (sv == "SEVERITY_NUMBER_FATAL2") return 22;
+    if (sv == "SEVERITY_NUMBER_FATAL3") return 23;
+    if (sv == "SEVERITY_NUMBER_FATAL4") return 24;
+    int64_t v = 0;
+    if (ParseLuaStringInt64(L, abs_idx, v)) return v;
   }
   return 0;
 }
@@ -232,9 +325,9 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer,
       if (lua_isinteger(L, -1)) {
         v = lua_tointeger(L, -1);
       } else if (lua_type(L, -1) == LUA_TNUMBER) {
-        v = static_cast<int64_t>(lua_tonumber(L, -1));
+        LuaFloatToInt64(lua_tonumber(L, -1), v);
       } else if (lua_type(L, -1) == LUA_TSTRING) {
-        v = std::strtoll(lua_tostring(L, -1), nullptr, 10);
+        ParseLuaStringInt64(L, -1, v);
       }
       writer.Int64(v);
       lua_pop(L, 1);
@@ -248,9 +341,12 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer,
     if (GetTableField(L, abs_idx, "doubleValue", "double_value")) {
       double v = 0.0;
       if (lua_type(L, -1) == LUA_TNUMBER) {
-        v = lua_tonumber(L, -1);
+        double d = lua_tonumber(L, -1);
+        if (std::isfinite(d)) {
+          v = d;
+        }
       } else if (lua_type(L, -1) == LUA_TSTRING) {
-        v = std::strtod(lua_tostring(L, -1), nullptr);
+        ParseLuaStringDouble(L, -1, v);
       }
       writer.Double(v);
       lua_pop(L, 1);
@@ -549,19 +645,15 @@ static void PushSingleAttributeValue(lua_State* L, int val_idx,
     if (GetTableField(L, abs_idx, "intValue", "int_value")) {
       if (lua_isinteger(L, -1)) {
         return;
-      } else if (lua_type(L, -1) == LUA_TNUMBER) {
-        int64_t v = static_cast<int64_t>(lua_tonumber(L, -1));
-        lua_pop(L, 1);
-        lua_pushinteger(L, v);
-        return;
+      }
+      int64_t v = 0;
+      if (lua_type(L, -1) == LUA_TNUMBER) {
+        LuaFloatToInt64(lua_tonumber(L, -1), v);
       } else if (lua_type(L, -1) == LUA_TSTRING) {
-        int64_t v = std::strtoll(lua_tostring(L, -1), nullptr, 10);
-        lua_pop(L, 1);
-        lua_pushinteger(L, v);
-        return;
+        ParseLuaStringInt64(L, -1, v);
       }
       lua_pop(L, 1);
-      lua_pushinteger(L, 0);
+      lua_pushinteger(L, v);
       return;
     }
     if (GetTableField(L, abs_idx, "boolValue", "bool_value")) {
@@ -574,16 +666,17 @@ static void PushSingleAttributeValue(lua_State* L, int val_idx,
       return;
     }
     if (GetTableField(L, abs_idx, "doubleValue", "double_value")) {
+      double d = 0.0;
       if (lua_type(L, -1) == LUA_TNUMBER) {
-        return;
+        double num = lua_tonumber(L, -1);
+        if (std::isfinite(num)) {
+          d = num;
+        }
       } else if (lua_type(L, -1) == LUA_TSTRING) {
-        double d = std::strtod(lua_tostring(L, -1), nullptr);
-        lua_pop(L, 1);
-        lua_pushnumber(L, d);
-        return;
+        ParseLuaStringDouble(L, -1, d);
       }
       lua_pop(L, 1);
-      lua_pushnumber(L, 0.0);
+      lua_pushnumber(L, d);
       return;
     }
     // Complex value -> serialise to JSON string
