@@ -4,6 +4,7 @@
 [![Standard: C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![Lua: 5.4](https://img.shields.io/badge/Lua-5.4-blue.svg)](https://www.lua.org/)
 [![simdjson: 5.0.5](https://img.shields.io/badge/simdjson-5.0.5-brightgreen.svg)](https://simdjson.org/)
+[![codecov](https://codecov.io/gh/jimmystewpot/vector-lua-otel/graph/badge.svg)](https://codecov.io/gh/jimmystewpot/vector-lua-otel)
 
 **vector-lua-otel** is an ultra-high-performance C++20 dynamic module (`vector_otel.so`) for [DataDog Vector](https://vector.dev/)'s Lua 5.4 transforms (`type = "lua"`, `version = "2"`). It ingests raw OpenTelemetry (OTLP) JSON batch payloads (`ExportLogsServiceRequest`, `ExportTraceServiceRequest`, `ExportMetricsServiceRequest`), parses them using [`simdjson`](https://simdjson.org/) 5.0.5 on-demand SIMD parsing, flattens hierarchical records into ClickHouse-aligned table columns, and streams extracted events directly into Vector's pipeline via the `emit` callback with $O(1)$ streaming memory.
 
