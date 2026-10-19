@@ -875,15 +875,17 @@ TEST_F(OtlpCommonTest, TryParseDoubleWhitespaceScientificAndMalformed) {
   }
 
   // Malformed and invalid strings
-  const char* bad_keys[] = {"bad_alpha",    "bad_trail", "bad_ws_only",    "bad_empty",
-                            "bad_dot_only", "bad_signs", "bad_multi_dots", "val_bool",
-                            "val_null",     "val_obj",   "val_arr"};
+  const char* bad_keys[] = {"bad_alpha",      "bad_trail",    "bad_ws_only",
+                            "bad_empty",      "bad_dot_only", "bad_signs",
+                            "bad_multi_dots", "val_bool",     "val_null",
+                            "val_obj",        "val_arr"};
   for (const char* k : bad_keys) {
     double out = -999.0;
     auto v = obj[k].value();
     EXPECT_FALSE(TryParseDouble(v, out)) << "Expected false for key: " << k;
     EXPECT_DOUBLE_EQ(out, -999.0) << "Output modified for key: " << k;
-    EXPECT_DOUBLE_EQ(ParseDouble(v), 0.0) << "ParseDouble not zero for key: " << k;
+    EXPECT_DOUBLE_EQ(ParseDouble(v), 0.0)
+        << "ParseDouble not zero for key: " << k;
   }
 }
 
@@ -1231,8 +1233,9 @@ TEST_F(OtlpCommonTest, ExtractServiceNameEdgeCases) {
 
 TEST_F(OtlpCommonTest, PushAttributesTableDuplicateServiceNameLongThenInt) {
   std::string long_svc(80, 'S');
-  std::string raw = R"({"attributes":[{"key":"service.name","value":{"stringValue":")" + long_svc +
-                    R"("}},{"key":"service.name","value":{"intValue":"42"}}]})";
+  std::string raw =
+      R"({"attributes":[{"key":"service.name","value":{"stringValue":")" +
+      long_svc + R"("}},{"key":"service.name","value":{"intValue":"42"}}]})";
   simdjson::padded_string json(raw);
   auto doc = parser_.iterate(json);
   auto obj = doc.get_object().value();
@@ -1249,10 +1252,12 @@ TEST_F(OtlpCommonTest, PushAttributesTableDuplicateServiceNameLongThenInt) {
   lua_pop(L_, 2);
 }
 
-TEST_F(OtlpCommonTest, PushAttributesTableDuplicateServiceNameLongThenEmptyString) {
+TEST_F(OtlpCommonTest,
+       PushAttributesTableDuplicateServiceNameLongThenEmptyString) {
   std::string long_svc(80, 'S');
-  std::string raw = R"({"attributes":[{"key":"service.name","value":{"stringValue":")" + long_svc +
-                    R"("}},{"key":"service.name","value":{"stringValue":""}}]})";
+  std::string raw =
+      R"({"attributes":[{"key":"service.name","value":{"stringValue":")" +
+      long_svc + R"("}},{"key":"service.name","value":{"stringValue":""}}]})";
   simdjson::padded_string json(raw);
   auto doc = parser_.iterate(json);
   auto obj = doc.get_object().value();
@@ -1267,8 +1272,8 @@ TEST_F(OtlpCommonTest, PushAttributesTableDuplicateServiceNameLongThenEmptyStrin
 
 TEST_F(OtlpCommonTest, PushAttributesTableObjectFormDuplicateResets) {
   std::string long_svc(80, 'B');
-  std::string raw = R"({"attributes":{"service.name":{"stringValue":")" + long_svc +
-                    R"("},"service_name":{"boolValue":true}}})";
+  std::string raw = R"({"attributes":{"service.name":{"stringValue":")" +
+                    long_svc + R"("},"service_name":{"boolValue":true}}})";
   simdjson::padded_string json(raw);
   auto doc = parser_.iterate(json);
   auto obj = doc.get_object().value();
@@ -1305,7 +1310,8 @@ TEST_F(OtlpCommonTest, PushAttributesTableRejectsArrayValueServiceName) {
 TEST_F(OtlpCommonTest, PushAttributesTableLongServiceNameSurvivesGc) {
   std::string long_svc(80, 'S');
   std::string raw =
-      R"({"attributes":[{"key":"service.name","value":{"stringValue":")" + long_svc + R"("}}]})";
+      R"({"attributes":[{"key":"service.name","value":{"stringValue":")" +
+      long_svc + R"("}}]})";
   simdjson::padded_string json(raw);
   auto doc = parser_.iterate(json);
   auto obj = doc.get_object().value();
