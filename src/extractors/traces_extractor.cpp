@@ -730,6 +730,13 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json,
 ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   const int entry_top = lua_gettop(L);
   static thread_local core::FastJsonWriter writer;
+  static thread_local std::string tls_service_scratch;
+  static thread_local std::string tls_scope_name_scratch;
+  static thread_local std::string tls_scope_ver_scratch;
+  static thread_local std::string tls_field_scratch;
+  static thread_local std::string tls_status_msg_scratch;
+  static thread_local std::string span_kind_buf;
+  static thread_local std::string status_code_buf;
   struct TableScopeGuard {
     TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w)
         : L(l), top(t), writer(w) {}
@@ -740,6 +747,18 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
         lua_settop(L, top);
       }
       writer.Trim();
+      auto trim_scratch = [](std::string& s) noexcept {
+        if (s.capacity() > 4096) {
+          std::string().swap(s);
+        }
+      };
+      trim_scratch(tls_service_scratch);
+      trim_scratch(tls_scope_name_scratch);
+      trim_scratch(tls_scope_ver_scratch);
+      trim_scratch(tls_field_scratch);
+      trim_scratch(tls_status_msg_scratch);
+      trim_scratch(span_kind_buf);
+      trim_scratch(status_code_buf);
     }
     lua_State* L;
     int top;
@@ -789,12 +808,13 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
     }
     int rs_obj_idx = lua_absindex(L, -1);
 
-    std::string service_name = "unknown_service";
+    std::string_view service_name = "unknown_service";
     core::ScopedLuaRef res_attr_ref(L, LUA_NOREF);
 
     if (core::GetTableField(L, rs_obj_idx, "resource")) {
       int res_idx = lua_absindex(L, -1);
-      service_name = core::ExtractTableServiceName(L, res_idx);
+      service_name =
+          core::ExtractTableServiceNameView(L, res_idx, tls_service_scratch);
       if (core::GetTableField(L, res_idx, "attributes")) {
         core::PushTableAttributes(L, -1, writer);
         res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
@@ -826,12 +846,14 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
       }
       int ss_obj_idx = lua_absindex(L, -1);
 
-      std::string scope_name;
-      std::string scope_version;
+      std::string_view scope_name;
+      std::string_view scope_version;
       if (core::GetTableField(L, ss_obj_idx, "scope")) {
         int s_idx = lua_absindex(L, -1);
-        scope_name = core::ReadTableString(L, s_idx, "name");
-        scope_version = core::ReadTableString(L, s_idx, "version");
+        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr,
+                                               tls_scope_name_scratch);
+        scope_version = core::ReadTableStringView(L, s_idx, "version", nullptr,
+                                                  tls_scope_ver_scratch);
         lua_pop(L, 1);
       }
 
@@ -848,7 +870,6 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
             int span_obj_idx = lua_absindex(L, -1);
 
             std::string_view span_kind = "SPAN_KIND_UNSPECIFIED";
-            static thread_local std::string span_kind_buf;
             if (core::GetTableField(L, span_obj_idx, "kind")) {
               if (lua_isinteger(L, -1)) {
                 int64_t ki = lua_tointeger(L, -1);
@@ -903,8 +924,6 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
             core::FormatIso8601Nano(start_time, ts_buf.data());
 
             std::string_view status_code = "STATUS_CODE_UNSET";
-            static thread_local std::string status_code_buf;
-            static thread_local std::string status_msg_buf;
             std::string_view status_msg;
             if (core::GetTableField(L, span_obj_idx, "status")) {
               int st_idx = lua_absindex(L, -1);
@@ -931,15 +950,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
                 }
                 lua_pop(L, 1);
               }
-              if (core::GetTableField(L, st_idx, "message")) {
-                if (lua_isstring(L, -1)) {
-                  size_t mlen = 0;
-                  const char* ms = lua_tolstring(L, -1, &mlen);
-                  status_msg_buf.assign(ms, mlen);
-                  status_msg = status_msg_buf;
-                }
-                lua_pop(L, 1);
-              }
+              status_msg = core::ReadTableStringView(
+                  L, st_idx, "message", nullptr, tls_status_msg_scratch);
               lua_pop(L, 1);  // pop status table BEFORE StartRecord
             }
 

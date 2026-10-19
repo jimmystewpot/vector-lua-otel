@@ -1418,6 +1418,178 @@ TEST_F(TracesExtractorTest, EventsAndLinksMissingFieldsUseDefaults) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(TracesExtractorTest, TableModeNumericScopeMetadataStillCoerced) {
+  const char* table_script = R"(
+    return {
+      resourceSpans = {
+        {
+          scopeSpans = {
+            {
+              scope = { name = 999, version = 888 },
+              spans = {
+                {
+                  traceId = "0123456789abcdef0123456789abcdef",
+                  spanId = "0123456789abcdef",
+                  name = "numeric-scope-span"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 span")
+    local r = emitted[1].log
+    assert(r.ScopeName == "999", "Expected ScopeName '999', got: " .. tostring(r.ScopeName))
+    assert(r.ScopeVersion == "888", "Expected ScopeVersion '888', got: " .. tostring(r.ScopeVersion))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, TableModeLongMetadataPreserved) {
+  const char* table_script = R"(
+    local long_service = string.rep("s", 80)
+    local long_scope_name = string.rep("n", 80)
+    local long_scope_ver = string.rep("v", 80)
+    local long_status_msg = string.rep("m", 80)
+    return {
+      resourceSpans = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = long_service } }
+            }
+          },
+          scopeSpans = {
+            {
+              scope = { name = long_scope_name, version = long_scope_ver },
+              spans = {
+                {
+                  traceId = "0123456789abcdef0123456789abcdef",
+                  spanId = "0123456789abcdef",
+                  name = "long-meta-span",
+                  status = { code = "ERROR", message = long_status_msg }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 span")
+    local r = emitted[1].log
+    assert(r.ServiceName == string.rep("s", 80), "ServiceName mismatch: " .. tostring(r.ServiceName))
+    assert(r.ScopeName == string.rep("n", 80), "ScopeName mismatch: " .. tostring(r.ScopeName))
+    assert(r.ScopeVersion == string.rep("v", 80), "ScopeVersion mismatch: " .. tostring(r.ScopeVersion))
+    assert(r.StatusMessage == string.rep("m", 80), "StatusMessage mismatch: " .. tostring(r.StatusMessage))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
+  const char* gc_emit_script = R"(
+    gc_emitted = {}
+    function gc_emit(event)
+      table.insert(gc_emitted, event)
+      collectgarbage("collect")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, gc_emit_script), LUA_OK);
+  lua_getglobal(L_, "gc_emit");
+  int gc_emit_idx = lua_gettop(L_);
+
+  const std::string long_service(80, 'a');
+  const std::string json =
+      R"({"resourceSpans":[{"resource":{"attributes":[)"
+      R"({"key":"service.name","value":{"stringValue":")" +
+      long_service +
+      R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+      R"(]},"scopeSpans":[{"spans":[)"
+      R"({"traceId":"11112222333344445555666677778888","spanId":"1111222233334444","name":"s1"},)"
+      R"({"traceId":"11112222333344445555666677778888","spanId":"2222333344445555","name":"s2"})"
+      R"(]}]}]})";
+
+  auto res = ProcessTraces(L_, json, gc_emit_idx);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 2);
+  lua_pop(L_, 1);  // pop gc_emit
+
+  const char* verify_script = R"(
+    assert(#gc_emitted == 2, "Expected 2 spans")
+    for i = 1, 2 do
+      local r = gc_emitted[i].log
+      assert(r.ServiceName == "unknown_service",
+             "Expected unknown_service on span " .. i .. ", got: " .. tostring(r.ServiceName))
+      assert(r.ResourceAttributes["service.name"] == 42,
+             "Expected ResourceAttributes['service.name'] == 42 on span " .. i)
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest,
+       DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderGc) {
+  const char* gc_emit_script = R"(
+    uaf_emitted = {}
+    function uaf_gc_emit(event)
+      table.insert(uaf_emitted, event)
+      collectgarbage("collect")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, gc_emit_script), LUA_OK);
+  lua_getglobal(L_, "uaf_gc_emit");
+  int gc_emit_idx = lua_gettop(L_);
+
+  const std::string long_service(64, 'z');
+  const std::string json =
+      R"({"resourceSpans":[{"resource":{"attributes":[)"
+      R"({"key":"service.name","value":{"stringValue":")" +
+      long_service +
+      R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+      R"(]},"scopeSpans":[{"spans":[)"
+      R"({"traceId":"aaaa1111222233334444555566667777","spanId":"1111222233334444","name":"span1"},)"
+      R"({"traceId":"aaaa1111222233334444555566667777","spanId":"2222333344445555","name":"span2"},)"
+      R"({"traceId":"aaaa1111222233334444555566667777","spanId":"3333444455556666","name":"span3"})"
+      R"(]}]}]})";
+
+  auto res = ProcessTraces(L_, json, gc_emit_idx);
+  EXPECT_TRUE(res.success);
+  EXPECT_EQ(res.emitted_count, 3);
+  lua_pop(L_, 1);  // pop uaf_gc_emit
+
+  const char* verify_script = R"(
+    assert(#uaf_emitted == 3, "Expected 3 spans")
+    for i = 1, 3 do
+      local r = uaf_emitted[i].log
+      assert(r.ServiceName == "unknown_service",
+             "Expected unknown_service on span " .. i .. ", got: " .. tostring(r.ServiceName))
+      assert(r.ResourceAttributes["service.name"] == 42,
+             "Expected ResourceAttributes['service.name'] == 42 on span " .. i)
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel
