@@ -101,3 +101,53 @@ jobs:
 
       - name: Run C++ test suite under ASAN/UBSAN
         run: UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir build-asan --output-on-failure
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            liblua5.4-dev \
+            lua5.4 \
+            cmake \
+            ninja-build \
+            gcc \
+            g++ \
+            gcovr
+
+      - name: Configure and build with CMake (Coverage)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON -GNinja
+          cmake --build build
+
+      - name: Run C++ test suite
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run Lua integration test suite
+        run: bash tests/lua/run_tests.sh
+
+      - name: Generate Cobertura coverage report
+        run: |
+          gcovr --xml-pretty -o build/cobertura.xml -r . \
+            --exclude "tests/.*" \
+            --exclude "build/.*" \
+            --exclude "cmake/.*"
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: jimmystewpot/vector-lua-otel
+          files: build/cobertura.xml
