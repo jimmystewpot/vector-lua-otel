@@ -577,6 +577,12 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
   }
 
   static thread_local core::FastJsonWriter json_writer;
+  static thread_local std::string tls_service_scratch;
+  static thread_local std::string tls_scope_name_scratch;
+  static thread_local std::string tls_scope_ver_scratch;
+  static thread_local std::string tls_metric_name_scratch;
+  static thread_local std::string tls_metric_desc_scratch;
+  static thread_local std::string tls_metric_unit_scratch;
   json_writer.Reset();
   struct TableExitGuard {
     TableExitGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
@@ -587,6 +593,17 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
         lua_settop(L, top);
       }
       writer.Trim();
+      auto trim_scratch = [](std::string& s) noexcept {
+        if (s.capacity() > 4096) {
+          std::string().swap(s);
+        }
+      };
+      trim_scratch(tls_service_scratch);
+      trim_scratch(tls_scope_name_scratch);
+      trim_scratch(tls_scope_ver_scratch);
+      trim_scratch(tls_metric_name_scratch);
+      trim_scratch(tls_metric_desc_scratch);
+      trim_scratch(tls_metric_unit_scratch);
     }
     lua_State* L;
     int top;
@@ -632,12 +649,12 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
     }
     int rm_obj_idx = lua_absindex(L, -1);
 
-    std::string service_name = "unknown_service";
+    std::string_view service_name = "unknown_service";
     core::ScopedLuaRef res_attrs_ref(L, LUA_NOREF);
 
     if (core::GetTableField(L, rm_obj_idx, "resource")) {
       int res_idx = lua_absindex(L, -1);
-      service_name = core::ExtractTableServiceName(L, res_idx);
+      service_name = core::ExtractTableServiceNameView(L, res_idx, tls_service_scratch);
       if (core::GetTableField(L, res_idx, "attributes")) {
         core::PushTableAttributes(L, -1, json_writer);
         res_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
@@ -669,14 +686,15 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
       }
       int sm_obj_idx = lua_absindex(L, -1);
 
-      std::string scope_name;
-      std::string scope_version;
+      std::string_view scope_name;
+      std::string_view scope_version;
       core::ScopedLuaRef scope_attrs_ref(L, LUA_NOREF);
 
       if (core::GetTableField(L, sm_obj_idx, "scope")) {
         int s_idx = lua_absindex(L, -1);
-        scope_name = core::ReadTableString(L, s_idx, "name");
-        scope_version = core::ReadTableString(L, s_idx, "version");
+        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
+        scope_version =
+            core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
         if (core::GetTableField(L, s_idx, "attributes")) {
           core::PushTableAttributes(L, -1, json_writer);
           scope_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
@@ -736,6 +754,13 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
           continue;
         }
 
+        std::string_view metric_name =
+            core::ReadTableStringView(L, metric_obj_idx, "name", nullptr, tls_metric_name_scratch);
+        std::string_view metric_desc = core::ReadTableStringView(L, metric_obj_idx, "description",
+                                                                 nullptr, tls_metric_desc_scratch);
+        std::string_view metric_unit =
+            core::ReadTableStringView(L, metric_obj_idx, "unit", nullptr, tls_metric_unit_scratch);
+
         if (core::GetTableField(L, type_obj_idx, "dataPoints", "data_points")) {
           int dps_arr_idx = lua_absindex(L, -1);
           if (lua_istable(L, dps_arr_idx)) {
@@ -770,10 +795,9 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
               }
 
               emitter.StartRecord();
-              core::CopyStringField(L, metric_obj_idx, "name", nullptr, emitter, "MetricName");
-              core::CopyStringField(L, metric_obj_idx, "description", nullptr, emitter,
-                                    "MetricDescription");
-              core::CopyStringField(L, metric_obj_idx, "unit", nullptr, emitter, "MetricUnit");
+              emitter.SetString("MetricName", metric_name);
+              emitter.SetString("MetricDescription", metric_desc);
+              emitter.SetString("MetricUnit", metric_unit);
               emitter.SetString("MetricType", metric_type);
               emitter.SetString("ServiceName", service_name);
 
