@@ -65,8 +65,7 @@ class MetricsExtractorTest : public ::testing::Test {
 
 TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
   std::string json_data = ReadFixture("tests/fixtures/metrics_sample.json");
-  ASSERT_FALSE(json_data.empty())
-      << "Failed to read tests/fixtures/metrics_sample.json";
+  ASSERT_FALSE(json_data.empty()) << "Failed to read tests/fixtures/metrics_sample.json";
 
   int initial_top = lua_gettop(L_);
   auto result = ProcessMetrics(L_, json_data, 1);
@@ -187,15 +186,13 @@ TEST_F(MetricsExtractorTest, EmptyAndSparsePayloads) {
   EXPECT_EQ(res4.emitted_count, 0);
 
   // resourceMetrics with empty scopeMetrics
-  auto res5 =
-      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
+  auto res5 = ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": []}]}", 1);
   EXPECT_TRUE(res5.success);
   EXPECT_EQ(res5.emitted_count, 0);
 
   // scopeMetrics with empty metrics
-  auto res6 = ProcessMetrics(
-      L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}",
-      1);
+  auto res6 =
+      ProcessMetrics(L_, "{\"resourceMetrics\": [{\"scopeMetrics\": [{\"metrics\": []}]}]}", 1);
   EXPECT_TRUE(res6.success);
   EXPECT_EQ(res6.emitted_count, 0);
 }
@@ -475,8 +472,7 @@ TEST_F(MetricsExtractorTest, InvalidDoubleStringDoesNotSetMetricValueKind) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
-TEST_F(MetricsExtractorTest,
-       ProcessMetricsTablePreservesLuaStackDepthAndClampsHistogramCount) {
+TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsHistogramCount) {
   // 1. Test histogram count clamping in ProcessMetrics (JSON path)
   const std::string json_payload = R"({
     "resourceMetrics": [{
@@ -535,8 +531,7 @@ TEST_F(MetricsExtractorTest,
       }
     }
   )";
-  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK)
-      << lua_tostring(L_, -1);
+  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK) << lua_tostring(L_, -1);
   int table_top = lua_gettop(L_);
   auto tbl_res1 = ProcessMetricsTable(L_, -1, 1);
   EXPECT_TRUE(tbl_res1.success) << tbl_res1.error;
@@ -606,8 +601,7 @@ TEST_F(MetricsExtractorTest,
   lua_getglobal(L_, "mock_emit");
   lua_replace(L_, 1);
 
-  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK)
-      << lua_tostring(L_, -1);
+  ASSERT_EQ(luaL_dostring(L_, push_nested_metric), LUA_OK) << lua_tostring(L_, -1);
   table_top = lua_gettop(L_);
   auto tbl_res3 = ProcessMetricsTable(L_, -1, 1);
   EXPECT_FALSE(tbl_res3.success);
@@ -786,8 +780,7 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
       }
     }
   )";
-  ASSERT_EQ(luaL_dostring(L_, push_table_summary), LUA_OK)
-      << lua_tostring(L_, -1);
+  ASSERT_EQ(luaL_dostring(L_, push_table_summary), LUA_OK) << lua_tostring(L_, -1);
   auto tbl_res = ProcessMetricsTable(L_, -1, 1);
   EXPECT_TRUE(tbl_res.success) << tbl_res.error;
   EXPECT_EQ(tbl_res.emitted_count, 1);
@@ -1165,6 +1158,220 @@ TEST_F(MetricsExtractorTest, GaugesAndSumsIntegerVsDoubleValues) {
     local s_dbl = emitted[4].log
     assert(math.abs(s_dbl.Value - (-200.75)) < 0.001)
     assert(math.type(s_dbl.Value) == "float")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, TableModeLongMetadataPreserved) {
+  const char* setup = R"(
+    return {
+      resourceMetrics = {
+        {
+          resource = {
+            attributes = {
+              {
+                key = "service.name",
+                value = {
+                  stringValue = "long-metrics-service-name-exceeding-sixty-four-characters-for-zero-copy-view-test-123456"
+                }
+              }
+            }
+          },
+          scopeMetrics = {
+            {
+              scope = {
+                name = "long.metrics.instrumentation.scope.name.exceeding.sixty.four.characters.0123456789",
+                version = "2.0.0-long-metrics-version-string-exceeding-sixty-four-characters-for-testing-987654321"
+              },
+              metrics = {
+                {
+                  name = "long.metric.name.exceeding.sixty.four.characters.for.zero.copy.testing.0123456789",
+                  description = "Long metric description exceeding sixty-four characters to verify zero-copy string_view lifetime across data points",
+                  unit = "long_metric_unit_exceeding_sixty_four_characters_for_zero_copy_test_bytes_per_sec",
+                  gauge = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = "1700000000000000000",
+                        asDouble = 42.5
+                      },
+                      {
+                        timeUnixNano = "1700000001000000000",
+                        asDouble = 84.0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, setup), LUA_OK) << lua_tostring(L_, -1);
+  int payload_idx = lua_gettop(L_);
+  auto res = ProcessMetricsTable(L_, payload_idx, 1);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
+    for i = 1, 2 do
+      local e = emitted[i].log
+      assert(e ~= nil)
+      assert(e.ServiceName == "long-metrics-service-name-exceeding-sixty-four-characters-for-zero-copy-view-test-123456",
+             "ServiceName mismatch: " .. tostring(e.ServiceName))
+      assert(e.ScopeName == "long.metrics.instrumentation.scope.name.exceeding.sixty.four.characters.0123456789",
+             "ScopeName mismatch: " .. tostring(e.ScopeName))
+      assert(e.ScopeVersion == "2.0.0-long-metrics-version-string-exceeding-sixty-four-characters-for-testing-987654321",
+             "ScopeVersion mismatch: " .. tostring(e.ScopeVersion))
+      assert(e.MetricName == "long.metric.name.exceeding.sixty.four.characters.for.zero.copy.testing.0123456789",
+             "MetricName mismatch: " .. tostring(e.MetricName))
+      assert(e.MetricDescription == "Long metric description exceeding sixty-four characters to verify zero-copy string_view lifetime across data points",
+             "MetricDescription mismatch: " .. tostring(e.MetricDescription))
+      assert(e.MetricUnit == "long_metric_unit_exceeding_sixty_four_characters_for_zero_copy_test_bytes_per_sec",
+             "MetricUnit mismatch: " .. tostring(e.MetricUnit))
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, TableModeNumericScopeMetadataStillCoerced) {
+  const char* setup = R"(
+    return {
+      resourceMetrics = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "num-scope-metrics-svc" } }
+            }
+          },
+          scopeMetrics = {
+            {
+              scope = {
+                name = 999,
+                version = 888
+              },
+              metrics = {
+                {
+                  name = "coerced_metric",
+                  gauge = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = "1700000000000000000",
+                        asInt = 7
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, setup), LUA_OK) << lua_tostring(L_, -1);
+  int payload_idx = lua_gettop(L_);
+  auto res = ProcessMetricsTable(L_, payload_idx, 1);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    local e = emitted[#emitted].log
+    assert(e ~= nil)
+    assert(e.ScopeName == "999", "ScopeName mismatch: " .. tostring(e.ScopeName))
+    assert(e.ScopeVersion == "888", "ScopeVersion mismatch: " .. tostring(e.ScopeVersion))
+    assert(e.MetricName == "coerced_metric", "MetricName mismatch: " .. tostring(e.MetricName))
+    assert(e.Value == 7, "Value mismatch: " .. tostring(e.Value))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
+  const char* gc_emit_script = R"(
+    gc_emitted = {}
+    function gc_emit(event)
+      table.insert(gc_emitted, event)
+      collectgarbage("collect")
+      collectgarbage("collect")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, gc_emit_script), LUA_OK) << lua_tostring(L_, -1);
+  lua_getglobal(L_, "gc_emit");
+  int gc_emit_idx = lua_gettop(L_);
+
+  // 80-char service.name string (non-interned long string in Lua 5.4) followed
+  // by a duplicate service.name with intValue 42 across two gauge data points.
+  const std::string long_svc(80, 's');
+  std::string json =
+      R"({"resourceMetrics":[{"resource":{"attributes":[)"
+      R"({"key":"service.name","value":{"stringValue":")" +
+      long_svc +
+      R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+      R"(]},"scopeMetrics":[{"metrics":[{"name":"dup_svc_gauge","gauge":{"dataPoints":[)"
+      R"({"timeUnixNano":"1700000000000000000","asInt":"10"},)"
+      R"({"timeUnixNano":"1700000001000000000","asInt":"20"})"
+      R"(]}}]}]}]})";
+
+  auto res = ProcessMetrics(L_, json, gc_emit_idx);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#gc_emitted == 2, "Expected 2 events, got " .. #gc_emitted)
+    for i = 1, 2 do
+      local e = gc_emitted[i].log
+      assert(e.ServiceName == "unknown_service",
+             "Event " .. i .. " ServiceName mismatch: " .. tostring(e.ServiceName))
+      assert(e.ResourceAttributes["service.name"] == 42,
+             "Event " .. i .. " ResourceAttributes['service.name'] mismatch: " ..
+             tostring(e.ResourceAttributes["service.name"]))
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderGc) {
+  const char* gc_emit_script = R"(
+    uaf_emitted = {}
+    function uaf_gc_emit(event)
+      table.insert(uaf_emitted, event)
+      collectgarbage("collect")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, gc_emit_script), LUA_OK) << lua_tostring(L_, -1);
+  lua_getglobal(L_, "uaf_gc_emit");
+  int gc_emit_idx = lua_gettop(L_);
+
+  const std::string long_svc(64, 'a');
+  std::string json = R"({"resourceMetrics":[{"resource":{"attributes":[)"
+                     R"({"key":"service.name","value":{"stringValue":")" +
+                     long_svc +
+                     R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+                     R"(]},"scopeMetrics":[{"metrics":[{"name":"uaf_gauge","gauge":{"dataPoints":[)"
+                     R"({"timeUnixNano":"1700000000000000000","asInt":"1"},)"
+                     R"({"timeUnixNano":"1700000001000000000","asInt":"2"})"
+                     R"(]}}]}]}]})";
+
+  auto res = ProcessMetrics(L_, json, gc_emit_idx);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#uaf_emitted == 2)
+    assert(uaf_emitted[1].log.ServiceName == "unknown_service")
+    assert(uaf_emitted[2].log.ServiceName == "unknown_service")
+    assert(uaf_emitted[1].log.ResourceAttributes["service.name"] == 42)
+    assert(uaf_emitted[2].log.ResourceAttributes["service.name"] == 42)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
