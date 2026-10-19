@@ -80,6 +80,7 @@ add_executable(vector_otel_tests
   tests/cpp/test_metrics_extractor.cpp
   tests/cpp/test_module_exports.cpp
   tests/cpp/test_table_mode.cpp
+  tests/cpp/test_scratch.cpp
 )
 target_link_libraries(vector_otel_tests PRIVATE
   vector_otel_core
