@@ -382,15 +382,13 @@ TEST_F(LogsExtractorTest, EmptyBatches) {
 
   // Resource with empty scopeLogs
   {
-    auto res = ProcessLogs(
-        L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
+    auto res = ProcessLogs(L_, "{\"resourceLogs\": [{\"resource\": {}, \"scopeLogs\": []}]}", 1);
     EXPECT_TRUE(res.success);
     EXPECT_EQ(res.emitted_count, 0);
   }
 }
 
-TEST_F(LogsExtractorTest,
-       ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperAndError) {
+TEST_F(LogsExtractorTest, ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperAndError) {
   // 1. { log = { resourceLogs = { ... } } }
   {
     const char* setup_nested = R"(
@@ -522,6 +520,197 @@ TEST_F(LogsExtractorTest,
     )";
     EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
   }
+}
+
+TEST_F(LogsExtractorTest, TableModeLongMetadataPreserved) {
+  const char* setup = R"(
+    return {
+      resourceLogs = {
+        {
+          schemaUrl = "https://opentelemetry.io/schemas/1.21.0/resource-with-a-very-long-url-exceeding-64-chars-abcdef",
+          resource = {
+            attributes = {
+              {
+                key = "service.name",
+                value = {
+                  stringValue = "long-service-name-exceeding-sixty-four-characters-for-zero-copy-view-test-123456"
+                }
+              }
+            }
+          },
+          scopeLogs = {
+            {
+              schemaUrl = "https://opentelemetry.io/schemas/1.21.0/scope-with-a-very-long-url-exceeding-64-characters-xyz",
+              scope = {
+                name = "long.instrumentation.scope.name.exceeding.sixty.four.characters.0123456789",
+                version = "1.0.0-long-version-string-exceeding-sixty-four-characters-for-testing-987654321"
+              },
+              logRecords = {
+                {
+                  timeUnixNano = "1700000000000000000",
+                  body = { stringValue = "long-meta-body" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, setup), LUA_OK) << lua_tostring(L_, -1);
+  int payload_idx = lua_gettop(L_);
+  auto res = ProcessLogsTable(L_, payload_idx, 1);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    local r = emitted[#emitted].log
+    assert(r ~= nil)
+    assert(r.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.21.0/resource-with-a-very-long-url-exceeding-64-chars-abcdef",
+           "ResourceSchemaUrl mismatch: " .. tostring(r.ResourceSchemaUrl))
+    assert(r.ServiceName == "long-service-name-exceeding-sixty-four-characters-for-zero-copy-view-test-123456",
+           "ServiceName mismatch: " .. tostring(r.ServiceName))
+    assert(r.ScopeSchemaUrl == "https://opentelemetry.io/schemas/1.21.0/scope-with-a-very-long-url-exceeding-64-characters-xyz",
+           "ScopeSchemaUrl mismatch: " .. tostring(r.ScopeSchemaUrl))
+    assert(r.ScopeName == "long.instrumentation.scope.name.exceeding.sixty.four.characters.0123456789",
+           "ScopeName mismatch: " .. tostring(r.ScopeName))
+    assert(r.ScopeVersion == "1.0.0-long-version-string-exceeding-sixty-four-characters-for-testing-987654321",
+           "ScopeVersion mismatch: " .. tostring(r.ScopeVersion))
+    assert(r.Body == "long-meta-body", "Body mismatch: " .. tostring(r.Body))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, TableModeNumericScopeMetadataStillCoerced) {
+  const char* setup = R"(
+    return {
+      resourceLogs = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "num-scope-svc" } }
+            }
+          },
+          scopeLogs = {
+            {
+              scope = {
+                name = 999,
+                version = 888
+              },
+              logRecords = {
+                {
+                  timeUnixNano = "1700000000000000000",
+                  traceId = 12345,
+                  body = { stringValue = "coerced" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, setup), LUA_OK) << lua_tostring(L_, -1);
+  int payload_idx = lua_gettop(L_);
+  auto res = ProcessLogsTable(L_, payload_idx, 1);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    local r = emitted[#emitted].log
+    assert(r ~= nil)
+    assert(r.ScopeName == "999", "ScopeName mismatch: " .. tostring(r.ScopeName))
+    assert(r.ScopeVersion == "888", "ScopeVersion mismatch: " .. tostring(r.ScopeVersion))
+    assert(r.TraceId == "12345", "TraceId mismatch: " .. tostring(r.TraceId))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
+  const char* gc_emit_script = R"(
+    gc_emitted = {}
+    function gc_emit(event)
+      table.insert(gc_emitted, event)
+      collectgarbage("collect")
+      collectgarbage("collect")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, gc_emit_script), LUA_OK) << lua_tostring(L_, -1);
+  lua_getglobal(L_, "gc_emit");
+  int gc_emit_idx = lua_gettop(L_);
+
+  // 80-char service.name string (non-interned long string in Lua 5.4) followed
+  // by a duplicate service.name with intValue 42.
+  const std::string long_svc(80, 's');
+  std::string json = R"({"resourceLogs":[{"resource":{"attributes":[)"
+                     R"({"key":"service.name","value":{"stringValue":")" +
+                     long_svc +
+                     R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+                     R"(]},"scopeLogs":[{"logRecords":[)"
+                     R"({"timeUnixNano":"1700000000000000000","body":{"stringValue":"rec1"}},)"
+                     R"({"timeUnixNano":"1700000000000000001","body":{"stringValue":"rec2"}})"
+                     R"(]}]}]})";
+
+  auto res = ProcessLogs(L_, json, gc_emit_idx);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#gc_emitted == 2, "Expected 2 events, got " .. #gc_emitted)
+    for i = 1, 2 do
+      local r = gc_emitted[i].log
+      assert(r.ServiceName == "unknown_service",
+             "Event " .. i .. " ServiceName mismatch: " .. tostring(r.ServiceName))
+      assert(r.ResourceAttributes["service.name"] == 42,
+             "Event " .. i .. " ResourceAttributes['service.name'] mismatch: " ..
+             tostring(r.ResourceAttributes["service.name"]))
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderGc) {
+  const char* gc_emit_script = R"(
+    uaf_emitted = {}
+    function uaf_gc_emit(event)
+      table.insert(uaf_emitted, event)
+      collectgarbage("collect")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, gc_emit_script), LUA_OK) << lua_tostring(L_, -1);
+  lua_getglobal(L_, "uaf_gc_emit");
+  int gc_emit_idx = lua_gettop(L_);
+
+  const std::string long_svc(64, 'a');
+  std::string json = R"({"resourceLogs":[{"resource":{"attributes":[)"
+                     R"({"key":"service.name","value":{"stringValue":")" +
+                     long_svc +
+                     R"("}},{"key":"service.name","value":{"intValue":"42"}})"
+                     R"(]},"scopeLogs":[{"logRecords":[)"
+                     R"({"timeUnixNano":"1700000000000000000","body":{"stringValue":"first"}},)"
+                     R"({"timeUnixNano":"1700000000000000001","body":{"stringValue":"second"}})"
+                     R"(]}]}]})";
+
+  auto res = ProcessLogs(L_, json, gc_emit_idx);
+  lua_pop(L_, 1);
+
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#uaf_emitted == 2)
+    assert(uaf_emitted[1].log.ServiceName == "unknown_service")
+    assert(uaf_emitted[2].log.ServiceName == "unknown_service")
+    assert(uaf_emitted[1].log.ResourceAttributes["service.name"] == 42)
+    assert(uaf_emitted[2].log.ResourceAttributes["service.name"] == 42)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
 }  // namespace
