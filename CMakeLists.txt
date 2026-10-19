@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(ENABLE_NATIVE_TUNING "Enable -march=native" OFF)
 option(ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
+option(ENABLE_SANITIZERS "Enable ASAN and UBSAN instrumentation" OFF)
 set(VECTOR_OTEL_EMIT_BATCH_SIZE 1 CACHE STRING "Compile-time emit batch size (default: 1)")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -18,6 +19,13 @@ if(ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(--coverage -O0 -g)
     add_link_options(--coverage)
+  endif()
+endif()
+
+if(ENABLE_SANITIZERS)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer -g)
   endif()
 endif()
 
