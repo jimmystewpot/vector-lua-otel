@@ -1797,7 +1797,7 @@ TEST_F(TableModeTest, SeverityEnumStringWithEmbeddedNulIsNotMatched) {
   lua_pop(L_, 4);
 }
 
-TEST_F(TableModeTest, ReadTableStringViewReturnsZeroCopyView) {
+TEST_F(TableModeTest, ReadTableStringViewReturnsViewOfScratch) {
   ASSERT_EQ(luaL_dostring(L_, "return { name = 'zero_copy_payload' }"), LUA_OK);
   int top_before = lua_gettop(L_);
 
