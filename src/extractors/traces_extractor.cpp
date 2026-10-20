@@ -380,6 +380,7 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
         events.Trim();
         links.Trim();
         attr.Trim();
+        core::ResetServiceNameScratch();
       }
       core::FastJsonWriter& events;
       core::FastJsonWriter& links;

@@ -7,7 +7,33 @@
 #include <string>
 #include <string_view>
 
+#include "vector_otel/core/scratch.hpp"
+
 namespace vector_otel::core {
+
+// Thread-local scratch buffer for service.name to prevent use-after-free
+// when Lua GC removes the attribute from ResourceAttributes.
+static thread_local std::string g_service_name_scratch;
+
+namespace {
+// Helper to capture and safely copy service.name from Lua stack into scratch.
+// Returns string_view into g_service_name_scratch if scalar string found,
+// otherwise returns "unknown_service".
+std::string_view CaptureServiceName(lua_State* L, simdjson::ondemand::value& val,
+                                    bool is_scalar_str) noexcept {
+  if (!is_scalar_str) {
+    return "unknown_service";
+  }
+  size_t slen = 0;
+  const char* s = lua_tolstring(L, -1, &slen);
+  if (s == nullptr || slen == 0) {
+    return "unknown_service";
+  }
+  // Copy into thread-local scratch (preserves embedded NULs)
+  g_service_name_scratch.assign(s, slen);
+  return std::string_view(g_service_name_scratch);
+}
+}  // namespace
 
 std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string_view key,
                                     std::string_view default_val) {
@@ -491,14 +517,7 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
       lua_pushlstring(L, k.data(), k.size());
       const bool is_scalar_str = PushAnyValueScalar(L, v, json_writer);
       if (out_service_name != nullptr && (k == "service.name" || k == "service_name")) {
-        *out_service_name = "unknown_service";
-        if (is_scalar_str) {
-          size_t slen = 0;
-          const char* s = lua_tolstring(L, -1, &slen);
-          if (s != nullptr && slen > 0) {
-            *out_service_name = std::string_view(s, slen);
-          }
-        }
+        *out_service_name = CaptureServiceName(L, v, is_scalar_str);
       }
       lua_rawset(L, -3);
     }
@@ -520,18 +539,13 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
       lua_pushlstring(L, k.data(), k.size());
       const bool is_scalar_str = PushAnyValueScalar(L, v, json_writer);
       if (out_service_name != nullptr && (k == "service.name" || k == "service_name")) {
-        *out_service_name = "unknown_service";
-        if (is_scalar_str) {
-          size_t slen = 0;
-          const char* s = lua_tolstring(L, -1, &slen);
-          if (s != nullptr && slen > 0) {
-            *out_service_name = std::string_view(s, slen);
-          }
-        }
+        *out_service_name = CaptureServiceName(L, v, is_scalar_str);
       }
       lua_rawset(L, -3);
     }
   }
 }
+
+void ResetServiceNameScratch() noexcept { ResetScratchString(g_service_name_scratch); }
 
 }  // namespace vector_otel::core

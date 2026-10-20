@@ -1376,6 +1376,48 @@ TEST_F(MetricsExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnd
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(MetricsExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResourceAttribute) {
+  const char* uaf_script = R"(
+    uaf_emitted = {}
+    function uaf_cb(event)
+      table.insert(uaf_emitted, event)
+      event.log.ResourceAttributes["service.name"] = nil
+      collectgarbage("collect")
+      collectgarbage("collect")
+      for i = 1, 200 do
+        local _ = string.rep("x", 80) .. i
+      end
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, uaf_script), LUA_OK) << lua_tostring(L_, -1);
+  lua_getglobal(L_, "uaf_cb");
+  const int cb_idx = lua_gettop(L_);
+  const std::string svc(80, 'Z');
+
+  const std::string json =
+      R"({"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":")" +
+      svc +
+      R"("}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"g","gauge":{"dataPoints":[)"
+      R"({"timeUnixNano":"1","asInt":"1"},)"
+      R"({"timeUnixNano":"2","asInt":"2"},)"
+      R"({"timeUnixNano":"3","asInt":"3"})"
+      R"(]}}]}]}]})";
+
+  auto res = ProcessMetrics(L_, json, cb_idx);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 3);
+
+  const char* verify_script = R"(
+    assert(#uaf_emitted == 3, "expected 3 events, got " .. #uaf_emitted)
+    for i = 1, 3 do
+      local name = uaf_emitted[i].log.ServiceName
+      assert(name == string.rep("Z", 80), "event " .. i .. " ServiceName: " .. tostring(name))
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 
 }  // namespace extractors

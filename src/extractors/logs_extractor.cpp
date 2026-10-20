@@ -97,6 +97,7 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
     ~WriterTrimGuard() noexcept {
       w1.Trim();
       w2.Trim();
+      core::ResetServiceNameScratch();
     }
     core::FastJsonWriter& w1;
     core::FastJsonWriter& w2;

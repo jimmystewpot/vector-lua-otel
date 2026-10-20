@@ -150,6 +150,7 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
       writer.Trim();
       core::ResetScratchVector(bucket_counts);
       core::ResetScratchVector(explicit_bounds);
+      core::ResetServiceNameScratch();
     }
     core::FastJsonWriter& writer;
     std::vector<int64_t>& bucket_counts;
