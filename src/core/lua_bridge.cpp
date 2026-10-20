@@ -39,18 +39,16 @@ void LuaEmitter::StartRecord() {
     if (current_batch_count_ == 0) {
       // Allocate batch event table structure:
       // event = { [record_field_name] = { records = pre_allocated_array } }
-      lua_createtable(L_, 0, 1);                              // event table
-      lua_createtable(L_, 0, 1);                              // container table
-      lua_createtable(L_, static_cast<int>(batch_size_), 0);  // records array
-      records_ref_.reset(
-          L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops records array
+      lua_createtable(L_, 0, 1);                                // event table
+      lua_createtable(L_, 0, 1);                                // container table
+      lua_createtable(L_, static_cast<int>(batch_size_), 0);    // records array
+      records_ref_.reset(L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops records array
       lua_rawgeti(L_, LUA_REGISTRYINDEX, records_ref_.get());
       lua_setfield(L_, -2, "records");
       lua_pushlstring(L_, record_field_name_.data(), record_field_name_.size());
       lua_insert(L_, -2);
       lua_rawset(L_, -3);  // event[record_field_name] = container
-      event_ref_.reset(L_,
-                       luaL_ref(L_, LUA_REGISTRYINDEX));  // pops event table
+      event_ref_.reset(L_, luaL_ref(L_, LUA_REGISTRYINDEX));  // pops event table
     }
     // Create new row table
     lua_createtable(L_, 0, 32);
@@ -80,11 +78,9 @@ void LuaEmitter::SetUint64(std::string_view key, uint64_t val) {
   if (L_ == nullptr || !in_record_ || has_error_) [[unlikely]] {
     return;
   }
-  constexpr uint64_t kMaxLuaInt =
-      static_cast<uint64_t>(std::numeric_limits<lua_Integer>::max());
-  const lua_Integer clamped = val > kMaxLuaInt
-                                  ? std::numeric_limits<lua_Integer>::max()
-                                  : static_cast<lua_Integer>(val);
+  constexpr uint64_t kMaxLuaInt = static_cast<uint64_t>(std::numeric_limits<lua_Integer>::max());
+  const lua_Integer clamped =
+      val > kMaxLuaInt ? std::numeric_limits<lua_Integer>::max() : static_cast<lua_Integer>(val);
   lua_pushlstring(L_, key.data(), key.size());
   lua_pushinteger(L_, clamped);
   lua_rawset(L_, record_index_);

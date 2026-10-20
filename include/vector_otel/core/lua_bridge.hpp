@@ -45,9 +45,7 @@ class ScopedLuaRef {
   }
 
   int get() const noexcept { return ref_; }
-  bool valid() const noexcept {
-    return L_ != nullptr && ref_ != LUA_NOREF && ref_ != LUA_REFNIL;
-  }
+  bool valid() const noexcept { return L_ != nullptr && ref_ != LUA_NOREF && ref_ != LUA_REFNIL; }
 
   void reset(int new_ref = LUA_NOREF) noexcept {
     if (valid()) {
@@ -73,8 +71,7 @@ constexpr size_t kCompileTimeBatchSize = VECTOR_OTEL_EMIT_BATCH_SIZE;
 
 class LuaEmitter {
  public:
-  explicit LuaEmitter(lua_State* L, int emit_index,
-                      size_t batch_size = kCompileTimeBatchSize,
+  explicit LuaEmitter(lua_State* L, int emit_index, size_t batch_size = kCompileTimeBatchSize,
                       std::string_view record_field_name = "log");
   ~LuaEmitter() {
     if (L_ != nullptr && (in_record_ || has_error_)) {

@@ -157,10 +157,7 @@ vector validate --no-environment tests/vector/vector_test.yaml
 
 ### Step 4: Formatting Verification
 ```bash
-clang-format --dry-run --Werror -style=Google \
-    include/vector_otel/**/*.hpp \
-    src/**/*.cpp \
-    tests/cpp/**/*.cpp
+find include src tests/cpp -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
 ```
 **Expected**: Clean format with 0 errors.
 

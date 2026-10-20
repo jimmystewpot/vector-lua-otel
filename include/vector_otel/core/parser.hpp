@@ -15,8 +15,7 @@ class OtelParser {
 
   static OtelParser& Instance();
 
-  simdjson::simdjson_result<simdjson::ondemand::document> Iterate(
-      std::string_view json_str);
+  simdjson::simdjson_result<simdjson::ondemand::document> Iterate(std::string_view json_str);
   simdjson::simdjson_result<simdjson::ondemand::document> Iterate(
       simdjson::padded_string_view json_str);
 
