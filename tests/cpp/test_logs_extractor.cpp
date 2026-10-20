@@ -809,6 +809,41 @@ TEST_F(LogsExtractorTest, BatchModeParseErrorDiscardsQueuedRows) {
   lua_pop(L_, 1);
 }
 
+// Pins deliberate design: ResourceAttributes is built once per resource and shared by reference
+// by every record of that resource (see README "Emitted Tables Are Shared").
+TEST_F(LogsExtractorTest, ResourceAttributesTableIsSharedAcrossRecordsOfOneResource) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    shared_events = {}
+    function shared_cb(event) table.insert(shared_events, event) end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "shared_cb");
+  const int cb_idx = lua_gettop(L_);
+
+  const std::string json =
+      R"({"resourceLogs":[)"
+      R"({"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"a"}}]},)"
+      R"("scopeLogs":[{"logRecords":[)"
+      R"({"timeUnixNano":"1","body":{"stringValue":"x"}},)"
+      R"({"timeUnixNano":"2","body":{"stringValue":"y"}}]}]},)"
+      R"({"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"b"}}]},)"
+      R"("scopeLogs":[{"logRecords":[{"timeUnixNano":"3","body":{"stringValue":"z"}}]}]})"
+      R"(]})";
+
+  auto res = ProcessLogs(L_, json, cb_idx);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 3);
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#shared_events == 3, "expected 3 events")
+    local r1, r2, r3 = shared_events[1].log, shared_events[2].log, shared_events[3].log
+    assert(rawequal(r1.ResourceAttributes, r2.ResourceAttributes), "same resource must share table")
+    assert(not rawequal(r1.ResourceAttributes, r3.ResourceAttributes), "different resources must not share")
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel
