@@ -102,6 +102,38 @@ jobs:
       - name: Run C++ test suite under ASAN/UBSAN
         run: UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir build-asan --output-on-failure
 
+  batch-mode:
+    name: Batch mode (VECTOR_OTEL_EMIT_BATCH_SIZE=3)
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            liblua5.4-dev \
+            lua5.4 \
+            cmake \
+            ninja-build \
+            gcc \
+            g++
+
+      - name: Configure and build with a compile-time batch size of 3
+        run: |
+          cmake -B build-batch -DCMAKE_BUILD_TYPE=Debug -DVECTOR_OTEL_EMIT_BATCH_SIZE=3 -GNinja
+          cmake --build build-batch
+
+      - name: Run batch-mode tests
+        run: ./build-batch/vector_otel_tests --gtest_filter='*BatchMode*'
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
