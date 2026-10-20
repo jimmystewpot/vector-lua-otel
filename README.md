@@ -52,7 +52,7 @@ When receiving OTLP JSON batches through Vector's HTTP, Kafka, or file sources, 
 **vector-lua-otel solves this by:**
 - Utilising **simdjson 5.0.5 On-Demand** parsing with AVX-512, AVX2, SSE4.2, and ARM NEON hardware acceleration.
 - Maintaining **$O(1)$ streaming memory**: extracting and emitting records incrementally without buffering the batch in C++ or Lua.
-- Reusing thread-local string buffers and zero-copy string views to achieve **zero heap allocations in hot extraction loops**.
+- Reusing thread-local string buffers (strings read from Lua or JSON are copied into reusable scratch buffers, never borrowed across `emit` calls) to achieve **zero heap allocations in hot extraction loops**.
 - Preserving **exact 64-bit integers** (via Lua 5.4 native integer support) and formatting all timestamps as **ISO-8601 UTC strings with 9 fractional digits** (nanosecond precision).
 - Aligning column schemas directly with canonical OpenTelemetry ClickHouse exporter templates (`logs_json_table.sql`, `traces_json_table.sql`, `metrics_*_table.sql`).
 
@@ -91,7 +91,7 @@ The diagram below illustrates the end-to-end data lifecycle from input source th
 │         │   │  3. LuaBridge Emitter (N = 1 default, N > 1 batching)  │   │
 │         │   │     • N = 1: pushes { log = { <column> = <val>, ... } }│   │
 │         │   │     • N > 1: pushes { log = { records = [ ... ] } }    │   │
-│         │   │     • Invokes lua_call(emit, 1, 0) per record/batch    │   │
+│         │   │     • Invokes lua_pcall(emit, 1, 0) per record/batch   │   │
 │         │   └────────────────────────────────────────────────────────┘   │
 │         │         │                                                      │
 │         │<────────┘ returns (emitted_count, nil)                         │
@@ -400,8 +400,15 @@ otel_metrics.process(payload: string | table, emit: function) -> (integer, nil) 
   local count, err, partial_count = otel_logs.process(invalid_payload, emit)
   -- count == nil, err == "error message", partial_count == 0
   ```
+- **Partial counts**: `emitted_count` / `partial_count` is the number of rows whose `emit` call returned successfully. Rows already passed to `emit` cannot be recalled, so a failed call is **not atomic**: log `partial_count` if you need to know how much was delivered. With `VECTOR_OTEL_EMIT_BATCH_SIZE > 1`, rows still queued when a payload fails to parse are discarded and are not counted.
+- **Errors raised by `emit`**: `emit` is invoked under `lua_pcall`; an error in your callback stops the call and is returned as `(nil, message, partial_count)`.
+- **Acknowledgements in Vector**: events that a Lua transform builds from Lua tables are new events. Per Vector's Lua transform implementation (not verified against every version), they do not carry the input event's source acknowledgement finalizers, so end-to-end acknowledgements do not follow emitted rows past the Lua transform. Treat this module as best-effort with respect to delivery guarantees.
 - **Empty / Sparse Payloads**: Payloads with empty records or missing scopes safely return `(0, nil)` without errors.
 - **FFI Safety**: C++ exceptions are caught at the FFI boundary and converted into error return values. No unhandled C++ exceptions or Lua panics escape.
+
+### Emitted Tables Are Shared
+
+Within one resource, every emitted record's `ResourceAttributes` points at the **same** Lua table, and likewise `ScopeAttributes` within one scope. This avoids rebuilding the table for every record. Treat both as **read-only**: copy a table before mutating it, because a change made while handling one event is visible to every other event of the same resource/scope (including events your `emit` callback has already stored).
 
 ---
 

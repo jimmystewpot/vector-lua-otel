@@ -14,7 +14,7 @@ Every modification to this repository **must** strictly adhere to the following 
 
 1. **$O(1)$ Streaming Memory Model**:
    - **Never buffer entire batches** in C++ memory or Lua tables before emitting.
-   - For $N = 1$ (default), extract and emit each record immediately via `lua_call(emit, 1, 0)`.
+   - For $N = 1$ (default), extract and emit each record immediately via `lua_pcall(emit, 1, 0)`.
    - For $N > 1$, accumulate only up to $N$ rows in a pre-allocated reusable buffer before flushing.
    - Memory usage must remain bounded and independent of batch size ($M$).
 
