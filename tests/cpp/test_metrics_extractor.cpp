@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 
+#include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/timestamp.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
 
@@ -1416,6 +1417,37 @@ TEST_F(MetricsExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResource
     end
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+// Batch mode only: when a later batch fails in emit, the result reports only the rows whose
+// emit call succeeded (the first full batch), not the rows queued for the failed batch.
+TEST_F(MetricsExtractorTest, BatchModeEmitFailureReportsOnlyDeliveredRows) {
+  if (::vector_otel::core::kCompileTimeBatchSize != 3) {
+    GTEST_SKIP() << "requires VECTOR_OTEL_EMIT_BATCH_SIZE == 3";
+  }
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    batch_emit_calls = 0
+    function batch_emit(event)
+      batch_emit_calls = batch_emit_calls + 1
+      if batch_emit_calls == 2 then error("boom") end
+    end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "batch_emit");
+  const int emit_idx = lua_gettop(L_);
+
+  // Four data points: the first batch of 3 is delivered, the final batch of 1 fails.
+  const std::string json =
+      R"({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"g","gauge":{"dataPoints":[)"
+      R"({"timeUnixNano":"1","asInt":"1"},{"timeUnixNano":"2","asInt":"2"},)"
+      R"({"timeUnixNano":"3","asInt":"3"},{"timeUnixNano":"4","asInt":"4"}]}}]}]}]})";
+  auto res = ProcessMetrics(L_, json, emit_idx);
+  lua_pop(L_, 1);
+  EXPECT_FALSE(res.success);
+  EXPECT_EQ(res.emitted_count, 3);
+  lua_getglobal(L_, "batch_emit_calls");
+  EXPECT_EQ(lua_tointeger(L_, -1), 2);
+  lua_pop(L_, 1);
 }
 
 }  // namespace

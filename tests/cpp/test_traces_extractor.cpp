@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/timestamp.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
 
@@ -1620,6 +1621,33 @@ TEST_F(TracesExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResourceA
     end
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+// Batch mode only: a parse error fails the whole call. Rows still queued (not yet passed to
+// emit) are discarded and must not be counted as emitted.
+TEST_F(TracesExtractorTest, BatchModeParseErrorDiscardsQueuedRows) {
+  if (::vector_otel::core::kCompileTimeBatchSize <= 1) {
+    GTEST_SKIP() << "requires VECTOR_OTEL_EMIT_BATCH_SIZE > 1";
+  }
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    batch_emit_calls = 0
+    function batch_emit(event) batch_emit_calls = batch_emit_calls + 1 end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "batch_emit");
+  const int emit_idx = lua_gettop(L_);
+
+  // One complete record (fewer than the batch size) is queued, then a missing comma makes the
+  // parser fail mid-array.
+  const std::string json =
+      R"({"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"0123456789abcdef0123456789abcdef","spanId":"0123456789abcde1"} {"x":1}]}]}]})";
+  auto res = ProcessTraces(L_, json, emit_idx);
+  lua_pop(L_, 1);
+  EXPECT_FALSE(res.success);
+  EXPECT_EQ(res.emitted_count, 0);
+  lua_getglobal(L_, "batch_emit_calls");
+  EXPECT_EQ(lua_tointeger(L_, -1), 0);
+  lua_pop(L_, 1);
 }
 
 }  // namespace
