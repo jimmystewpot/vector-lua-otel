@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <cstdlib>
 #include <string>
 
 extern "C" {
@@ -276,81 +278,75 @@ TEST_F(ModuleExportsTest, StandaloneSubmoduleOpeners) {
   lua_close(L3);
 }
 
-// Test for Lua memory error recovery (Task 5: re-entrancy guard survives OOM longjmp)
-TEST(ProcessLogsRecoversFromLuaMemoryErrorWithoutStickingReentrancyGuard,
-     OOMDuringExtractionDoesNotStickReentrancyFlag) {
-  const char* valid_payload =
-      R"({"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"svc"}}]},"scopeLogs":[{"scope":{"name":"s"},"logRecords":[{"timeUnixNano":"1293840000000000000","body":{"stringValue":"hello"}}]}]}]})";
+namespace {
 
-  struct Budget {
-    size_t remaining = 0;
-  };
+struct AllocBudget {
+  size_t remaining = SIZE_MAX;
+};
 
-  // Sweep budget to find where OOM happens inside extraction
-  int found_stuck_budget = -1;
-  for (size_t budget = 0; budget < 3001; budget += (budget < 500 ? 1 : 7)) {
-    Budget budget_data{budget};
-    lua_State* L = lua_newstate(
-        [](void* ud, void* ptr, size_t osize, size_t nsize) -> void* {
-          Budget* b = static_cast<Budget*>(ud);
-          if (nsize == 0) {
-            free(ptr);
-            return nullptr;
-          }
-          if (nsize > osize) {
-            size_t grow = nsize - osize;
-            if (grow > b->remaining) return nullptr;
-            b->remaining -= grow;
-          }
-          return realloc(ptr, nsize);
-        },
-        &budget_data);
+// Allocator that fails any growth request exceeding the remaining budget. Frees and shrinks
+// always succeed so that lua_close() is safe.
+void* BudgetedAlloc(void* ud, void* ptr, size_t osize, size_t nsize) {
+  auto* budget = static_cast<AllocBudget*>(ud);
+  if (nsize == 0) {
+    free(ptr);
+    return nullptr;
+  }
+  const size_t old_size = ptr == nullptr ? 0 : osize;
+  if (nsize > old_size) {
+    const size_t growth = nsize - old_size;
+    if (growth > budget->remaining) {
+      return nullptr;
+    }
+    budget->remaining -= growth;
+  }
+  return realloc(ptr, nsize);
+}
 
-    if (L == nullptr) continue;
+}  // namespace
 
+// A Lua memory error raised inside the extractor longjmps out of C++ frames. The re-entrancy
+// flag must still be cleared so later calls on the same thread keep working.
+TEST(ModuleOomTest, ProcessLogsRecoversFromLuaMemoryErrorWithoutStickingReentrancyGuard) {
+  int memory_errors_seen = 0;
+  for (size_t budget = 0; budget < 6000; budget += (budget < 1500 ? 3 : 25)) {
+    AllocBudget alloc;
+    lua_State* L = lua_newstate(BudgetedAlloc, &alloc);
+    ASSERT_NE(L, nullptr);
     luaL_openlibs(L);
-    const char* init = "function noop_emit(e) end";
-    if (luaL_dostring(L, init) != LUA_OK) {
-      lua_close(L);
-      continue;
-    }
-
-    if (luaopen_vector_otel(L) != 0) {
-      lua_close(L);
-      continue;
-    }
+    luaopen_vector_otel(L);
     lua_setglobal(L, "vector_otel");
 
-    // First call with limited budget (may fail)
-    budget_data.remaining = budget;
-    lua_pushlstring(L, valid_payload, strlen(valid_payload));
-    lua_getglobal(L, "noop_emit");
-    lua_call(L, 2, 3);
-    lua_pop(L, 3);
+    // Everything that allocates is prepared while the budget is unlimited.
+    const char* setup = R"(
+      payload = '{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"svc"}}]},"scopeLogs":[{"scope":{"name":"s"},"logRecords":[{"timeUnixNano":"1293840000000000000","body":{"stringValue":"hello"}}]}]}]}'
+      function noop_emit(event) end
+      function run() return vector_otel.logs.process(payload, noop_emit) end
+    )";
+    ASSERT_EQ(luaL_dostring(L, setup), LUA_OK) << lua_tostring(L, -1);
+    ASSERT_EQ(lua_gettop(L), 0);
 
-    // Second call with unlimited budget
-    budget_data.remaining = SIZE_MAX;
-    lua_gc(L, LUA_GCCOLLECT, 0);
-
-    lua_pushlstring(L, valid_payload, strlen(valid_payload));
-    lua_getglobal(L, "noop_emit");
-    lua_call(L, 2, 3);
-
-    // Check result
-    bool is_nil = lua_isnil(L, -3);
-    const char* err_msg = lua_tostring(L, -2);
-    bool is_reentrancy_error = err_msg && strstr(err_msg, "re-entrant");
-
-    if (is_nil && is_reentrancy_error && found_stuck_budget < 0) {
-      found_stuck_budget = budget;
-      printf("FOUND STUCK BUDGET: %zu\n", budget);
+    // Limited-budget call: may hit a memory error anywhere. lua_pcall keeps it contained.
+    alloc.remaining = budget;
+    lua_getglobal(L, "run");
+    const int first_status = lua_pcall(L, 0, LUA_MULTRET, 0);
+    if (first_status == LUA_ERRMEM) {
+      ++memory_errors_seen;
     }
+    lua_settop(L, 0);
 
-    lua_pop(L, 3);
+    // Recovery call with unlimited budget must succeed, not report a stuck guard.
+    alloc.remaining = SIZE_MAX;
+    lua_gc(L, LUA_GCCOLLECT, 0);
+    lua_getglobal(L, "run");
+    ASSERT_EQ(lua_pcall(L, 0, 2, 0), LUA_OK) << lua_tostring(L, -1);
+    EXPECT_TRUE(lua_isinteger(L, 1))
+        << "budget=" << budget << " err=" << (lua_isstring(L, 2) ? lua_tostring(L, 2) : "?");
+    if (lua_isinteger(L, 1)) {
+      EXPECT_EQ(lua_tointeger(L, 1), 1) << "budget=" << budget;
+    }
     lua_close(L);
   }
-
-  if (found_stuck_budget >= 0) {
-    FAIL() << "Re-entrancy guard stuck at budget=" << found_stuck_budget;
-  }
+  // The sweep must actually exercise the failure path, otherwise the test proves nothing.
+  EXPECT_GT(memory_errors_seen, 0);
 }

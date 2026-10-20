@@ -30,8 +30,6 @@ struct ActiveExtractionGuard {
   ActiveExtractionGuard& operator=(const ActiveExtractionGuard&) = delete;
 };
 
-// Replace ProcessDispatcher with outer/inner split
-
 template <ExtractorStringFn StringExtractor, ExtractorTableFn TableExtractor>
 int ProcessBody(lua_State* L) {
   try {
