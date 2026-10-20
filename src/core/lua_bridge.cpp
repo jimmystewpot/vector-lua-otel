@@ -160,7 +160,6 @@ void LuaEmitter::EndRecord() {
     lua_pop(L_, 1);                     // pops records array
     lua_remove(L_, record_index_);      // removes original row table
     record_index_ = 0;
-    ++emitted_count_;
     if (current_batch_count_ >= static_cast<int>(batch_size_)) {
       EmitCurrentBatch();
     }
@@ -180,9 +179,12 @@ void LuaEmitter::EmitCurrentBatch() {
   lua_rawgeti(L_, LUA_REGISTRYINDEX, event_ref_.get());
   event_ref_.reset();
   records_ref_.reset();
-  const int status = lua_pcall(L_, 1, 0, 0);  // protected call emit(event)
+  const int batch_count = current_batch_count_;
   current_batch_count_ = 0;
-  if (status != LUA_OK) [[unlikely]] {
+  const int status = lua_pcall(L_, 1, 0, 0);  // protected call emit(event)
+  if (status == LUA_OK) {
+    emitted_count_ += batch_count;
+  } else [[unlikely]] {
     has_error_ = true;
     size_t len = 0;
     const char* err = lua_tolstring(L_, -1, &len);

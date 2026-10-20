@@ -137,12 +137,12 @@ TEST_F(LuaBridgeTest, NGreaterThan1BatchEmission) {
   LuaEmitter emitter(L_, 1, 2);
   EXPECT_EQ(emitter.EmittedCount(), 0);
 
-  // Record 1
+  // Record 1 (queued, not delivered)
   emitter.StartRecord();
   emitter.SetString("Timestamp", "t1");
   emitter.SetString("ServiceName", "s1");
   emitter.EndRecord();
-  EXPECT_EQ(emitter.EmittedCount(), 1);
+  EXPECT_EQ(emitter.EmittedCount(), 0);  // Not delivered yet
 
   // Batch should not have emitted yet
   lua_getglobal(L_, "emitted");
@@ -156,7 +156,7 @@ TEST_F(LuaBridgeTest, NGreaterThan1BatchEmission) {
   emitter.SetString("Timestamp", "t2");
   emitter.SetString("ServiceName", "s2");
   emitter.EndRecord();
-  EXPECT_EQ(emitter.EmittedCount(), 2);
+  EXPECT_EQ(emitter.EmittedCount(), 2);  // Now 2 rows delivered
 
   lua_getglobal(L_, "emitted");
   lua_len(L_, -1);
@@ -164,12 +164,12 @@ TEST_F(LuaBridgeTest, NGreaterThan1BatchEmission) {
   lua_pop(L_, 2);
   EXPECT_EQ(count_after_2, 1);
 
-  // Record 3 -> partial batch of 1
+  // Record 3 -> partial batch of 1 (queued, not delivered)
   emitter.StartRecord();
   emitter.SetString("Timestamp", "t3");
   emitter.SetString("ServiceName", "s3");
   emitter.EndRecord();
-  EXPECT_EQ(emitter.EmittedCount(), 3);
+  EXPECT_EQ(emitter.EmittedCount(), 2);  // Still 2, queued row not counted
 
   // Still only 1 emitted batch before Flush
   lua_getglobal(L_, "emitted");
@@ -482,4 +482,85 @@ TEST_F(LuaBridgeTest, EmitterConstructsCleanlyWithoutRedundantState) {
 }
 
 }  // namespace
+
+TEST_F(LuaBridgeTest, BatchModeEmittedCountExcludesFailedBatch) {
+  const char* error_script = R"(
+    function failing_emit(record)
+      error("emit failure")
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, error_script), LUA_OK);
+
+  lua_getglobal(L_, "failing_emit");
+  int fail_emit_idx = lua_gettop(L_);
+
+  LuaEmitter emitter(L_, fail_emit_idx, 3);
+  EXPECT_FALSE(emitter.HasError());
+
+  // Queue 3 rows with failing emit
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-1");
+  emitter.EndRecord();
+
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-2");
+  emitter.EndRecord();
+
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-3");
+  emitter.EndRecord();
+
+  // Batch should have failed; no rows delivered
+  EXPECT_TRUE(emitter.HasError());
+  EXPECT_EQ(emitter.EmittedCount(), 0);
+
+  lua_pop(L_, 1);  // pop failing_emit
+}
+
+TEST_F(LuaBridgeTest, BatchModeEmittedCountCountsOnlyDeliveredRows) {
+  const char* emit_script = R"(
+    function good_emit(record)
+      return record
+    end
+  )";
+  ASSERT_EQ(luaL_dostring(L_, emit_script), LUA_OK);
+
+  lua_getglobal(L_, "good_emit");
+  int emit_idx = lua_gettop(L_);
+
+  LuaEmitter emitter(L_, emit_idx, 3);
+
+  // Queue 3 rows (triggers first batch emit)
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-1");
+  emitter.EndRecord();
+
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-2");
+  emitter.EndRecord();
+
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-3");
+  emitter.EndRecord();
+
+  EXPECT_FALSE(emitter.HasError());
+  EXPECT_EQ(emitter.EmittedCount(), 3);
+
+  // Queue one more row (not yet delivered)
+  emitter.StartRecord();
+  emitter.SetString("ServiceName", "test-4");
+  emitter.EndRecord();
+
+  EXPECT_FALSE(emitter.HasError());
+  // Before flush, count should still be 3 (not 4)
+  EXPECT_EQ(emitter.EmittedCount(), 3);
+
+  // Flush delivers the 4th row
+  emitter.Flush();
+  EXPECT_FALSE(emitter.HasError());
+  EXPECT_EQ(emitter.EmittedCount(), 4);
+
+  lua_pop(L_, 1);  // pop good_emit
+}
+
 }  // namespace vector_otel::core
