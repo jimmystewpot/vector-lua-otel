@@ -173,9 +173,9 @@ std::string_view ReadTableStringView(lua_State* L, int table_idx, const char* na
     if (t == LUA_TSTRING) {
       size_t len = 0;
       const char* s = lua_tolstring(L, -1, &len);
-      std::string_view res(s, len);
+      scratch.assign(s, len);
       lua_pop(L, 1);
-      return res;
+      return std::string_view(scratch);
     }
     if (t == LUA_TNUMBER) {
       size_t len = 0;
@@ -688,7 +688,8 @@ std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::str
             if (lua_type(L, val_idx) == LUA_TSTRING) {
               size_t vlen = 0;
               const char* s = lua_tolstring(L, val_idx, &vlen);
-              service_name = std::string_view(s, vlen);
+              scratch.assign(s, vlen);
+              service_name = std::string_view(scratch);
             } else if (lua_istable(L, val_idx)) {
               std::string_view s =
                   ReadTableStringView(L, val_idx, "stringValue", "string_value", scratch);
@@ -708,7 +709,8 @@ std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::str
       if (lua_type(L, -1) == LUA_TSTRING) {
         size_t vlen = 0;
         const char* s = lua_tolstring(L, -1, &vlen);
-        service_name = std::string_view(s, vlen);
+        scratch.assign(s, vlen);
+        service_name = std::string_view(scratch);
       } else if (lua_istable(L, -1)) {
         std::string_view s = ReadTableStringView(L, -1, "stringValue", "string_value", scratch);
         if (!s.empty()) service_name = s;

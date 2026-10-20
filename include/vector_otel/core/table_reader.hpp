@@ -24,13 +24,12 @@ bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* n
 std::string ReadTableString(lua_State* L, int table_idx, const char* name1,
                             const char* name2 = nullptr, std::string_view default_val = "");
 
-// Zero-copy string field reader using raw table access (lua_rawget, no
-// metamethods). If the field is LUA_TSTRING, returns a view into the string
-// owned by the table. If LUA_TNUMBER, converts a stack copy into `scratch` and
-// returns a view into `scratch`. Otherwise returns `default_val`.
-// Lifetime contract: returned views are invalid if the source table is mutated
-// or collected (or if `scratch` is overwritten); callers are the Process*Table
-// functions, which hold the input table on the Lua stack.
+// String field reader using raw table access (lua_rawget, no metamethods).
+// Copies string fields into `scratch` and returns a view into `scratch`.
+// Otherwise returns `default_val`.
+// Lifetime contract: non-default results view `scratch`; valid until `scratch`
+// is reused; never borrows Lua memory. Callers must ensure no simultaneously-live
+// views share one `scratch`.
 std::string_view ReadTableStringView(lua_State* L, int table_idx, const char* name1,
                                      const char* name2, std::string& scratch,
                                      std::string_view default_val = "");
@@ -74,12 +73,10 @@ void CopyTableBody(lua_State* L, int rec_idx, FastJsonWriter& writer, LuaEmitter
 // "unknown_service".
 std::string ExtractTableServiceName(lua_State* L, int res_idx);
 
-// Zero-copy variant of ExtractTableServiceName (first service.name /
-// service_name wins; "unknown_service" default) without heap allocations when
-// the value is a string.
-// Lifetime contract: returned views are invalid if the source table is mutated
-// or collected (or if `scratch` is overwritten); callers are the Process*Table
-// functions, which hold the input table on the Lua stack.
+// Variant of ExtractTableServiceName (first service.name / service_name wins;
+// "unknown_service" default); copies string values into `scratch`.
+// Lifetime contract: non-default results view `scratch`; valid until `scratch`
+// is reused; never borrows Lua memory.
 std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::string& scratch);
 
 // Pushes a new flattened key-value table of attributes onto the Lua stack.
