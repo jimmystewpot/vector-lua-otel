@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "vector_otel/core/scratch.hpp"
@@ -55,6 +56,31 @@ TEST(ScratchTest, WorksForDouble) {
   v.push_back(3.25);
   EXPECT_EQ(v.size(), 1u);
   EXPECT_DOUBLE_EQ(v[0], 3.25);
+}
+
+TEST(ScratchTest, ResetScratchStringKeepsSmallCapacity) {
+  std::string s;
+  s.reserve(1024);
+  s.assign("abc");
+  ASSERT_GE(s.capacity(), 1024u);
+
+  ResetScratchString(s);
+
+  EXPECT_TRUE(s.empty());
+  EXPECT_GE(s.capacity(), 1024u);
+}
+
+TEST(ScratchTest, ResetScratchStringReleasesOversizedCapacity) {
+  std::string s;
+  // Assign more than kMaxScratchStringCapacity characters
+  std::string huge(kMaxScratchStringCapacity + 1, 'x');
+  s = huge;
+  ASSERT_GT(s.capacity(), kMaxScratchStringCapacity);
+
+  ResetScratchString(s);
+
+  EXPECT_TRUE(s.empty());
+  EXPECT_LT(s.capacity(), kMaxScratchStringCapacity);
 }
 
 }  // namespace
