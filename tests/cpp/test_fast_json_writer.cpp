@@ -168,7 +168,9 @@ TEST(FastJsonWriterTest, InitialReservationAndTrimOversizedBuffer) {
   EXPECT_GT(writer.Capacity(), core::FastJsonWriter::kMaxRetainedCapacity);
 
   writer.Trim();
-  EXPECT_LE(writer.Capacity(), 4096u);
+  // Allocators round reserve() up to a size class. This must still fail if
+  // Trim() stops shrinking (the preceding oversize step is >16 MiB).
+  EXPECT_LE(writer.Capacity(), 4096u + 64u);
   EXPECT_GE(writer.Capacity(), 4096u);
   EXPECT_EQ(writer.Str(), "");
 }
