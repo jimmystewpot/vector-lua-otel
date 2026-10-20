@@ -275,3 +275,82 @@ TEST_F(ModuleExportsTest, StandaloneSubmoduleOpeners) {
   lua_pop(L3, 2);
   lua_close(L3);
 }
+
+// Test for Lua memory error recovery (Task 5: re-entrancy guard survives OOM longjmp)
+TEST(ProcessLogsRecoversFromLuaMemoryErrorWithoutStickingReentrancyGuard,
+     OOMDuringExtractionDoesNotStickReentrancyFlag) {
+  const char* valid_payload =
+      R"({"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"svc"}}]},"scopeLogs":[{"scope":{"name":"s"},"logRecords":[{"timeUnixNano":"1293840000000000000","body":{"stringValue":"hello"}}]}]}]})";
+
+  struct Budget {
+    size_t remaining = 0;
+  };
+
+  // Sweep budget to find where OOM happens inside extraction
+  int found_stuck_budget = -1;
+  for (size_t budget = 0; budget < 3001; budget += (budget < 500 ? 1 : 7)) {
+    Budget budget_data{budget};
+    lua_State* L = lua_newstate(
+        [](void* ud, void* ptr, size_t osize, size_t nsize) -> void* {
+          Budget* b = static_cast<Budget*>(ud);
+          if (nsize == 0) {
+            free(ptr);
+            return nullptr;
+          }
+          if (nsize > osize) {
+            size_t grow = nsize - osize;
+            if (grow > b->remaining) return nullptr;
+            b->remaining -= grow;
+          }
+          return realloc(ptr, nsize);
+        },
+        &budget_data);
+
+    if (L == nullptr) continue;
+
+    luaL_openlibs(L);
+    const char* init = "function noop_emit(e) end";
+    if (luaL_dostring(L, init) != LUA_OK) {
+      lua_close(L);
+      continue;
+    }
+
+    if (luaopen_vector_otel(L) != 0) {
+      lua_close(L);
+      continue;
+    }
+    lua_setglobal(L, "vector_otel");
+
+    // First call with limited budget (may fail)
+    budget_data.remaining = budget;
+    lua_pushlstring(L, valid_payload, strlen(valid_payload));
+    lua_getglobal(L, "noop_emit");
+    lua_call(L, 2, 3);
+    lua_pop(L, 3);
+
+    // Second call with unlimited budget
+    budget_data.remaining = SIZE_MAX;
+    lua_gc(L, LUA_GCCOLLECT, 0);
+
+    lua_pushlstring(L, valid_payload, strlen(valid_payload));
+    lua_getglobal(L, "noop_emit");
+    lua_call(L, 2, 3);
+
+    // Check result
+    bool is_nil = lua_isnil(L, -3);
+    const char* err_msg = lua_tostring(L, -2);
+    bool is_reentrancy_error = err_msg && strstr(err_msg, "re-entrant");
+
+    if (is_nil && is_reentrancy_error && found_stuck_budget < 0) {
+      found_stuck_budget = budget;
+      printf("FOUND STUCK BUDGET: %zu\n", budget);
+    }
+
+    lua_pop(L, 3);
+    lua_close(L);
+  }
+
+  if (found_stuck_budget >= 0) {
+    FAIL() << "Re-entrancy guard stuck at budget=" << found_stuck_budget;
+  }
+}
