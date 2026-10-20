@@ -1801,15 +1801,12 @@ TEST_F(TableModeTest, ReadTableStringViewReturnsZeroCopyView) {
   ASSERT_EQ(luaL_dostring(L_, "return { name = 'zero_copy_payload' }"), LUA_OK);
   int top_before = lua_gettop(L_);
 
-  lua_getfield(L_, -1, "name");
-  const char* expected_ptr = lua_tolstring(L_, -1, nullptr);
-  lua_pop(L_, 1);
-
   std::string scratch;
   std::string_view sv = core::ReadTableStringView(L_, -1, "name", nullptr, scratch, "default");
   EXPECT_EQ(sv, "zero_copy_payload");
-  EXPECT_EQ(sv.data(), expected_ptr);
-  EXPECT_TRUE(scratch.empty());
+  // New contract: result views scratch, never Lua memory
+  EXPECT_EQ(sv.data(), scratch.data());
+  EXPECT_FALSE(scratch.empty());
   EXPECT_EQ(lua_gettop(L_), top_before);
 
   lua_pop(L_, 1);
@@ -1911,6 +1908,160 @@ TEST_F(TableModeTest, ExtractTableServiceNameViewMatchesStringVariant) {
     EXPECT_EQ(lua_gettop(L_), top_before);
     lua_pop(L_, 1);
   }
+}
+
+// Table-mode views must not borrow Lua memory: an emit callback may mutate the caller's input
+// table and run GC while later records of the same resource/scope/metric are still pending.
+TEST_F(TableModeTest, TableModeLogsStringsSurviveInputMutationInEmit) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    uaf_emitted = {}
+    payload = {
+      resourceLogs = { {
+        resource = { attributes = { { key = "service.name",
+                                      value = { stringValue = string.rep("S", 80) } } } },
+        scopeLogs = { {
+          scope = { name = string.rep("N", 80), version = string.rep("V", 80) },
+          logRecords = {
+            { timeUnixNano = 1, body = { stringValue = "a" } },
+            { timeUnixNano = 2, body = { stringValue = "b" } },
+            { timeUnixNano = 3, body = { stringValue = "c" } },
+          } } } } } }
+    function uaf_cb(event)
+      uaf_emitted[#uaf_emitted + 1] = event
+      payload.resourceLogs[1].resource.attributes = nil
+      payload.resourceLogs[1].scopeLogs[1].scope.name = nil
+      payload.resourceLogs[1].scopeLogs[1].scope.version = nil
+      collectgarbage("collect")
+      collectgarbage("collect")
+      for i = 1, 200 do local _ = string.rep("x", 80) .. i end
+    end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "uaf_cb");
+  const int cb_idx = lua_gettop(L_);
+  lua_getglobal(L_, "payload");
+  const int table_idx = lua_gettop(L_);
+
+  auto res = extractors::ProcessLogsTable(L_, table_idx, cb_idx);
+  lua_pop(L_, 2);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 3);
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#uaf_emitted == 3, "expected 3 events, got " .. #uaf_emitted)
+    for i = 1, 3 do
+      local r = uaf_emitted[i].log
+      assert(r.ServiceName == string.rep("S", 80), "ServiceName " .. i .. ": " .. tostring(r.ServiceName))
+      assert(r.ScopeName == string.rep("N", 80), "ScopeName " .. i .. ": " .. tostring(r.ScopeName))
+      assert(r.ScopeVersion == string.rep("V", 80), "ScopeVersion " .. i .. ": " .. tostring(r.ScopeVersion))
+    end
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
+TEST_F(TableModeTest, TableModeTracesStringsSurviveInputMutationInEmit) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    uaf_emitted = {}
+    payload = {
+      resourceSpans = { {
+        resource = { attributes = { { key = "service.name",
+                                      value = { stringValue = string.rep("S", 80) } } } },
+        scopeSpans = { {
+          scope = { name = string.rep("N", 80), version = string.rep("V", 80) },
+          spans = {
+            { traceId = "0123456789abcdef0123456789abcdef", spanId = "0123456789abcde1" },
+            { traceId = "0123456789abcdef0123456789abcdef", spanId = "0123456789abcde2" },
+            { traceId = "0123456789abcdef0123456789abcdef", spanId = "0123456789abcde3" },
+          } } } } } }
+    function uaf_cb(event)
+      uaf_emitted[#uaf_emitted + 1] = event
+      payload.resourceSpans[1].resource.attributes = nil
+      payload.resourceSpans[1].scopeSpans[1].scope.name = nil
+      payload.resourceSpans[1].scopeSpans[1].scope.version = nil
+      collectgarbage("collect")
+      collectgarbage("collect")
+      for i = 1, 200 do local _ = string.rep("x", 80) .. i end
+    end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "uaf_cb");
+  const int cb_idx = lua_gettop(L_);
+  lua_getglobal(L_, "payload");
+  const int table_idx = lua_gettop(L_);
+
+  auto res = extractors::ProcessTracesTable(L_, table_idx, cb_idx);
+  lua_pop(L_, 2);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 3);
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#uaf_emitted == 3, "expected 3 events, got " .. #uaf_emitted)
+    for i = 1, 3 do
+      local r = uaf_emitted[i].log
+      assert(r.ServiceName == string.rep("S", 80), "ServiceName " .. i .. ": " .. tostring(r.ServiceName))
+      assert(r.ScopeName == string.rep("N", 80), "ScopeName " .. i .. ": " .. tostring(r.ScopeName))
+      assert(r.ScopeVersion == string.rep("V", 80), "ScopeVersion " .. i .. ": " .. tostring(r.ScopeVersion))
+    end
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
+TEST_F(TableModeTest, TableModeMetricStringsSurviveInputMutationInEmit) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    uaf_emitted = {}
+    payload = {
+      resourceMetrics = { {
+        resource = { attributes = { { key = "service.name",
+                                      value = { stringValue = string.rep("S", 80) } } } },
+        scopeMetrics = { {
+          scope = { name = string.rep("N", 80), version = string.rep("V", 80) },
+          metrics = { {
+            name = string.rep("M", 80),
+            description = string.rep("D", 80),
+            unit = string.rep("U", 80),
+            gauge = { dataPoints = {
+              { timeUnixNano = 1, asInt = 1 },
+              { timeUnixNano = 2, asInt = 2 },
+              { timeUnixNano = 3, asInt = 3 },
+            } } } } } } } } }
+    function uaf_cb(event)
+      uaf_emitted[#uaf_emitted + 1] = event
+      local rm = payload.resourceMetrics[1]
+      rm.resource.attributes = nil
+      rm.scopeMetrics[1].scope.name = nil
+      rm.scopeMetrics[1].scope.version = nil
+      rm.scopeMetrics[1].metrics[1].name = nil
+      rm.scopeMetrics[1].metrics[1].description = nil
+      rm.scopeMetrics[1].metrics[1].unit = nil
+      collectgarbage("collect")
+      collectgarbage("collect")
+      for i = 1, 200 do local _ = string.rep("x", 80) .. i end
+    end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "uaf_cb");
+  const int cb_idx = lua_gettop(L_);
+  lua_getglobal(L_, "payload");
+  const int table_idx = lua_gettop(L_);
+
+  auto res = extractors::ProcessMetricsTable(L_, table_idx, cb_idx);
+  lua_pop(L_, 2);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 3);
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#uaf_emitted == 3, "expected 3 events, got " .. #uaf_emitted)
+    for i = 1, 3 do
+      local r = uaf_emitted[i].log
+      assert(r.ServiceName == string.rep("S", 80), "ServiceName " .. i .. ": " .. tostring(r.ServiceName))
+      assert(r.ScopeName == string.rep("N", 80), "ScopeName " .. i .. ": " .. tostring(r.ScopeName))
+      assert(r.ScopeVersion == string.rep("V", 80), "ScopeVersion " .. i .. ": " .. tostring(r.ScopeVersion))
+      assert(r.MetricName == string.rep("M", 80), "MetricName " .. i .. ": " .. tostring(r.MetricName))
+      assert(r.MetricDescription == string.rep("D", 80), "MetricDescription " .. i)
+      assert(r.MetricUnit == string.rep("U", 80), "MetricUnit " .. i)
+    end
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
 }
 
 }  // namespace

@@ -594,17 +594,12 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
         lua_settop(L, top);
       }
       writer.Trim();
-      auto trim_scratch = [](std::string& s) noexcept {
-        if (s.capacity() > 4096) {
-          std::string().swap(s);
-        }
-      };
-      trim_scratch(tls_service_scratch);
-      trim_scratch(tls_scope_name_scratch);
-      trim_scratch(tls_scope_ver_scratch);
-      trim_scratch(tls_metric_name_scratch);
-      trim_scratch(tls_metric_desc_scratch);
-      trim_scratch(tls_metric_unit_scratch);
+      core::ResetScratchString(tls_service_scratch);
+      core::ResetScratchString(tls_scope_name_scratch);
+      core::ResetScratchString(tls_scope_ver_scratch);
+      core::ResetScratchString(tls_metric_name_scratch);
+      core::ResetScratchString(tls_metric_desc_scratch);
+      core::ResetScratchString(tls_metric_unit_scratch);
     }
     lua_State* L;
     int top;

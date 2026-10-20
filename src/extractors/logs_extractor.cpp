@@ -14,6 +14,7 @@ extern "C" {
 #include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/parser.hpp"
+#include "vector_otel/core/scratch.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
@@ -431,16 +432,11 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
         lua_settop(L, top);
       }
       writer.Trim();
-      auto trim_scratch = [](std::string& s) noexcept {
-        if (s.capacity() > 4096) {
-          std::string().swap(s);
-        }
-      };
-      trim_scratch(tls_res_schema_scratch);
-      trim_scratch(tls_service_scratch);
-      trim_scratch(tls_scope_schema_scratch);
-      trim_scratch(tls_scope_name_scratch);
-      trim_scratch(tls_scope_ver_scratch);
+      core::ResetScratchString(tls_res_schema_scratch);
+      core::ResetScratchString(tls_service_scratch);
+      core::ResetScratchString(tls_scope_schema_scratch);
+      core::ResetScratchString(tls_scope_name_scratch);
+      core::ResetScratchString(tls_scope_ver_scratch);
     }
     lua_State* L;
     int top;
