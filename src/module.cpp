@@ -18,9 +18,7 @@ namespace {
 namespace core = vector_otel::core;
 namespace extractors = vector_otel::extractors;
 
-using ExtractorStringFn = extractors::ExtractionResult (*)(lua_State*,
-                                                           std::string_view,
-                                                           int);
+using ExtractorStringFn = extractors::ExtractionResult (*)(lua_State*, std::string_view, int);
 using ExtractorTableFn = extractors::ExtractionResult (*)(lua_State*, int, int);
 
 thread_local bool tls_active_extraction = false;
@@ -37,8 +35,7 @@ int ProcessDispatcher(lua_State* L) {
   try {
     if (tls_active_extraction) [[unlikely]] {
       lua_pushnil(L);
-      lua_pushstring(
-          L, "re-entrant vector_otel.process() invocation is not permitted");
+      lua_pushstring(L, "re-entrant vector_otel.process() invocation is not permitted");
       lua_pushinteger(L, 0);
       return 3;
     }
@@ -97,18 +94,15 @@ int ProcessDispatcher(lua_State* L) {
 }
 
 int ProcessLogs(lua_State* L) {
-  return ProcessDispatcher<extractors::ProcessLogs,
-                           extractors::ProcessLogsTable>(L);
+  return ProcessDispatcher<extractors::ProcessLogs, extractors::ProcessLogsTable>(L);
 }
 
 int ProcessTraces(lua_State* L) {
-  return ProcessDispatcher<extractors::ProcessTraces,
-                           extractors::ProcessTracesTable>(L);
+  return ProcessDispatcher<extractors::ProcessTraces, extractors::ProcessTracesTable>(L);
 }
 
 int ProcessMetrics(lua_State* L) {
-  return ProcessDispatcher<extractors::ProcessMetrics,
-                           extractors::ProcessMetricsTable>(L);
+  return ProcessDispatcher<extractors::ProcessMetrics, extractors::ProcessMetricsTable>(L);
 }
 
 void RegisterInPackageLoaded(lua_State* L, const char* name, int table_idx) {

@@ -268,9 +268,8 @@ TEST_F(TracesExtractorTest, EmptyAndMissingBatches) {
   EXPECT_EQ(r2.emitted_count, 0);
 
   // 3. ResourceSpans with empty scopeSpans
-  auto r3 = ProcessTraces(
-      L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}",
-      emit_idx_);
+  auto r3 =
+      ProcessTraces(L_, "{\"resourceSpans\": [{\"resource\": {}, \"scopeSpans\": []}]}", emit_idx_);
   EXPECT_TRUE(r3.success);
   EXPECT_EQ(r3.emitted_count, 0);
 
@@ -413,8 +412,7 @@ TEST_F(TracesExtractorTest, DurationInt64OverflowClamped) {
     assert(r.Duration > 0, "Duration must not underflow to negative: " .. tostring(r.Duration))
     assert(r.Duration == math.maxinteger, "Duration must be clamped to INT64_MAX: " .. tostring(r.Duration))
   )";
-  EXPECT_EQ(luaL_dostring(L_, verify_json_script), LUA_OK)
-      << lua_tostring(L_, -1);
+  EXPECT_EQ(luaL_dostring(L_, verify_json_script), LUA_OK) << lua_tostring(L_, -1);
 
   // Clear emitted table for table mode verification
   ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
@@ -454,12 +452,10 @@ TEST_F(TracesExtractorTest, DurationInt64OverflowClamped) {
     assert(r.Duration > 0, "Duration must not underflow to negative: " .. tostring(r.Duration))
     assert(r.Duration == math.maxinteger, "Duration must be clamped to INT64_MAX: " .. tostring(r.Duration))
   )";
-  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK)
-      << lua_tostring(L_, -1);
+  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
-TEST_F(TracesExtractorTest,
-       ProcessTracesTablePreservesLuaStackDepthOnNestedWrapperAndError) {
+TEST_F(TracesExtractorTest, ProcessTracesTablePreservesLuaStackDepthOnNestedWrapperAndError) {
   // 1. Nested { trace = { resourceSpans = { ... } } }
   const char* trace_wrapper_script = R"(
     return {
@@ -924,8 +920,7 @@ TEST_F(TracesExtractorTest, SpanDurationCalculationEdgeCases) {
     assert(emitted[3].log.Duration == 0, "Table mode start == end must yield Duration 0")
     assert(emitted[4].log.Duration == 500, "Table mode normal delta mismatch")
   )";
-  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK)
-      << lua_tostring(L_, -1);
+  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
 TEST_F(TracesExtractorTest, MalformedJsonAndInvalidSchemaFieldHandling) {
@@ -941,8 +936,7 @@ TEST_F(TracesExtractorTest, MalformedJsonAndInvalidSchemaFieldHandling) {
   EXPECT_EQ(r1b.emitted_count, 0);
 
   // 2. resourceSpans is not an array
-  auto r2 =
-      ProcessTraces(L_, "{\"resourceSpans\": \"not_an_array\"}", emit_idx_);
+  auto r2 = ProcessTraces(L_, "{\"resourceSpans\": \"not_an_array\"}", emit_idx_);
   EXPECT_FALSE(r2.success);
   EXPECT_FALSE(r2.error.empty());
 
@@ -969,8 +963,7 @@ TEST_F(TracesExtractorTest, MalformedJsonAndInvalidSchemaFieldHandling) {
   EXPECT_EQ(r3.emitted_count, 1);
 
   // 4. scopeSpans is not an array
-  auto r4 = ProcessTraces(L_, "{\"resourceSpans\": [{\"scopeSpans\": 999}]}",
-                          emit_idx_);
+  auto r4 = ProcessTraces(L_, "{\"resourceSpans\": [{\"scopeSpans\": 999}]}", emit_idx_);
   EXPECT_FALSE(r4.success);
   EXPECT_FALSE(r4.error.empty());
 
@@ -992,9 +985,8 @@ TEST_F(TracesExtractorTest, MalformedJsonAndInvalidSchemaFieldHandling) {
   EXPECT_EQ(r5.emitted_count, 1);
 
   // 6. spans is not an array
-  auto r6 = ProcessTraces(
-      L_, "{\"resourceSpans\": [{\"scopeSpans\": [{\"spans\": \"invalid\"}]}]}",
-      emit_idx_);
+  auto r6 = ProcessTraces(L_, "{\"resourceSpans\": [{\"scopeSpans\": [{\"spans\": \"invalid\"}]}]}",
+                          emit_idx_);
   EXPECT_FALSE(r6.success);
   EXPECT_FALSE(r6.error.empty());
 
@@ -1226,8 +1218,7 @@ TEST_F(TracesExtractorTest, SpanKindVariantsAndTableModeComprehensive) {
     assert(s2.StatusCode == "STATUS_CODE_ERROR")
     assert(s2.StatusMessage == "table err")
   )";
-  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK)
-      << lua_tostring(L_, -1);
+  EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
 TEST_F(TracesExtractorTest, EventsFieldOrderDoesNotChangeOutput) {
@@ -1547,8 +1538,7 @@ TEST_F(TracesExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
-TEST_F(TracesExtractorTest,
-       DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderGc) {
+TEST_F(TracesExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderGc) {
   const char* gc_emit_script = R"(
     uaf_emitted = {}
     function uaf_gc_emit(event)

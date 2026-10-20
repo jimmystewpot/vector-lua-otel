@@ -15,8 +15,7 @@ struct ExtractionResult {
   int emitted_count{0};
 };
 
-ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json,
-                             int emit_idx);
+ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_idx);
 ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx);
 
 }  // namespace vector_otel::extractors
