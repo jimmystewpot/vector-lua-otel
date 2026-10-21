@@ -8,7 +8,7 @@ set -euo pipefail
 # Dependency configuration table (one place, reused for all ops)
 # Format: NAME|UPSTREAM_URL|ALLOWLIST|LICENSE
 declare -a DEPS=(
-  "simdjson|https://github.com/simdjson/simdjson.git|CMakeLists.txt cmake/ include/ src/ LICENSE LICENSE-MIT|Apache-2.0/MIT"
+  "simdjson|https://github.com/simdjson/simdjson.git|CMakeLists.txt simdjson.pc.in cmake/ include/ src/ LICENSE LICENSE-MIT|Apache-2.0/MIT"
   "googletest|https://github.com/google/googletest.git|CMakeLists.txt googletest/CMakeLists.txt googletest/cmake/ googletest/include/ googletest/src/ LICENSE|BSD-3-Clause"
 )
 
