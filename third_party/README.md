@@ -28,8 +28,8 @@ Each dependency has a `VENDOR.md` file documenting upstream source, tag, commit 
 **Dependabot cannot track these dependencies.** Manual updates are required:
 1. Run `bash scripts/vendor_deps.sh <dep> <tag>` to fetch and vendor a new version
 2. Verify changes: `git diff --stat third_party/`
-3. Commit: two commits (script + dependencies) per the design spec
-4. After CMake is updated to use vendored trees (Task 3), run the offline build test
+3. Commit the regenerated `third_party/<dep>` tree; the script itself changes in a separate commit
+4. Run the offline build test: `bash scripts/verify_offline_build.sh`
 
 ## Updating a dependency
 
@@ -37,7 +37,7 @@ To update simdjson to a newer tag:
 
 ```bash
 bash scripts/vendor_deps.sh simdjson v5.1.0
-git add scripts/vendor_deps.sh third_party/simdjson
+git add third_party/simdjson
 git commit -m "build: vendor simdjson 5.1.0"
 ```
 

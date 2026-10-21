@@ -135,9 +135,9 @@ Benchmarked on Linux x86-64 (16 cores) using Vector 0.59.0 and a 100,000-record 
 | Component | Minimum Version | Description |
 |:---|:---|:---|
 | **C++ Compiler** | GCC 10+ / Clang 11+ | Must support `-std=c++20` |
-| **CMake** | 3.20+ | Build configuration and `FetchContent` manager |
+| **CMake** | 3.20+ | Build configuration |
 | **Lua** | 5.4 (`liblua5.4-dev`) | Header files for Lua 5.4 C API |
-| **simdjson** | 5.0.5 | Pinned via CMake `FetchContent` (no manual install needed) |
+| **simdjson** | 5.0.5 | Vendored under `third_party/` (no download, no manual install) |
 | **Vector** | 0.38.0+ (0.59.0+ tested) | DataDog Vector with Lua v2 transform support |
 | **LuaRocks** | 3.0+ *(optional)* | For rockspec-based automated package installations |
 
@@ -176,6 +176,45 @@ build/vector_otel.so
 ```
 
 > **Note on Symbol Resolution:** `vector_otel.so` is built as a CMake `MODULE` library and does not link `liblua5.4.so`. When loaded inside Vector, all Lua C API symbols (`lua_*`, `luaL_*`) are resolved dynamically from the host Vector executable. Standalone tests (`vector_otel_tests`) link `liblua5.4.so` for standalone execution.
+
+### Offline Builds
+
+The repository vendors third-party dependencies (`simdjson` 5.0.5 and `googletest` 1.14.0) under `third_party/`, enabling offline builds on Ubuntu 22.04 (CMake 3.22, GCC 11) without any network access after cloning.
+
+**Requirements for offline builds:**
+- C++ Compiler (GCC 10+ or Clang 11+)
+- CMake ≥ 3.20
+- `liblua5.4-dev` and `lua5.4`
+- Docker (for verification)
+
+**Verify offline build capability** (requires Docker):
+```bash
+bash scripts/verify_offline_build.sh
+```
+This script builds and tests in an isolated Ubuntu 22.04 container with no network access. Expected output: `OFFLINE BUILD OK`.
+
+For custom Docker mount paths (e.g., on Docker Desktop):
+```bash
+OFFLINE_TMPDIR=/path/to/mount bash scripts/verify_offline_build.sh
+```
+
+**Check vendored integrity** (offline, no network required):
+```bash
+bash scripts/vendor_deps.sh --verify
+```
+
+**Update a dependency** (e.g., simdjson to a newer version):
+```bash
+bash scripts/vendor_deps.sh simdjson v5.1.0
+git add third_party/simdjson
+git commit -m "build: vendor simdjson 5.1.0"
+```
+
+See [`third_party/README.md`](third_party/README.md) for more details on vendored components and updating procedures.
+
+**Vendored components and licenses:**
+- **simdjson** v5.0.5: Apache License 2.0 / MIT (dual-licensed)
+- **googletest** v1.14.0: BSD 3-Clause License
 
 ### LuaRocks Installation
 

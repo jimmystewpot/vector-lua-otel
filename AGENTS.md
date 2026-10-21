@@ -49,6 +49,12 @@ Every modification to this repository **must** strictly adhere to the following 
    - Modifying `package.cpath` and calling `require("vector_otel")` must occur strictly in the top-level `source:` block.
    - **Never** call `require()` or alter `package.cpath` inside `hooks.process`. This would trigger repetitive module table initialisation and cause memory leaks.
 
+8. **No Network Access in Build or Test**:
+   - **No build or test step may require network access.** All third-party dependencies are vendored under `third_party/` and must only be changed via `scripts/vendor_deps.sh`.
+   - Do not hand-edit or manually patch vendored files; use `scripts/vendor_deps.sh` to refresh a dependency.
+   - Changes must pass `bash scripts/vendor_deps.sh --verify` (verify checksums match).
+   - Do not reintroduce `FetchContent_Declare`, `FetchContent_MakeAvailable`, or `ExternalProject` commands that fetch from the network.
+
 ---
 
 ## 2. Coding & Formatting Standards
@@ -92,8 +98,17 @@ Every modification to this repository **must** strictly adhere to the following 
 .
 ├── CMakeLists.txt                      # Top-level build configuration
 ├── cmake/
-│   ├── simdjson.cmake                  # FetchContent for simdjson 5.0.5
-│   └── googletest.cmake                # FetchContent for GoogleTest
+│   ├── simdjson.cmake                  # add_subdirectory(third_party/simdjson)
+│   └── googletest.cmake                # add_subdirectory(third_party/googletest)
+├── third_party/                        # Vendored dependencies (no network required)
+│   ├── simdjson/                       # simdjson 5.0.5 with VENDOR.md
+│   ├── googletest/                     # googletest 1.14.0 with VENDOR.md
+│   └── README.md                       # Vendoring guide and license compliance
+├── scripts/
+│   ├── vendor_deps.sh                  # Fetch and vendor a dependency; verify checksums
+│   ├── verify_offline_build.sh         # Test offline build in Docker container
+│   └── offline/Dockerfile              # Ubuntu 22.04 verification environment
+├── .gitattributes                      # Binary/text attributes for vendored trees
 ├── include/vector_otel/
 │   ├── core/
 │   │   ├── fast_json_writer.hpp        # Allocation-free JSON serialiser
@@ -160,8 +175,16 @@ vector validate --no-environment tests/vector/vector_test.yaml
 find include src tests/cpp -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
 ```
 **Expected**: Clean format with 0 errors.
+*(Note: `third_party/` is excluded from formatting as vendored code should not be modified.)*
 
-### Step 5: Sanitiser Run (Optional)
+### Step 5: Offline Build Verification (Optional)
+```bash
+bash scripts/verify_offline_build.sh
+```
+**Expected**: `OFFLINE BUILD OK` (requires Docker).
+This step verifies that the build works with no network access in an isolated Ubuntu 22.04 container.
+
+### Step 6: Sanitiser Run (Optional)
 ```bash
 cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
 cmake --build build-asan -j$(nproc)
