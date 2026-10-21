@@ -1,0 +1,5 @@
+third_party/** -text linguist-vendored linguist-generated
+
+# Scripts and Dockerfiles must keep LF endings, also on autocrlf checkouts
+*.sh text eol=lf
+Dockerfile text eol=lf
