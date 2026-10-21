@@ -1,4 +1,16 @@
 #!/bin/bash
+# Offline build verification harness for Ubuntu 22.04
+# Usage: bash scripts/verify_offline_build.sh [--allow-network]
+#
+# Note: On macOS, /tmp is not shared with Docker. By default, this script uses
+# $HOME/tmp. To override, set OFFLINE_TMPDIR before running:
+#   OFFLINE_TMPDIR=/path/to/shared/dir bash scripts/verify_offline_build.sh
+#
+# Exit codes:
+#   0 = all checks passed
+#   1 = check failed
+#   2 = usage error
+
 set -euo pipefail
 
 # Resolve repo root from script location
@@ -32,10 +44,13 @@ build_image() {
 
 export_tree() {
   echo "=== Exporting clean tree ===" >&2
-  # Create temp directory in /Users for Docker compatibility on macOS
+  # Create temp directory using portable mktemp
+  # On macOS, /tmp is not shared with Docker, so default to $HOME/tmp
+  # Can override with OFFLINE_TMPDIR environment variable
   local EXPORT_DIR
-  EXPORT_DIR="/Users/jlamb/.docker_temp_$$_tmp_rovo_$(date +%s%N)"
-  mkdir -p "$EXPORT_DIR"
+  local tmpdir="${OFFLINE_TMPDIR:-$HOME/tmp}"
+  mkdir -p "$tmpdir"
+  EXPORT_DIR=$(mktemp -d "$tmpdir/tmp_rovo_offline.XXXXXX")
   echo "Export directory: $EXPORT_DIR" >&2
   
   # Copy tracked and untracked files (excluding ignored)
@@ -52,21 +67,17 @@ run_container() {
   
   echo "=== Running container ==="
   
-  if [[ "$ALLOW_NETWORK" == "true" ]]; then
-    docker run --rm \
-      -v "$tmp_dir:/src" \
-      -w /src \
-      vector-otel-offline \
-      bash -euo pipefail -c 'set -euo pipefail
+  # Container command script (run once, shared between both branches)
+  local container_script
+  read -r -d '' container_script << 'CONTAINER_SCRIPT_EOF' || true
+set -euo pipefail
 echo "=== CMake Configure ==="
-cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja 2>&1 | tee configure.log
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_QUIET=OFF -GNinja 2>&1 | tee configure.log
 echo "=== Building ==="
 cmake --build build
 echo "=== Running CTest ==="
 ctest --test-dir build --output-on-failure
 echo "=== Running Lua Tests ==="
-bash tests/lua/run_tests.sh
-echo "=== Checking Memory Delta ==="
 bash tests/lua/run_tests.sh 2>&1 | tee lua_test.log
 if ! grep -q "Memory Delta: 0.00 KB" lua_test.log; then
   echo "ERROR: Memory leaks detected" >&2
@@ -79,47 +90,36 @@ if readelf -d build/vector_otel.so | grep -q liblua; then
   echo "ERROR: vector_otel.so incorrectly links to liblua" >&2
   exit 1
 fi
-echo "=== Checking for Network Activity in Configure ==="
-if grep -qiE "git clone|Downloading|FetchContent" configure.log; then
-  echo "ERROR: Network activity detected in configure log" >&2
+echo "=== Checking for Download Activity ==="
+if grep -qiE "Populating|Cloning into|git clone|Downloading|FetchContent_" configure.log; then
+  echo "ERROR: Download activity detected in configure log" >&2
   exit 1
 fi
-echo "OFFLINE BUILD OK"'
-  else
-    docker run --rm \
-      --network none \
-      -v "$tmp_dir:/src" \
-      -w /src \
-      vector-otel-offline \
-      bash -euo pipefail -c 'set -euo pipefail
-echo "=== CMake Configure ==="
-cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja 2>&1 | tee configure.log
-echo "=== Building ==="
-cmake --build build
-echo "=== Running CTest ==="
-ctest --test-dir build --output-on-failure
-echo "=== Running Lua Tests ==="
-bash tests/lua/run_tests.sh
-echo "=== Checking Memory Delta ==="
-bash tests/lua/run_tests.sh 2>&1 | tee lua_test.log
-if ! grep -q "Memory Delta: 0.00 KB" lua_test.log; then
-  echo "ERROR: Memory leaks detected" >&2
+if [[ -d build/_deps ]]; then
+  echo "ERROR: Found build/_deps directory (FetchContent downloaded dependencies)" >&2
   exit 1
 fi
-echo "=== Checking Formatting ==="
-find include src tests/cpp -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
-echo "=== Checking Symbol Dependencies ==="
-if readelf -d build/vector_otel.so | grep -q liblua; then
-  echo "ERROR: vector_otel.so incorrectly links to liblua" >&2
-  exit 1
-fi
-echo "=== Checking for Network Activity in Configure ==="
-if grep -qiE "git clone|Downloading|FetchContent" configure.log; then
-  echo "ERROR: Network activity detected in configure log" >&2
-  exit 1
-fi
-echo "OFFLINE BUILD OK"'
+echo "OFFLINE BUILD OK"
+CONTAINER_SCRIPT_EOF
+  
+  # Build Docker run args (order matters: flags before image name)
+  local -a docker_args=(--rm)
+  
+  # On Linux CI, set user to avoid permission issues on cleanup
+  if [[ "$(uname)" == "Linux" ]]; then
+    docker_args+=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
   fi
+  
+  # Add network restriction if not allowed
+  if [[ "$ALLOW_NETWORK" != "true" ]]; then
+    docker_args+=(--network none)
+  fi
+  
+  # Add mount and working directory (must come after flags, before image)
+  docker_args+=(-v "$tmp_dir:/src" -w /src vector-otel-offline)
+  
+  # Run container with script
+  docker run "${docker_args[@]}" bash -euo pipefail -c "$container_script"
 }
 
 # ============================================================================
