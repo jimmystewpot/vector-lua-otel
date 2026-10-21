@@ -65,7 +65,7 @@ run_container() {
   read -r -d '' container_script << 'CONTAINER_SCRIPT_EOF' || true
 set -euo pipefail
 echo "=== CMake Configure ==="
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_QUIET=OFF -GNinja 2>&1 | tee configure.log
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_QUIET=OFF --no-warn-unused-cli -GNinja 2>&1 | tee configure.log
 echo "=== Building ==="
 cmake --build build
 echo "=== Running CTest ==="
