@@ -119,7 +119,12 @@ CONTAINER_SCRIPT_EOF
 # Host-side pre-checks
 # ============================================================================
 
-# (Placeholder for Task 4: scripts/vendor_deps.sh --verify will go here)
+# Verify vendored dependencies before building in container
+echo "=== Verifying vendored dependencies ==="
+if ! bash "$REPO_ROOT/scripts/vendor_deps.sh" --verify; then
+  echo "ERROR: Vendored dependency verification failed" >&2
+  exit 1
+fi
 
 # ============================================================================
 # Main flow

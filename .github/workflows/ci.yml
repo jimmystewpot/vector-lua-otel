@@ -51,6 +51,7 @@ jobs:
             g++
 
       - name: Check formatting
+        # Note: vendored code under third_party/ is deliberately not formatted
         run: find include src tests/cpp -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
 
       - name: Configure and build with CMake
@@ -175,7 +176,8 @@ jobs:
           gcovr --xml-pretty -o build/cobertura.xml -r . \
             --exclude "tests/.*" \
             --exclude "build/.*" \
-            --exclude "cmake/.*"
+            --exclude "cmake/.*" \
+            --exclude "third_party/.*"
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
@@ -183,3 +185,14 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: jimmystewpot/vector-lua-otel
           files: build/cobertura.xml
+
+  offline-build:
+    name: Offline Build (Ubuntu 22.04)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Verify offline build
+        run: bash scripts/verify_offline_build.sh
