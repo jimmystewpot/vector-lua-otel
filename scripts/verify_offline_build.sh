@@ -43,23 +43,16 @@ build_image() {
 }
 
 export_tree() {
+  local export_dir="$1"
+  
   echo "=== Exporting clean tree ===" >&2
-  # Create temp directory using portable mktemp
-  # On macOS, /tmp is not shared with Docker, so default to $HOME/tmp
-  # Can override with OFFLINE_TMPDIR environment variable
-  local EXPORT_DIR
-  local tmpdir="${OFFLINE_TMPDIR:-$HOME/tmp}"
-  mkdir -p "$tmpdir"
-  EXPORT_DIR=$(mktemp -d "$tmpdir/tmp_rovo_offline.XXXXXX")
-  echo "Export directory: $EXPORT_DIR" >&2
+  echo "Export directory: $export_dir" >&2
   
   # Copy tracked and untracked files (excluding ignored)
   while IFS= read -r file; do
-    mkdir -p "$EXPORT_DIR/$(dirname "$file")"
-    cp "$REPO_ROOT/$file" "$EXPORT_DIR/$file"
+    mkdir -p "$export_dir/$(dirname "$file")"
+    cp "$REPO_ROOT/$file" "$export_dir/$file"
   done < <(git -C "$REPO_ROOT" ls-files -co --exclude-standard)
-  
-  printf "%s\n" "$EXPORT_DIR"
 }
 
 run_container() {
@@ -132,9 +125,18 @@ CONTAINER_SCRIPT_EOF
 # Main flow
 # ============================================================================
 
-# Create temp directory
-TEMP_DIR=$(export_tree)
+# Create temp directory using portable mktemp
+# On macOS, /tmp is not shared with Docker, so default to $HOME/tmp
+# Can override with OFFLINE_TMPDIR environment variable
+tmpdir="${OFFLINE_TMPDIR:-$HOME/tmp}"
+mkdir -p "$tmpdir"
+TEMP_DIR=$(mktemp -d "$tmpdir/tmp_rovo_offline.XXXXXX")
+
+# Install cleanup trap immediately after creating the directory
 trap "rm -rf '$TEMP_DIR'" EXIT
+
+# Export the clean tree
+export_tree "$TEMP_DIR"
 
 # Build Docker image
 build_image
