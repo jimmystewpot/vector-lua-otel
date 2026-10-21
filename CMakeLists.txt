@@ -31,6 +31,12 @@ endif()
 
 find_package(Lua 5.4 REQUIRED)
 
+# All dependencies are vendored under third_party/ and built with
+# add_subdirectory. This setting guarantees FetchContent can never reach the
+# network. An un-vendored FetchContent dependency is skipped (CMake < 3.30) or
+# rejected (CMP0170 NEW) and shows up as a missing target at link time.
+set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "" FORCE)
+
 include(cmake/simdjson.cmake)
 include(cmake/googletest.cmake)
 
