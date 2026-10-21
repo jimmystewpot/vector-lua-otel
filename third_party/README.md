@@ -6,7 +6,7 @@ This directory contains vendored (pinned, checked-in) copies of third-party libr
 
 - **simdjson** v5.0.5 (Apache-2.0/MIT License)
   - High-performance JSON parsing library
-  - Vendored subdirectories: `CMakeLists.txt`, `cmake/`, `include/`, `src/`, `LICENSE`, `LICENSE-MIT`
+  - Vendored files: `simdjson.h`, `simdjson.cpp` (single-header release amalgamation), `LICENSE`, `LICENSE-MIT`
   - Used by: OTLP JSON extraction in C++20 code
 
 - **googletest** v1.14.0 (BSD-3-Clause License)

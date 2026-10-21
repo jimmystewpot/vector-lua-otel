@@ -1,12 +1,21 @@
-# Build vendored simdjson instead of fetching from network
-set(simdjson_source_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdjson")
-if(NOT EXISTS "${simdjson_source_dir}/CMakeLists.txt")
+# Build vendored single-header simdjson
+set(simdjson_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party/simdjson")
+if(NOT EXISTS "${simdjson_dir}/simdjson.h" OR NOT EXISTS "${simdjson_dir}/simdjson.cpp")
   message(FATAL_ERROR
-    "simdjson CMakeLists.txt not found at: ${simdjson_source_dir}\n"
-    "The simdjson dependency is vendored. Please ensure third_party/simdjson is present.\n"
+    "simdjson single-header files not found at: ${simdjson_dir}\n"
+    "The simdjson dependency is vendored as a single-header library. Please ensure\n"
+    "third_party/simdjson/simdjson.h and third_party/simdjson/simdjson.cpp are present.\n"
     "See: third_party/README.md"
   )
 endif()
 
-set(SIMDJSON_DEVELOPER_MODE OFF CACHE BOOL "" FORCE)
-add_subdirectory("${simdjson_source_dir}" "${CMAKE_BINARY_DIR}/third_party/simdjson")
+add_library(simdjson STATIC
+  "${simdjson_dir}/simdjson.cpp"
+)
+target_include_directories(simdjson SYSTEM PUBLIC
+  "${simdjson_dir}"
+)
+set_target_properties(simdjson PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+add_library(simdjson::simdjson ALIAS simdjson)

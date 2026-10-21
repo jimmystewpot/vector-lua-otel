@@ -98,7 +98,7 @@ Every modification to this repository **must** strictly adhere to the following 
 .
 ├── CMakeLists.txt                      # Top-level build configuration
 ├── cmake/
-│   ├── simdjson.cmake                  # add_subdirectory(third_party/simdjson)
+│   ├── simdjson.cmake                  # Single-header simdjson static library target
 │   └── googletest.cmake                # add_subdirectory(third_party/googletest)
 ├── third_party/                        # Vendored dependencies (no network required)
 │   ├── simdjson/                       # simdjson 5.0.5 with VENDOR.md

@@ -8,7 +8,7 @@ set -euo pipefail
 # Dependency configuration table (one place, reused for all ops)
 # Format: NAME|UPSTREAM_URL|ALLOWLIST|LICENSE
 declare -a DEPS=(
-  "simdjson|https://github.com/simdjson/simdjson.git|CMakeLists.txt cmake/ include/ src/ LICENSE LICENSE-MIT|Apache-2.0/MIT"
+  "simdjson|https://github.com/simdjson/simdjson.git|simdjson.h simdjson.cpp LICENSE LICENSE-MIT|Apache-2.0/MIT"
   "googletest|https://github.com/google/googletest.git|CMakeLists.txt googletest/CMakeLists.txt googletest/cmake/ googletest/include/ googletest/src/ LICENSE|BSD-3-Clause"
 )
 
@@ -154,30 +154,47 @@ vendor() {
   # Create dep subdirectory in staging
   mkdir -p "$staging/$dep_name"
   
-  echo "Copying allowlist into staging directory..." >&2
-  for path in $allowlist; do
-    src="$clone_dir/clone/$path"
-    if [[ ! -e "$src" ]]; then
-      echo "Error: path '$path' not found in $dep_name at $tag" >&2
-      return 1
-    fi
-    
-    if [[ -d "$src" ]]; then
-      # For directories: copy contents including dotfiles using cp -R . dest/
-      mkdir -p "$staging/$dep_name/$path"
-      if ! cp -R "$src/." "$staging/$dep_name/$path/"; then
-        echo "Error: failed to copy directory $path" >&2
-        return 1
-      fi
+  if [[ "$dep_name" == "simdjson" ]]; then
+    echo "Fetching single-header amalgamation release assets..." >&2
+    local release_url="https://github.com/simdjson/simdjson/releases/download/${tag}"
+    if curl -sSfL "$release_url/simdjson.h" -o "$staging/$dep_name/simdjson.h" && \
+       curl -sSfL "$release_url/simdjson.cpp" -o "$staging/$dep_name/simdjson.cpp"; then
+      echo "Downloaded official release assets for $tag." >&2
     else
-      # For files: copy with directory creation
-      mkdir -p "$(dirname "$staging/$dep_name/$path")"
-      if ! cp "$src" "$staging/$dep_name/$path"; then
-        echo "Error: failed to copy file $path" >&2
+      echo "Release asset download failed; generating via singleheader/amalgamate.py..." >&2
+      python3 "$clone_dir/clone/singleheader/amalgamate.py" "$staging/$dep_name/simdjson.h" "$staging/$dep_name/simdjson.cpp"
+    fi
+    for lic in LICENSE LICENSE-MIT; do
+      if [[ -f "$clone_dir/clone/$lic" ]]; then
+        cp "$clone_dir/clone/$lic" "$staging/$dep_name/$lic"
+      fi
+    done
+  else
+    echo "Copying allowlist into staging directory..." >&2
+    for path in $allowlist; do
+      src="$clone_dir/clone/$path"
+      if [[ ! -e "$src" ]]; then
+        echo "Error: path '$path' not found in $dep_name at $tag" >&2
         return 1
       fi
-    fi
-  done
+      
+      if [[ -d "$src" ]]; then
+        # For directories: copy contents including dotfiles using cp -R . dest/
+        mkdir -p "$staging/$dep_name/$path"
+        if ! cp -R "$src/." "$staging/$dep_name/$path/"; then
+          echo "Error: failed to copy directory $path" >&2
+          return 1
+        fi
+      else
+        # For files: copy with directory creation
+        mkdir -p "$(dirname "$staging/$dep_name/$path")"
+        if ! cp "$src" "$staging/$dep_name/$path"; then
+          echo "Error: failed to copy file $path" >&2
+          return 1
+        fi
+      fi
+    done
+  fi
   
   # Generate VENDOR.md
   vendor_md "$staging/$dep_name" "$dep_name" "$tag" "$commit"
