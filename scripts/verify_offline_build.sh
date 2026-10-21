@@ -66,6 +66,10 @@ run_container() {
 set -euo pipefail
 echo "=== CMake Configure ==="
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_QUIET=OFF --no-warn-unused-cli -GNinja 2>&1 | tee configure.log
+echo "=== CMake Configure (BUILD_SHARED_LIBS=ON) ==="
+cmake -B build-shared -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DFETCHCONTENT_QUIET=OFF --no-warn-unused-cli -GNinja 2>&1 | tee -a configure.log
+test -f build-shared/third_party/simdjson/simdjson.pc
+rm -rf build-shared
 echo "=== Building ==="
 cmake --build build
 echo "=== Running CTest ==="
