@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -49,9 +50,16 @@ std::string UnsupportedMetricVariantError(std::string_view variant) {
   return msg;
 }
 
-bool TryParseJsonFiniteBound(simdjson::ondemand::value& fv, double& out_bound) noexcept {
+void ThrowIfSimdjsonSyntaxError(simdjson::error_code err) {
+  if (err != simdjson::SUCCESS && err != simdjson::INCORRECT_TYPE) {
+    throw std::runtime_error(std::string(simdjson::error_message(err)));
+  }
+}
+
+bool TryParseJsonFiniteBound(simdjson::ondemand::value& fv, double& out_bound) {
   auto t_res = fv.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return false;
   }
   const auto t = t_res.value();
@@ -66,6 +74,7 @@ bool TryParseJsonFiniteBound(simdjson::ondemand::value& fv, double& out_bound) n
   if (t == simdjson::ondemand::json_type::string) {
     auto s_res = fv.get_string();
     if (s_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
       return false;
     }
     std::string_view sv = core::TrimJsonWhitespace(s_res.value());
@@ -129,17 +138,19 @@ int64_t ParseKindToTemporality(std::string_view kind_sv) noexcept {
   return 0;
 }
 
-void ParseJsonAggregationTemporality(simdjson::ondemand::value& fv,
-                                     int64_t& agg_temporality) noexcept {
+void ParseJsonAggregationTemporality(simdjson::ondemand::value& fv, int64_t& agg_temporality) {
   auto t_res = fv.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return;
   }
   if (t_res.value() == simdjson::ondemand::json_type::string) {
     auto s_res = fv.get_string();
-    if (s_res.error() == simdjson::SUCCESS) {
-      agg_temporality = ParseKindToTemporality(s_res.value());
+    if (s_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
+      return;
     }
+    agg_temporality = ParseKindToTemporality(s_res.value());
   } else if (t_res.value() == simdjson::ondemand::json_type::number) {
     int64_t iv = core::ParseInt64(fv);
     agg_temporality = iv >= 0 ? iv : 0;
@@ -174,15 +185,17 @@ void ReadLuaAggregationTemporality(lua_State* L, int obj_idx, int64_t& agg_tempo
 enum class MetricValueKind { kNone, kDouble, kInt64 };
 
 void ParseJsonMetricScalarValue(simdjson::ondemand::value& fv, MetricValueKind& val_kind,
-                                double& double_val, int64_t& int_val) noexcept {
+                                double& double_val, int64_t& int_val) {
   auto t_res = fv.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return;
   }
   const auto t = t_res.value();
   if (t == simdjson::ondemand::json_type::number) {
     auto num_res = fv.get_number();
     if (num_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(num_res.error());
       return;
     }
     const auto num = num_res.value();
@@ -214,6 +227,7 @@ void ParseJsonMetricScalarValue(simdjson::ondemand::value& fv, MetricValueKind& 
   if (t == simdjson::ondemand::json_type::string) {
     auto s_res = fv.get_string();
     if (s_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
       return;
     }
     std::string_view sv = core::TrimJsonWhitespace(s_res.value());
@@ -238,23 +252,34 @@ void ParseJsonMetricScalarValue(simdjson::ondemand::value& fv, MetricValueKind& 
 
 void ParseJsonCounterOrGauge(simdjson::ondemand::value& fv, MetricValueKind& val_kind,
                              double& double_val, int64_t& int_val, int64_t& agg_temporality,
-                             core::FastJsonWriter& exemplars_writer, bool& has_exemplars) noexcept {
+                             core::FastJsonWriter& exemplars_writer, bool& has_exemplars) {
   auto t_res = fv.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return;
   }
   if (t_res.value() == simdjson::ondemand::json_type::object) {
     auto obj_res = fv.get_object();
     if (obj_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(obj_res.error());
       return;
     }
     for (auto field_res : obj_res.value()) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
+      if (field_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(field_res.error());
+        continue;
+      }
       auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
+      if (k_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(k_res.error());
+        continue;
+      }
       std::string_view k = k_res.value();
       auto v_res = field_res.value();
-      if (v_res.error() != simdjson::SUCCESS) continue;
+      if (v_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(v_res.error());
+        continue;
+      }
       auto v = v_res.value();
       if (k == "value" || k == "asDouble" || k == "as_double") {
         ParseJsonMetricScalarValue(v, val_kind, double_val, int_val);
@@ -279,10 +304,14 @@ void ParseJsonBucketCountsArray(simdjson::ondemand::value& v, std::vector<uint64
   out.clear();
   auto arr_res = v.get_array();
   if (arr_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(arr_res.error());
     return;
   }
   for (auto elem_res : arr_res.value()) {
-    if (elem_res.error() != simdjson::SUCCESS) continue;
+    if (elem_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(elem_res.error());
+      continue;
+    }
     auto elem_val = elem_res.value();
     out.push_back(core::ParseUint64(elem_val));
   }
@@ -297,15 +326,25 @@ void ParseJsonHistogram(simdjson::ondemand::value& fv, int64_t& agg_temporality,
   explicit_bounds.clear();
   auto obj_res = fv.get_object();
   if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
     return;
   }
   for (auto field_res : obj_res.value()) {
-    if (field_res.error() != simdjson::SUCCESS) continue;
+    if (field_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(field_res.error());
+      continue;
+    }
     auto k_res = field_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) continue;
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
     std::string_view k = k_res.value();
     auto v_res = field_res.value();
-    if (v_res.error() != simdjson::SUCCESS) continue;
+    if (v_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(v_res.error());
+      continue;
+    }
     auto v = v_res.value();
 
     if (k == "count" || k == "Count") {
@@ -327,23 +366,43 @@ void ParseJsonHistogram(simdjson::ondemand::value& fv, int64_t& agg_temporality,
       ParseJsonAggregationTemporality(v, agg_temporality);
     } else if (k == "buckets") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           auto et_res = elem_val.type();
-          if (et_res.error() != simdjson::SUCCESS) continue;
+          if (et_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(et_res.error());
+            continue;
+          }
           if (et_res.value() == simdjson::ondemand::json_type::object) {
             auto b_obj_res = elem_val.get_object();
-            if (b_obj_res.error() != simdjson::SUCCESS) continue;
+            if (b_obj_res.error() != simdjson::SUCCESS) {
+              ThrowIfSimdjsonSyntaxError(b_obj_res.error());
+              continue;
+            }
             uint64_t bc = 0;
             for (auto bf_res : b_obj_res.value()) {
-              if (bf_res.error() != simdjson::SUCCESS) continue;
+              if (bf_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(bf_res.error());
+                continue;
+              }
               auto bk_res = bf_res.unescaped_key();
-              if (bk_res.error() != simdjson::SUCCESS) continue;
+              if (bk_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(bk_res.error());
+                continue;
+              }
               std::string_view bk = bk_res.value();
               auto bfv_res = bf_res.value();
-              if (bfv_res.error() != simdjson::SUCCESS) continue;
+              if (bfv_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(bfv_res.error());
+                continue;
+              }
               auto bfv = bfv_res.value();
               if (bk == "count" || bk == "Count") {
                 bc = core::ParseUint64(bfv);
@@ -368,9 +427,14 @@ void ParseJsonHistogram(simdjson::ondemand::value& fv, int64_t& agg_temporality,
       ParseJsonBucketCountsArray(v, bucket_counts);
     } else if (k == "explicitBounds" || k == "explicit_bounds" || k == "ExplicitBounds") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           double bound = 0.0;
           if (TryParseJsonFiniteBound(elem_val, bound)) {
@@ -392,15 +456,25 @@ void ParseJsonExpBucketsSubObject(simdjson::ondemand::value& v, int64_t& out_off
   out_buckets.clear();
   auto obj_res = v.get_object();
   if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
     return;
   }
   for (auto f_res : obj_res.value()) {
-    if (f_res.error() != simdjson::SUCCESS) continue;
+    if (f_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(f_res.error());
+      continue;
+    }
     auto k_res = f_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) continue;
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
     std::string_view k = k_res.value();
     auto fv_res = f_res.value();
-    if (fv_res.error() != simdjson::SUCCESS) continue;
+    if (fv_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(fv_res.error());
+      continue;
+    }
     auto fv = fv_res.value();
     if (k == "offset" || k == "Offset") {
       out_offset = core::ParseInt64(fv);
@@ -425,15 +499,25 @@ void ParseJsonExponentialHistogram(simdjson::ondemand::value& fv, int64_t& agg_t
   neg_buckets.clear();
   auto obj_res = fv.get_object();
   if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
     return;
   }
   for (auto field_res : obj_res.value()) {
-    if (field_res.error() != simdjson::SUCCESS) continue;
+    if (field_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(field_res.error());
+      continue;
+    }
     auto k_res = field_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) continue;
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
     std::string_view k = k_res.value();
     auto v_res = field_res.value();
-    if (v_res.error() != simdjson::SUCCESS) continue;
+    if (v_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(v_res.error());
+      continue;
+    }
     auto v = v_res.value();
 
     if (k == "count" || k == "Count") {
@@ -471,10 +555,7 @@ void ParseJsonExponentialHistogram(simdjson::ondemand::value& fv, int64_t& agg_t
   }
 }
 
-struct SummaryQuantile {
-  double quantile = 0.0;
-  double value = 0.0;
-};
+using core::SummaryQuantile;
 
 void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, bool& has_sum,
                       double& sum_total, std::vector<SummaryQuantile>& quantiles,
@@ -484,16 +565,26 @@ void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, bool& 
   scratch_bounds.clear();
   auto obj_res = fv.get_object();
   if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
     return;
   }
   bool has_parallel_quantiles = false;
   for (auto field_res : obj_res.value()) {
-    if (field_res.error() != simdjson::SUCCESS) continue;
+    if (field_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(field_res.error());
+      continue;
+    }
     auto k_res = field_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) continue;
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
     std::string_view k = k_res.value();
     auto v_res = field_res.value();
-    if (v_res.error() != simdjson::SUCCESS) continue;
+    if (v_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(v_res.error());
+      continue;
+    }
     auto v = v_res.value();
 
     if (k == "count" || k == "Count") {
@@ -505,23 +596,43 @@ void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, bool& 
     } else if (k == "quantiles" || k == "quantileValues" || k == "quantile_values" ||
                k == "QuantileValues") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           auto et_res = elem_val.type();
-          if (et_res.error() != simdjson::SUCCESS) continue;
+          if (et_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(et_res.error());
+            continue;
+          }
           if (et_res.value() == simdjson::ondemand::json_type::object) {
             auto q_obj_res = elem_val.get_object();
-            if (q_obj_res.error() != simdjson::SUCCESS) continue;
+            if (q_obj_res.error() != simdjson::SUCCESS) {
+              ThrowIfSimdjsonSyntaxError(q_obj_res.error());
+              continue;
+            }
             SummaryQuantile sq{};
             for (auto qf_res : q_obj_res.value()) {
-              if (qf_res.error() != simdjson::SUCCESS) continue;
+              if (qf_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(qf_res.error());
+                continue;
+              }
               auto qk_res = qf_res.unescaped_key();
-              if (qk_res.error() != simdjson::SUCCESS) continue;
+              if (qk_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(qk_res.error());
+                continue;
+              }
               std::string_view qk = qk_res.value();
               auto qfv_res = qf_res.value();
-              if (qfv_res.error() != simdjson::SUCCESS) continue;
+              if (qfv_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(qfv_res.error());
+                continue;
+              }
               auto qfv = qfv_res.value();
               if (qk == "quantile" || qk == "Quantile") {
                 sq.quantile = core::ParseDouble(qfv);
@@ -540,9 +651,14 @@ void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, bool& 
       }
     } else if (k == "values" || k == "Values") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           scratch_bounds.push_back(core::ParseDouble(elem_val));
         }
@@ -562,119 +678,6 @@ void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, bool& 
   }
 }
 
-void WriteUint64Array(core::FastJsonWriter& w, const std::vector<uint64_t>& vec) {
-  w.StartArray();
-  for (size_t i = 0; i < vec.size(); ++i) {
-    w.Uint64(vec[i]);
-  }
-  w.EndArray();
-}
-
-void WriteDoubleArray(core::FastJsonWriter& w, const std::vector<double>& vec) {
-  w.StartArray();
-  for (size_t i = 0; i < vec.size(); ++i) {
-    w.Double(vec[i]);
-  }
-  w.EndArray();
-}
-
-void SerializeHistogramJson(core::FastJsonWriter& w, int64_t agg_temporality, uint64_t count,
-                            bool has_sum, double sum, bool has_min, double min_val, bool has_max,
-                            double max_val, const std::vector<uint64_t>& bucket_counts,
-                            const std::vector<double>& explicit_bounds) {
-  w.Reset();
-  w.StartObject();
-  w.Key("aggregationTemporality");
-  w.Int64(agg_temporality);
-  w.Key("count");
-  w.Uint64(count);
-  w.Key("sum");
-  w.Double(has_sum ? sum : 0.0);
-  if (has_min) {
-    w.Key("min");
-    w.Double(min_val);
-  }
-  if (has_max) {
-    w.Key("max");
-    w.Double(max_val);
-  }
-  w.Key("bucketCounts");
-  WriteUint64Array(w, bucket_counts);
-  w.Key("explicitBounds");
-  WriteDoubleArray(w, explicit_bounds);
-  w.EndObject();
-}
-
-void SerializeExpBucketsSubObject(core::FastJsonWriter& w, int64_t offset,
-                                  const std::vector<uint64_t>& bucket_counts) {
-  w.StartObject();
-  w.Key("offset");
-  w.Int64(offset);
-  w.Key("bucketCounts");
-  WriteUint64Array(w, bucket_counts);
-  w.EndObject();
-}
-
-void SerializeExponentialHistogramJson(core::FastJsonWriter& w, int64_t agg_temporality,
-                                       uint64_t count, bool has_sum, double sum, bool has_min,
-                                       double min_val, bool has_max, double max_val, int64_t scale,
-                                       uint64_t zero_count, double zero_threshold,
-                                       int64_t pos_offset, const std::vector<uint64_t>& pos_buckets,
-                                       int64_t neg_offset,
-                                       const std::vector<uint64_t>& neg_buckets) {
-  w.Reset();
-  w.StartObject();
-  w.Key("aggregationTemporality");
-  w.Int64(agg_temporality);
-  w.Key("count");
-  w.Uint64(count);
-  if (has_sum) {
-    w.Key("sum");
-    w.Double(sum);
-  }
-  if (has_min) {
-    w.Key("min");
-    w.Double(min_val);
-  }
-  if (has_max) {
-    w.Key("max");
-    w.Double(max_val);
-  }
-  w.Key("scale");
-  w.Int64(scale);
-  w.Key("zeroCount");
-  w.Uint64(zero_count);
-  w.Key("zeroThreshold");
-  w.Double(zero_threshold);
-  w.Key("positive");
-  SerializeExpBucketsSubObject(w, pos_offset, pos_buckets);
-  w.Key("negative");
-  SerializeExpBucketsSubObject(w, neg_offset, neg_buckets);
-  w.EndObject();
-}
-
-void SerializeSummaryJson(core::FastJsonWriter& w, uint64_t count, bool has_sum, double sum,
-                          const std::vector<SummaryQuantile>& quantiles) {
-  w.Reset();
-  w.StartObject();
-  w.Key("count");
-  w.Uint64(count);
-  w.Key("sum");
-  w.Double(has_sum ? sum : 0.0);
-  w.Key("quantileValues");
-  w.StartArray();
-  for (size_t i = 0; i < quantiles.size(); ++i) {
-    w.StartObject();
-    w.Key("quantile");
-    w.Double(quantiles[i].quantile);
-    w.Key("value");
-    w.Double(quantiles[i].value);
-    w.EndObject();
-  }
-  w.EndArray();
-  w.EndObject();
-}
-
 struct JsonTagValue {
   enum class Kind { kNone, kString, kInt64, kUint64, kDouble, kBool, kRawJson } kind = Kind::kNone;
   std::string_view str_val;
@@ -684,10 +687,27 @@ struct JsonTagValue {
   bool bool_val = false;
 };
 
+struct DeferredJsonTag {
+  enum class Target { kResource, kScope, kDatapoint } target = Target::kDatapoint;
+  size_t key_offset = 0;
+  size_t key_len = 0;
+  JsonTagValue::Kind kind = JsonTagValue::Kind::kNone;
+  size_t str_offset = 0;
+  size_t str_len = 0;
+  int64_t int_val = 0;
+  uint64_t uint_val = 0;
+  double dbl_val = 0.0;
+  bool bool_val = false;
+};
+
+static thread_local std::vector<DeferredJsonTag> tls_deferred_tags;
+static thread_local std::string tls_tag_arena;
+
 void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter& scratch_writer,
                               JsonTagValue& out) {
   auto t_res = v.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return;
   }
   const auto t = t_res.value();
@@ -696,6 +716,8 @@ void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter
     if (s_res.error() == simdjson::SUCCESS) {
       out.kind = JsonTagValue::Kind::kString;
       out.str_val = s_res.value();
+    } else {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
     }
   } else if (t == simdjson::ondemand::json_type::number) {
     auto num_res = v.get_number();
@@ -711,12 +733,16 @@ void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter
         out.kind = JsonTagValue::Kind::kDouble;
         out.dbl_val = num.get_double();
       }
+    } else {
+      ThrowIfSimdjsonSyntaxError(num_res.error());
     }
   } else if (t == simdjson::ondemand::json_type::boolean) {
     auto b_res = v.get_bool();
     if (b_res.error() == simdjson::SUCCESS) {
       out.kind = JsonTagValue::Kind::kBool;
       out.bool_val = b_res.value();
+    } else {
+      ThrowIfSimdjsonSyntaxError(b_res.error());
     }
   } else if (t == simdjson::ondemand::json_type::object) {
     scratch_writer.Reset();
@@ -817,6 +843,50 @@ bool ExtractNativeMetricObjectJson(
   bool has_scope_attrs = false;
   bool has_dp_attrs = false;
   bool has_exemplars = false;
+  bool has_seen_tags = false;
+
+  size_t tag_res_svc_off = 0, tag_res_svc_len = 0;
+  bool has_tag_res_svc = false;
+  size_t tag_dp_svc_off = 0, tag_dp_svc_len = 0;
+  bool has_tag_dp_svc = false;
+  size_t tag_scope_name_off = 0, tag_scope_name_len = 0;
+  bool has_tag_scope_name = false;
+  size_t tag_scope_ver_off = 0, tag_scope_ver_len = 0;
+  bool has_tag_scope_ver = false;
+  size_t tag_otel_scope_name_off = 0, tag_otel_scope_name_len = 0;
+  bool has_tag_otel_scope_name = false;
+  size_t tag_otel_scope_ver_off = 0, tag_otel_scope_ver_len = 0;
+  bool has_tag_otel_scope_ver = false;
+  size_t tag_unit_off = 0, tag_unit_len = 0;
+  bool has_tag_unit = false;
+  size_t tag_desc_off = 0, tag_desc_len = 0;
+  bool has_tag_desc = false;
+
+  auto append_to_arena = [](std::string_view sv, size_t& out_off, size_t& out_len) {
+    out_off = tls_tag_arena.size();
+    out_len = sv.size();
+    tls_tag_arena.append(sv.data(), sv.size());
+  };
+
+  auto push_deferred_tag = [&](DeferredJsonTag::Target target, std::string_view key,
+                               const JsonTagValue& tv) {
+    DeferredJsonTag dt{};
+    dt.target = target;
+    append_to_arena(key, dt.key_offset, dt.key_len);
+    dt.kind = tv.kind;
+    if (tv.kind == JsonTagValue::Kind::kString || tv.kind == JsonTagValue::Kind::kRawJson) {
+      append_to_arena(tv.str_val, dt.str_offset, dt.str_len);
+    } else if (tv.kind == JsonTagValue::Kind::kInt64) {
+      dt.int_val = tv.int_val;
+    } else if (tv.kind == JsonTagValue::Kind::kUint64) {
+      dt.uint_val = tv.uint_val;
+    } else if (tv.kind == JsonTagValue::Kind::kDouble) {
+      dt.dbl_val = tv.dbl_val;
+    } else if (tv.kind == JsonTagValue::Kind::kBool) {
+      dt.bool_val = tv.bool_val;
+    }
+    tls_deferred_tags.push_back(dt);
+  };
 
   auto ensure_res_attrs_open = [&]() {
     if (!has_res_attrs) {
@@ -1031,28 +1101,50 @@ bool ExtractNativeMetricObjectJson(
       has_exemplars = true;
     } else if (k == "tags") {
       has_recognized_field = true;
+      if (!has_seen_tags) {
+        tls_deferred_tags.clear();
+        tls_tag_arena.clear();
+        has_seen_tags = true;
+      }
       auto tags_obj_res = fv.get_object();
       if (tags_obj_res.error() == simdjson::SUCCESS) {
         for (auto tf_res : tags_obj_res.value()) {
-          if (tf_res.error() != simdjson::SUCCESS) continue;
+          if (tf_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tf_res.error());
+            continue;
+          }
           auto tk_res = tf_res.unescaped_key();
-          if (tk_res.error() != simdjson::SUCCESS) continue;
+          if (tk_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tk_res.error());
+            continue;
+          }
           std::string_view tk = tk_res.value();
           auto tv_res = tf_res.value();
-          if (tv_res.error() != simdjson::SUCCESS) continue;
+          if (tv_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tv_res.error());
+            continue;
+          }
           auto tv = tv_res.value();
 
           JsonTagValue tag_val;
           auto tv_type_res = tv.type();
-          if (tv_type_res.error() != simdjson::SUCCESS) continue;
+          if (tv_type_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tv_type_res.error());
+            continue;
+          }
           if (tv_type_res.value() == simdjson::ondemand::json_type::array) {
             auto arr_res = tv.get_array();
             if (arr_res.error() == simdjson::SUCCESS) {
               for (auto elem_res : arr_res.value()) {
-                if (elem_res.error() != simdjson::SUCCESS) continue;
+                if (elem_res.error() != simdjson::SUCCESS) {
+                  ThrowIfSimdjsonSyntaxError(elem_res.error());
+                  continue;
+                }
                 auto elem_v = elem_res.value();
                 ReadSingleJsonTagElement(elem_v, payload_writer, tag_val);
               }
+            } else {
+              ThrowIfSimdjsonSyntaxError(arr_res.error());
             }
           } else {
             ReadSingleJsonTagElement(tv, payload_writer, tag_val);
@@ -1066,62 +1158,64 @@ bool ExtractNativeMetricObjectJson(
             std::string_view sub_key = tk.substr(9);
             if ((sub_key == "service.name" || sub_key == "service_name") &&
                 tag_val.kind == JsonTagValue::Kind::kString && !tag_val.str_val.empty()) {
-              tls_service_scratch.assign(tag_val.str_val);
-              service_name = std::string_view(tls_service_scratch);
+              append_to_arena(tag_val.str_val, tag_res_svc_off, tag_res_svc_len);
+              has_tag_res_svc = true;
             }
-            ensure_res_attrs_open();
-            WriteJsonTagValueToWriter(res_attrs_writer, sub_key, tag_val);
+            push_deferred_tag(DeferredJsonTag::Target::kResource, sub_key, tag_val);
           } else if (tk.size() > 6 && tk.substr(0, 6) == "scope.") {
             std::string_view sub_key = tk.substr(6);
             if (sub_key == "name") {
               if (tag_val.kind == JsonTagValue::Kind::kString) {
-                tls_scope_name_scratch.assign(tag_val.str_val);
-                scope_name = std::string_view(tls_scope_name_scratch);
+                append_to_arena(tag_val.str_val, tag_scope_name_off, tag_scope_name_len);
+                has_tag_scope_name = true;
               }
             } else if (sub_key == "version") {
               if (tag_val.kind == JsonTagValue::Kind::kString) {
-                tls_scope_ver_scratch.assign(tag_val.str_val);
-                scope_version = std::string_view(tls_scope_ver_scratch);
+                append_to_arena(tag_val.str_val, tag_scope_ver_off, tag_scope_ver_len);
+                has_tag_scope_ver = true;
               }
             } else {
-              ensure_scope_attrs_open();
-              WriteJsonTagValueToWriter(scope_attrs_writer, sub_key, tag_val);
+              push_deferred_tag(DeferredJsonTag::Target::kScope, sub_key, tag_val);
             }
           } else if (tk == "otel.unit" || tk == "metric.unit") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && metric_unit.empty()) {
-              tls_metric_unit_scratch.assign(tag_val.str_val);
-              metric_unit = std::string_view(tls_metric_unit_scratch);
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_unit_off, tag_unit_len);
+              has_tag_unit = true;
             }
           } else if (tk == "otel.description" || tk == "metric.description") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && metric_desc.empty()) {
-              tls_metric_desc_scratch.assign(tag_val.str_val);
-              metric_desc = std::string_view(tls_metric_desc_scratch);
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_desc_off, tag_desc_len);
+              has_tag_desc = true;
             }
           } else if (tk == "otel.scope.name") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && scope_name.empty()) {
-              tls_scope_name_scratch.assign(tag_val.str_val);
-              scope_name = std::string_view(tls_scope_name_scratch);
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_otel_scope_name_off, tag_otel_scope_name_len);
+              has_tag_otel_scope_name = true;
             }
           } else if (tk == "otel.scope.version") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && scope_version.empty()) {
-              tls_scope_ver_scratch.assign(tag_val.str_val);
-              scope_version = std::string_view(tls_scope_ver_scratch);
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_otel_scope_ver_off, tag_otel_scope_ver_len);
+              has_tag_otel_scope_ver = true;
             }
           } else {
-            ensure_dp_attrs_open();
-            WriteJsonTagValueToWriter(dp_attrs_writer, tk, tag_val);
-            if ((tk == "service.name" || tk == "service_name") && service_name.empty() &&
+            push_deferred_tag(DeferredJsonTag::Target::kDatapoint, tk, tag_val);
+            if ((tk == "service.name" || tk == "service_name") &&
                 tag_val.kind == JsonTagValue::Kind::kString && !tag_val.str_val.empty()) {
-              tls_service_scratch.assign(tag_val.str_val);
-              service_name = std::string_view(tls_service_scratch);
+              append_to_arena(tag_val.str_val, tag_dp_svc_off, tag_dp_svc_len);
+              has_tag_dp_svc = true;
             }
           }
         }
+      } else {
+        ThrowIfSimdjsonSyntaxError(tags_obj_res.error());
       }
     } else if (k == "resources" || k == "resource_attributes" || k == "resourceAttributes" ||
                k == "resource") {
       has_recognized_field = true;
-      ensure_res_attrs_open();
+      res_attrs_writer.Reset();
+      res_attrs_writer.StartObject();
+      has_res_attrs = true;
+      service_name = "unknown_service";
       std::string_view extracted_svc = "unknown_service";
       core::WriteAttributesEntriesJson(res_attrs_writer, fv, &extracted_svc);
       if (extracted_svc != "unknown_service" && !extracted_svc.empty()) {
@@ -1133,40 +1227,61 @@ bool ExtractNativeMetricObjectJson(
       auto s_obj_res = fv.get_object();
       if (s_obj_res.error() == simdjson::SUCCESS) {
         for (auto sf_res : s_obj_res.value()) {
-          if (sf_res.error() != simdjson::SUCCESS) continue;
+          if (sf_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(sf_res.error());
+            continue;
+          }
           auto sk_res = sf_res.unescaped_key();
-          if (sk_res.error() != simdjson::SUCCESS) continue;
+          if (sk_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(sk_res.error());
+            continue;
+          }
           std::string_view sk = sk_res.value();
           auto sfv_res = sf_res.value();
-          if (sfv_res.error() != simdjson::SUCCESS) continue;
+          if (sfv_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(sfv_res.error());
+            continue;
+          }
           auto sfv = sfv_res.value();
           if (sk == "name") {
             auto s_res = sfv.get_string();
             if (s_res.error() == simdjson::SUCCESS) {
               tls_scope_name_scratch.assign(s_res.value());
               scope_name = std::string_view(tls_scope_name_scratch);
+            } else {
+              ThrowIfSimdjsonSyntaxError(s_res.error());
             }
           } else if (sk == "version") {
             auto s_res = sfv.get_string();
             if (s_res.error() == simdjson::SUCCESS) {
               tls_scope_ver_scratch.assign(s_res.value());
               scope_version = std::string_view(tls_scope_ver_scratch);
+            } else {
+              ThrowIfSimdjsonSyntaxError(s_res.error());
             }
           } else if (sk == "attributes") {
-            ensure_scope_attrs_open();
+            scope_attrs_writer.Reset();
+            scope_attrs_writer.StartObject();
+            has_scope_attrs = true;
             core::WriteAttributesEntriesJson(scope_attrs_writer, sfv);
           }
         }
+      } else {
+        ThrowIfSimdjsonSyntaxError(s_obj_res.error());
       }
     } else if (k == "attributes") {
       has_recognized_field = true;
-      ensure_dp_attrs_open();
+      dp_attrs_writer.Reset();
+      dp_attrs_writer.StartObject();
+      has_dp_attrs = true;
       core::WriteAttributesEntriesJson(dp_attrs_writer, fv);
     } else if (k == "service_name" || k == "service") {
       has_recognized_field = true;
       auto s_res = fv.get_string();
       if (s_res.error() == simdjson::SUCCESS) {
         top_service_name = s_res.value();
+      } else {
+        ThrowIfSimdjsonSyntaxError(s_res.error());
       }
     }
   }
@@ -1176,6 +1291,66 @@ bool ExtractNativeMetricObjectJson(
   }
   if (out_matched != nullptr) {
     *out_matched = true;
+  }
+
+  if (has_seen_tags) {
+    for (const auto& dt : tls_deferred_tags) {
+      std::string_view key(tls_tag_arena.data() + dt.key_offset, dt.key_len);
+      JsonTagValue tv{};
+      tv.kind = dt.kind;
+      if (dt.kind == JsonTagValue::Kind::kString || dt.kind == JsonTagValue::Kind::kRawJson) {
+        tv.str_val = std::string_view(tls_tag_arena.data() + dt.str_offset, dt.str_len);
+      } else if (dt.kind == JsonTagValue::Kind::kInt64) {
+        tv.int_val = dt.int_val;
+      } else if (dt.kind == JsonTagValue::Kind::kUint64) {
+        tv.uint_val = dt.uint_val;
+      } else if (dt.kind == JsonTagValue::Kind::kDouble) {
+        tv.dbl_val = dt.dbl_val;
+      } else if (dt.kind == JsonTagValue::Kind::kBool) {
+        tv.bool_val = dt.bool_val;
+      }
+      if (dt.target == DeferredJsonTag::Target::kResource) {
+        ensure_res_attrs_open();
+        WriteJsonTagValueToWriter(res_attrs_writer, key, tv);
+      } else if (dt.target == DeferredJsonTag::Target::kScope) {
+        ensure_scope_attrs_open();
+        WriteJsonTagValueToWriter(scope_attrs_writer, key, tv);
+      } else {
+        ensure_dp_attrs_open();
+        WriteJsonTagValueToWriter(dp_attrs_writer, key, tv);
+      }
+    }
+    if (has_tag_res_svc) {
+      tls_service_scratch.assign(tls_tag_arena.data() + tag_res_svc_off, tag_res_svc_len);
+      service_name = std::string_view(tls_service_scratch);
+    } else if ((service_name.empty() || service_name == "unknown_service") && has_tag_dp_svc) {
+      tls_service_scratch.assign(tls_tag_arena.data() + tag_dp_svc_off, tag_dp_svc_len);
+      service_name = std::string_view(tls_service_scratch);
+    }
+    if (has_tag_scope_name) {
+      tls_scope_name_scratch.assign(tls_tag_arena.data() + tag_scope_name_off, tag_scope_name_len);
+      scope_name = std::string_view(tls_scope_name_scratch);
+    } else if (scope_name.empty() && has_tag_otel_scope_name) {
+      tls_scope_name_scratch.assign(tls_tag_arena.data() + tag_otel_scope_name_off,
+                                    tag_otel_scope_name_len);
+      scope_name = std::string_view(tls_scope_name_scratch);
+    }
+    if (has_tag_scope_ver) {
+      tls_scope_ver_scratch.assign(tls_tag_arena.data() + tag_scope_ver_off, tag_scope_ver_len);
+      scope_version = std::string_view(tls_scope_ver_scratch);
+    } else if (scope_version.empty() && has_tag_otel_scope_ver) {
+      tls_scope_ver_scratch.assign(tls_tag_arena.data() + tag_otel_scope_ver_off,
+                                   tag_otel_scope_ver_len);
+      scope_version = std::string_view(tls_scope_ver_scratch);
+    }
+    if (metric_unit.empty() && has_tag_unit) {
+      tls_metric_unit_scratch.assign(tls_tag_arena.data() + tag_unit_off, tag_unit_len);
+      metric_unit = std::string_view(tls_metric_unit_scratch);
+    }
+    if (metric_desc.empty() && has_tag_desc) {
+      tls_metric_desc_scratch.assign(tls_tag_arena.data() + tag_desc_off, tag_desc_len);
+      metric_desc = std::string_view(tls_metric_desc_scratch);
+    }
   }
 
   if (has_res_attrs) {
@@ -2157,6 +2332,8 @@ extractors::ExtractionResult ProcessNativeMetrics(lua_State* L, std::string_view
     core::ReserveScratchVector(tls_pos_bucket_counts);
     core::ReserveScratchVector(tls_neg_bucket_counts);
     core::ReserveScratchVector(tls_summary_quantiles);
+    core::ReserveScratchVector(tls_deferred_tags);
+    core::ReserveScratchString(tls_tag_arena);
 
     struct WriterTrimGuard {
       WriterTrimGuard() = default;
@@ -2173,6 +2350,8 @@ extractors::ExtractionResult ProcessNativeMetrics(lua_State* L, std::string_view
         core::ResetScratchVector(tls_pos_bucket_counts);
         core::ResetScratchVector(tls_neg_bucket_counts);
         core::ResetScratchVector(tls_summary_quantiles);
+        core::ResetScratchVector(tls_deferred_tags);
+        core::TrimScratchString(tls_tag_arena);
         core::TrimScratchString(tls_metric_name_scratch);
         core::TrimScratchString(tls_service_scratch);
         core::TrimScratchString(tls_scope_name_scratch);

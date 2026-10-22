@@ -1909,6 +1909,12 @@ TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
   auto mid_q_res = ProcessMetrics(L_, mid_quantile_err_json, 1);
   EXPECT_FALSE(mid_q_res.success);
   EXPECT_FALSE(mid_q_res.error.empty());
+
+  const std::string mid_atom_bucket_err_json =
+      R"({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"mid_atom_b","histogram":{"dataPoints":[{"count":1,"bucketCounts":["1","2",tru]}]}}]}]}]})";
+  auto mid_atom_b_res = ProcessMetrics(L_, mid_atom_bucket_err_json, 1);
+  EXPECT_FALSE(mid_atom_b_res.success);
+  EXPECT_FALSE(mid_atom_b_res.error.empty());
 }
 
 TEST_F(MetricsExtractorTest, JsonModeExemplarIdsNormalizedToLowercaseHex) {

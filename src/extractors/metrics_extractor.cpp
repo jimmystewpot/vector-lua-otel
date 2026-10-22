@@ -132,7 +132,7 @@ void ParseJsonExplicitBoundsVector(simdjson::ondemand::value& fv, std::vector<do
 }
 
 void ParseJsonQuantilesVector(simdjson::ondemand::value& fv,
-                              std::vector<std::pair<double, double>>& out) {
+                              std::vector<core::SummaryQuantile>& out) {
   out.clear();
   auto q_arr_res = fv.get_array();
   if (q_arr_res.error() == simdjson::INCORRECT_TYPE) {
@@ -180,7 +180,7 @@ void ParseJsonQuantilesVector(simdjson::ondemand::value& fv,
         q_value = core::ParseDouble(qfv);
       }
     }
-    out.emplace_back(q_quantile, q_value);
+    out.push_back(core::SummaryQuantile{q_quantile, q_value});
   }
 }
 
@@ -218,8 +218,7 @@ void ReadTableExplicitBoundsVector(lua_State* L, int arr_idx, std::vector<double
   }
 }
 
-void ReadTableQuantilesVector(lua_State* L, int arr_idx,
-                              std::vector<std::pair<double, double>>& out) {
+void ReadTableQuantilesVector(lua_State* L, int arr_idx, std::vector<core::SummaryQuantile>& out) {
   out.clear();
   int abs_idx = lua_absindex(L, arr_idx);
   if (!lua_istable(L, abs_idx)) {
@@ -232,128 +231,10 @@ void ReadTableQuantilesVector(lua_State* L, int arr_idx,
       int q_item_idx = lua_absindex(L, -1);
       double q_val = core::ReadTableDouble(L, q_item_idx, "quantile", "Quantile", 0.0);
       double v_val = core::ReadTableDouble(L, q_item_idx, "value", "Value", 0.0);
-      out.emplace_back(q_val, v_val);
+      out.push_back(core::SummaryQuantile{q_val, v_val});
     }
     lua_pop(L, 1);
   }
-}
-
-void WriteUint64Array(core::FastJsonWriter& w, const std::vector<uint64_t>& vec) {
-  w.StartArray();
-  for (size_t i = 0; i < vec.size(); ++i) {
-    w.Uint64(vec[i]);
-  }
-  w.EndArray();
-}
-
-void WriteDoubleArray(core::FastJsonWriter& w, const std::vector<double>& vec) {
-  w.StartArray();
-  for (size_t i = 0; i < vec.size(); ++i) {
-    w.Double(vec[i]);
-  }
-  w.EndArray();
-}
-
-void SerializeHistogramJson(core::FastJsonWriter& w, int64_t agg_temporality, uint64_t count,
-                            bool has_sum, double sum, bool has_min, double min_val, bool has_max,
-                            double max_val, const std::vector<uint64_t>& bucket_counts,
-                            const std::vector<double>& explicit_bounds) {
-  w.Reset();
-  w.StartObject();
-  w.Key("aggregationTemporality");
-  w.Int64(agg_temporality);
-  w.Key("count");
-  w.Uint64(count);
-  w.Key("sum");
-  w.Double(has_sum ? sum : 0.0);
-  if (has_min) {
-    w.Key("min");
-    w.Double(min_val);
-  }
-  if (has_max) {
-    w.Key("max");
-    w.Double(max_val);
-  }
-  w.Key("bucketCounts");
-  WriteUint64Array(w, bucket_counts);
-  w.Key("explicitBounds");
-  WriteDoubleArray(w, explicit_bounds);
-  w.EndObject();
-}
-
-void SerializeExpBucketsSubObject(core::FastJsonWriter& w, int64_t offset,
-                                  const std::vector<uint64_t>& bucket_counts) {
-  w.StartObject();
-  w.Key("offset");
-  w.Int64(offset);
-  w.Key("bucketCounts");
-  WriteUint64Array(w, bucket_counts);
-  w.EndObject();
-}
-
-void SerializeExponentialHistogramJson(core::FastJsonWriter& w, int64_t agg_temporality,
-                                       uint64_t count, bool has_sum, double sum, bool has_min,
-                                       double min_val, bool has_max, double max_val, int64_t scale,
-                                       uint64_t zero_count, double zero_threshold,
-                                       int64_t pos_offset, const std::vector<uint64_t>& pos_buckets,
-                                       int64_t neg_offset,
-                                       const std::vector<uint64_t>& neg_buckets) {
-  w.Reset();
-  w.StartObject();
-  w.Key("aggregationTemporality");
-  w.Int64(agg_temporality);
-  w.Key("count");
-  w.Uint64(count);
-  if (has_sum) {
-    w.Key("sum");
-    w.Double(sum);
-  }
-  if (has_min) {
-    w.Key("min");
-    w.Double(min_val);
-  }
-  if (has_max) {
-    w.Key("max");
-    w.Double(max_val);
-  }
-  w.Key("scale");
-  w.Int64(scale);
-  w.Key("zeroCount");
-  w.Uint64(zero_count);
-  w.Key("zeroThreshold");
-  w.Double(zero_threshold);
-  w.Key("positive");
-  SerializeExpBucketsSubObject(w, pos_offset, pos_buckets);
-  w.Key("negative");
-  SerializeExpBucketsSubObject(w, neg_offset, neg_buckets);
-  w.EndObject();
-}
-
-void WriteQuantilesArray(core::FastJsonWriter& w,
-                         const std::vector<std::pair<double, double>>& quantiles) {
-  w.StartArray();
-  for (size_t i = 0; i < quantiles.size(); ++i) {
-    w.StartObject();
-    w.Key("quantile");
-    w.Double(quantiles[i].first);
-    w.Key("value");
-    w.Double(quantiles[i].second);
-    w.EndObject();
-  }
-  w.EndArray();
-}
-
-void SerializeSummaryJson(core::FastJsonWriter& w, uint64_t count, bool has_sum, double sum,
-                          const std::vector<std::pair<double, double>>& quantiles) {
-  w.Reset();
-  w.StartObject();
-  w.Key("count");
-  w.Uint64(count);
-  w.Key("sum");
-  w.Double(has_sum ? sum : 0.0);
-  w.Key("quantileValues");
-  WriteQuantilesArray(w, quantiles);
-  w.EndObject();
 }
 
 bool ReadTableGenericMetricValue(lua_State* L, int obj_idx, bool& is_int, int64_t& i_out,
@@ -431,7 +312,7 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
   static thread_local std::vector<double> tls_explicit_bounds;
   static thread_local std::vector<uint64_t> tls_pos_buckets;
   static thread_local std::vector<uint64_t> tls_neg_buckets;
-  static thread_local std::vector<std::pair<double, double>> tls_quantiles;
+  static thread_local std::vector<core::SummaryQuantile> tls_quantiles;
 
   res_attrs_writer.Reset();
   scope_attrs_writer.Reset();
@@ -1057,7 +938,7 @@ ExtractionResult ProcessMetricsTableImpl(
     core::FastJsonWriter& exemplars_writer, core::FastJsonWriter& payload_writer,
     std::vector<uint64_t>& tls_bucket_counts, std::vector<double>& tls_explicit_bounds,
     std::vector<uint64_t>& tls_pos_buckets, std::vector<uint64_t>& tls_neg_buckets,
-    std::vector<std::pair<double, double>>& tls_quantiles, std::string& tls_scope_name_scratch,
+    std::vector<core::SummaryQuantile>& tls_quantiles, std::string& tls_scope_name_scratch,
     std::string& tls_scope_ver_scratch, std::string& tls_metric_name_scratch,
     std::string& tls_metric_desc_scratch, std::string& tls_metric_unit_scratch) {
   int rm_arr_idx = 0;
@@ -1466,7 +1347,7 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
   static thread_local std::vector<double> tls_explicit_bounds;
   static thread_local std::vector<uint64_t> tls_pos_buckets;
   static thread_local std::vector<uint64_t> tls_neg_buckets;
-  static thread_local std::vector<std::pair<double, double>> tls_quantiles;
+  static thread_local std::vector<core::SummaryQuantile> tls_quantiles;
   static thread_local std::string tls_scope_name_scratch;
   static thread_local std::string tls_scope_ver_scratch;
   static thread_local std::string tls_metric_name_scratch;

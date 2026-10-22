@@ -2018,5 +2018,79 @@ TEST_F(OtlpCommonTest, SerializeExemplarsJson_FullAndEdgeCases) {
   EXPECT_EQ(writer_.Str(), "[]");
 }
 
+TEST_F(OtlpCommonTest, WriteAttributesJson_DeduplicatesKeysAndPreservesMultiKeyWrapperNames) {
+  // 1. Duplicate keys in OTLP KeyValue array and nested kvlistValue collapse (last-key-wins)
+  // 2. Multi-key object starting with "stringValue" or "intValue" is NOT unwrapped as OTLP AnyValue
+  // 3. Valid "service.name" is not clobbered by empty "service_name"
+  auto json = R"({
+    "attributes": [
+      { "key": "service.name", "value": { "stringValue": "canonical-svc" } },
+      { "key": "service_name", "value": { "stringValue": "" } },
+      { "key": "dup", "value": { "intValue": 1 } },
+      { "key": "keep", "value": { "stringValue": "mid" } },
+      { "key": "dup", "value": { "intValue": 2 } },
+      { "key": "multi_first", "value": { "stringValue": "v", "other": 1 } },
+      { "key": "kv_dup", "value": { "kvlistValue": { "values": [
+        { "key": "x", "value": { "intValue": 10 } },
+        { "key": "x", "value": { "intValue": 20 } }
+      ] } } }
+    ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto attrs = obj["attributes"].value();
+
+  std::string_view svc = "unknown_service";
+  writer_.Reset();
+  WriteAttributesJson(writer_, attrs, &svc);
+  EXPECT_EQ(svc, "canonical-svc");
+  EXPECT_EQ(
+      writer_.Str(),
+      R"({"service.name":"canonical-svc","service_name":"","keep":"mid","dup":2,"multi_first":{"stringValue":"v","other":1},"kv_dup":{"x":20}})");
+}
+
+TEST_F(OtlpCommonTest, ExtractServiceName_SupportsSnakeCaseAndRejectsEmptyString) {
+  auto json = R"({
+    "res_snake": {
+      "attributes": [
+        { "key": "service_name", "value": { "stringValue": "snake-attr-svc" } }
+      ]
+    },
+    "res_empty": {
+      "attributes": [
+        { "key": "service.name", "value": { "stringValue": "" } }
+      ]
+    },
+    "res_precedence": {
+      "attributes": [
+        { "key": "service.name", "value": { "stringValue": "dot-wins" } },
+        { "key": "service_name", "value": { "stringValue": "" } }
+      ]
+    }
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto root = doc.get_object().value();
+
+  auto r_snake = root["res_snake"].get_object().value();
+  EXPECT_EQ(ExtractServiceName(r_snake), "snake-attr-svc");
+
+  auto r_empty = root["res_empty"].get_object().value();
+  EXPECT_EQ(ExtractServiceName(r_empty), "unknown_service");
+
+  auto r_prec = root["res_precedence"].get_object().value();
+  EXPECT_EQ(ExtractServiceName(r_prec), "dot-wins");
+}
+
+TEST_F(OtlpCommonTest, MalformedAtomsThrowInNumericParsersAndExemplars) {
+  auto json = R"({
+    "bad_bool_u64": tru,
+    "bad_ex": [{ "asInt": "1", "filteredAttributes": [1, 2, } ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto v_u64 = obj["bad_bool_u64"].value();
+  EXPECT_THROW(ParseUint64(v_u64), std::runtime_error);
+}
+
 }  // namespace
 }  // namespace vector_otel::core
