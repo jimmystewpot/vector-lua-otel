@@ -14,6 +14,7 @@
 #include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
 #include "vector_otel/native_extractors/native_logs_extractor.hpp"
+#include "vector_otel/native_extractors/native_traces_extractor.hpp"
 
 namespace vector_otel::core {
 namespace {
@@ -465,6 +466,81 @@ const Sig kNativeLogsSig{
      "return {{unrelated=1}}"},
     native_extractors::ProcessNativeLogs,
     native_extractors::ProcessNativeLogsTable,
+    nullptr,
+    /*native=*/true,
+    /*shared_tables=*/false};
+
+// ---- native traces ----------------------------------------------------------------------------
+
+std::string NativeSpanJson(int r, int i) {
+  const std::string n = std::to_string(i);
+  return "{\"start_time_unix_nano\":\"2023-11-14T22:13:20.000000001Z\","
+         "\"end_time_unix_nano\":\"2023-11-14T22:13:20.000000999Z\","
+         "\"trace_id\":\"0102030405060708090a0b0c0d0e0f10\",\"span_id\":\"0102030405060708\","
+         "\"name\":\"span-" +
+         n +
+         "\",\"kind\":2,\"status\":{\"code\":1,\"message\":\"fine\"},"
+         "\"resources\":{\"service.name\":\"svc-" +
+         std::to_string(r) + "\"},\"scope\":{\"name\":\"scope-" + std::to_string(r) +
+         "\",\"version\":\"1.0\"},"
+         "\"attributes\":{\"k\":\"v" +
+         n +
+         "\"},\"events\":[{\"time_unix_nano\":"
+         "\"2023-11-14T22:13:20.000000500Z\",\"name\":\"ev\",\"attributes\":{\"ea\":\"eb\"}}],"
+         "\"links\":[{\"trace_id\":\"aa\",\"span_id\":\"bb\",\"attributes\":{\"la\":\"lb\"}}]}";
+}
+
+std::string NativeSpanLua(int r, int i) {
+  const std::string n = std::to_string(i);
+  return "{start_time_unix_nano=\"2023-11-14T22:13:20.000000001Z\","
+         "end_time_unix_nano=\"2023-11-14T22:13:20.000000999Z\","
+         "trace_id=\"0102030405060708090a0b0c0d0e0f10\",span_id=\"0102030405060708\","
+         "name=\"span-" +
+         n +
+         "\",kind=2,status={code=1,message=\"fine\"},"
+         "resources={[\"service.name\"]=\"svc-" +
+         std::to_string(r) + "\"},scope={name=\"scope-" + std::to_string(r) +
+         "\",version=\"1.0\"},"
+         "attributes={k=\"v" +
+         n +
+         "\"},events={{time_unix_nano="
+         "\"2023-11-14T22:13:20.000000500Z\",name=\"ev\",attributes={ea=\"eb\"}}},"
+         "links={{trace_id=\"aa\",span_id=\"bb\",attributes={la=\"lb\"}}}}";
+}
+
+std::string NativeTracesJson(int resources, int records) {
+  std::string out = "[";
+  for (int r = 0; r < resources; ++r) {
+    for (int i = 0; i < records; ++i) {
+      if (r > 0 || i > 0) out += ',';
+      out += NativeSpanJson(r, i);
+    }
+  }
+  return out + "]";
+}
+
+std::string NativeTracesLua(int resources, int records) {
+  std::string out = "return {";
+  for (int r = 0; r < resources; ++r) {
+    for (int i = 0; i < records; ++i) out += NativeSpanLua(r, i) + ",";
+  }
+  return out + "}";
+}
+
+const Sig kNativeTracesSig{
+    "traces",
+    NativeTracesJson,
+    NativeTracesLua,
+    false,
+    {"\"SpanName\":\"span-0\"", "\"ServiceName\":\"svc-0\"", "\"SpanAttributes\":{\"k\":\"v0\"}",
+     "\"SpanKind\":\"SPAN_KIND_SERVER\"", "\"StatusCode\":\"STATUS_CODE_OK\"", "\"Duration\":998",
+     "\"ScopeName\":\"scope-0\"", "\"StatusMessage\":\"fine\"", "\"Name\":\"ev\"",
+     "\"SpanId\":\"bb\""},
+    {"{}", "[]", "[{}]", "{\"log\":{}}", "{\"trace\":[]}", "{\"log\":[{}]}", "[{\"trace\":{}}]"},
+    {"return {}", "return {{}}", "return {log={}}", "return {trace={{}}}", "return {{trace={}}}",
+     "return {{unrelated=1}}"},
+    native_extractors::ProcessNativeTraces,
+    native_extractors::ProcessNativeTracesTable,
     nullptr,
     /*native=*/true,
     /*shared_tables=*/false};
@@ -1270,9 +1346,167 @@ TEST(FailureSafetyNativeLogs, TimestampFallsBackToObservedThenProcessedAt) {
   }
 }
 
+// ---- native traces: accepted shapes, mappings, malformed entries -----------------------------
+
+struct NativeTraceCase {
+  const char* name;
+  const char* json;
+  int json_count;
+  const char* lua;
+  int lua_count;
+  std::vector<std::string> fragments;  // each must appear in the first delivered row
+};
+
+TEST(FailureSafetyNativeTraces, AcceptedShapesAndMappings) {
+  const NativeTraceCase cases[] = {
+      {"single span",
+       R"({"name":"a"})",
+       1,
+       R"(return {name="a"})",
+       1,
+       {R"("SpanName":"a")", R"("SpanKind":"SPAN_KIND_UNSPECIFIED")",
+        R"("StatusCode":"STATUS_CODE_UNSET")", R"("Events":"[]")", R"("Links":"[]")",
+        R"("ResourceAttributes":{})", R"("SpanAttributes":{})", R"("Duration":0)",
+        R"("Timestamp":"20)"}},
+      {"root array",
+       R"([{"name":"a"},{"name":"b"}])",
+       2,
+       R"(return {{name="a"},{name="b"}})",
+       2,
+       {R"("SpanName":"a")"}},
+      {"log wrapper",
+       R"({"log":{"name":"a"}})",
+       1,
+       R"(return {log={name="a"}})",
+       1,
+       {R"("SpanName":"a")"}},
+      {"trace wrapper array",
+       R"({"trace":[{"name":"a"},{"name":"b"}]})",
+       2,
+       R"(return {trace={{name="a"},{name="b"}}})",
+       2,
+       {R"("SpanName":"a")"}},
+      {"matching wrapper replaces the enclosing span",
+       R"({"log":{"name":"inner"},"name":"outer"})",
+       1,
+       R"(return {log={name="inner"},name="outer"})",
+       1,
+       {R"("SpanName":"inner")"}},
+      {"unrecognised wrapper keeps the enclosing span's staged fields",
+       R"({"resources":{"service.name":"keep"},"events":[{"name":"e"}],"log":{"zzz":1},"name":"a"})",
+       1,
+       R"(return {resources={["service.name"]="keep"},events={{name="e"}},log={zzz=1},name="a"})",
+       1,
+       {R"("ServiceName":"keep")", R"("ResourceAttributes":{"service.name":"keep"})",
+        R"("Name":"e")"}},
+      {"kind and status as strings",
+       R"({"kind":"SPAN_KIND_CLIENT","status":{"code":"STATUS_CODE_ERROR","message":"bad"}})",
+       1,
+       R"(return {kind="SPAN_KIND_CLIENT",status={code="STATUS_CODE_ERROR",message="bad"}})",
+       1,
+       {R"("SpanKind":"SPAN_KIND_CLIENT")", R"("StatusCode":"STATUS_CODE_ERROR")",
+        R"("StatusMessage":"bad")"}},
+      {"kind and status as integers",
+       R"({"kind":3,"status":{"code":2}})",
+       1,
+       R"(return {kind=3,status={code=2}})",
+       1,
+       {R"("SpanKind":"SPAN_KIND_CLIENT")", R"("StatusCode":"STATUS_CODE_ERROR")"}},
+      {"flat status fields",
+       R"({"status_code":1,"status_message":"m"})",
+       1,
+       R"(return {status_code=1,status_message="m"})",
+       1,
+       {R"("StatusCode":"STATUS_CODE_OK")", R"("StatusMessage":"m")"}},
+      {"duration is end minus start",
+       R"({"start_timestamp":"2023-11-14T22:13:20Z","end_timestamp":"2023-11-14T22:13:21Z"})",
+       1,
+       R"(return {start_timestamp="2023-11-14T22:13:20Z",end_timestamp="2023-11-14T22:13:21Z"})",
+       1,
+       {R"("Duration":1000000000)"}},
+      {"end before start gives zero duration",
+       R"({"start_timestamp":"2023-11-14T22:13:21Z","end_timestamp":"2023-11-14T22:13:20Z"})",
+       1,
+       R"(return {start_timestamp="2023-11-14T22:13:21Z",end_timestamp="2023-11-14T22:13:20Z"})",
+       1,
+       {R"("Duration":0)"}},
+      {"ingest timestamp is the fallback",
+       R"({"name":"a","ingest_timestamp":"2023-11-14T22:13:20Z"})",
+       1,
+       R"(return {name="a",ingest_timestamp="2023-11-14T22:13:20Z"})",
+       1,
+       {R"("Timestamp":"2023-11-14T22:13:20.000000000Z")"}},
+      {"top-level service name",
+       R"({"service_name":"top","name":"a"})",
+       1,
+       R"(return {service_name="top",name="a"})",
+       1,
+       {R"("ServiceName":"top")"}},
+      {"resource service name wins",
+       R"({"service_name":"top","resources":{"service.name":"res"}})",
+       1,
+       R"(return {service_name="top",resources={["service.name"]="res"}})",
+       1,
+       {R"("ServiceName":"res")"}},
+      {"events and links serialise to JSON arrays",
+       R"({"events":[{"name":"e","attributes":{"x":"y"}}],"links":[{"trace_id":"t","span_id":"s"}]})",
+       1,
+       R"(return {events={{name="e",attributes={x="y"}}},links={{trace_id="t",span_id="s"}}})",
+       1,
+       {R"("Name":"e")", R"("x":"y")", R"("TraceId":"t")"}},
+  };
+  for (const NativeTraceCase& c : cases) {
+    for (bool table : {false, true}) {
+      SCOPED_TRACE(std::string(c.name) + (table ? " (table)" : " (json)"));
+      RawState s;
+      ProcRecorder rec;
+      rec.dump = true;
+      const ProcResult r =
+          CallProcess(s, true, "traces", table ? TablePayload(c.lua) : JsonPayload(c.json), rec);
+      ASSERT_EQ(r.status, LUA_OK);
+      ASSERT_EQ(r.nresults, 2) << r.error;
+      const int expected = table ? c.lua_count : c.json_count;
+      EXPECT_EQ(r.count, expected);
+      EXPECT_EQ(rec.rows, expected);
+      ASSERT_FALSE(rec.events.empty());
+      for (const std::string& fragment : c.fragments) {
+        EXPECT_NE(rec.events[0].find(fragment), std::string::npos)
+            << fragment << " in " << rec.events[0];
+      }
+      for (int i = 0; i < kInvocationSlotCount; ++i) {
+        EXPECT_EQ(AnchorSlotType(s.L(), ModuleKind::Native, static_cast<AnchorSlot>(i)),
+                  LUA_TBOOLEAN);
+      }
+    }
+  }
+}
+
+TEST(FailureSafetyNativeTraces, MalformedEntriesAndRoots) {
+  RawState s;
+  ProcRecorder rec;
+  const ProcResult r = CallProcess(s, true, "traces", JsonPayload(R"([{"name":"a"},5])"), rec);
+  ASSERT_EQ(r.nresults, 3);
+  EXPECT_TRUE(r.first_nil);
+  EXPECT_EQ(r.count, rec.rows) << "count must equal rows in completed callbacks";
+  EXPECT_EQ(r.count, (1 / kN) * kN) << "rows still queued for a batch are discarded";
+
+  ProcRecorder scalar;
+  const ProcResult rs = CallProcess(s, true, "traces", JsonPayload("5"), scalar);
+  ASSERT_EQ(rs.nresults, 3);
+  EXPECT_EQ(rs.error, "root JSON value must be an object or array");
+  EXPECT_EQ(rs.count, 0);
+
+  ProcRecorder skipped;
+  const ProcResult rt =
+      CallProcess(s, true, "traces",
+                  TablePayload(R"(return {{name="a"},5,"x",{unrelated=1},{name="b"}})"), skipped);
+  ASSERT_EQ(rt.nresults, 2) << rt.error;
+  EXPECT_EQ(rt.count, 2);
+}
+
 INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
                          testing::Values(&kLogsSig, &kTracesSig, &kMetricsSig, &kAnyMetricsSig,
-                                         &kNativeLogsSig),
+                                         &kNativeLogsSig, &kNativeTracesSig),
                          [](const testing::TestParamInfo<const Sig*>& info) {
                            // `name` is the process() signal; the all-types variant shares it.
                            if (info.param == &kAnyMetricsSig)

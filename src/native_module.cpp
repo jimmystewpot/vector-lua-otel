@@ -21,8 +21,8 @@ int ProcessNativeLogsFn(lua_State* L) {
 }
 
 int ProcessNativeTracesFn(lua_State* L) {
-  return core::ProcessDispatcher<native_extractors::ProcessNativeTraces,
-                                 native_extractors::ProcessNativeTracesTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Native, core::Signal::Traces,
+                               native_extractors::NativeTracesExtractors());
 }
 
 int ProcessNativeMetricsFn(lua_State* L) {

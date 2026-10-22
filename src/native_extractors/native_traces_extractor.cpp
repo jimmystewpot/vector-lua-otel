@@ -16,10 +16,12 @@ extern "C" {
 }
 
 #include "vector_otel/core/fast_json_writer.hpp"
-#include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/parser.hpp"
+#include "vector_otel/core/process_runner.hpp"
+#include "vector_otel/core/row_emitter.hpp"
 #include "vector_otel/core/scratch.hpp"
+#include "vector_otel/core/staged_row.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
@@ -27,10 +29,55 @@ namespace vector_otel::native_extractors {
 
 namespace {
 
-using core::ScopedLuaRef;
+using core::ErrorCode;
+using core::OperationContext;
 using extractors::ExtractionResult;
 
 constexpr int kMaxJsonDepth = 16;
+
+// Reusable per-thread staging buffers (capacity retained between invocations). A wrapper nests at
+// most one level, so two rows (and event/link writers) cover an enclosing object and its record.
+struct NativeTracesScratch {
+  core::FastJsonWriter writer;  // attribute / AnyValue serialisation, table-mode events and links
+  core::FastJsonWriter events[2];
+  core::FastJsonWriter links[2];
+  core::StagedRow rows[2];
+};
+
+NativeTracesScratch& Scratch() {
+  static thread_local NativeTracesScratch scratch;
+  return scratch;
+}
+
+struct TableScratch {
+  std::string service;
+  std::string scope_name;
+  std::string scope_version;
+  std::string status_msg;
+  std::string item;
+};
+
+TableScratch& TScratch() {
+  static thread_local TableScratch scratch;
+  return scratch;
+}
+
+bool FailJson(OperationContext& ctx, simdjson::error_code code) {
+  ctx.error.Set(ErrorCode::Json, simdjson::error_message(code));
+  return false;
+}
+
+void ResetWriters(NativeTracesScratch& s) {
+  s.writer.Reset();
+  for (auto& w : s.events) w.Reset();
+  for (auto& w : s.links) w.Reset();
+}
+
+void TrimWriters(NativeTracesScratch& s) noexcept {
+  s.writer.Trim();
+  for (auto& w : s.events) w.Trim();
+  for (auto& w : s.links) w.Trim();
+}
 
 std::string_view SpanKindFromInt(int64_t k) noexcept {
   switch (k) {
@@ -455,373 +502,6 @@ void SerializeNativeSpanLinksJson(simdjson::ondemand::value& links_val,
   links_writer.EndArray();
 }
 
-bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_obj,
-                                  std::string_view processed_at,
-                                  core::FastJsonWriter& events_writer,
-                                  core::FastJsonWriter& links_writer,
-                                  core::FastJsonWriter& attr_writer, core::LuaEmitter& emitter,
-                                  std::string& err_out, int depth = 0,
-                                  bool* out_matched = nullptr) {
-  uint64_t start_ns = 0;
-  uint64_t end_ns = 0;
-  uint64_t ingest_ns = 0;
-  bool has_start = false;
-  bool has_end = false;
-  bool has_ingest = false;
-
-  std::string_view trace_id;
-  std::string_view span_id;
-  std::string_view parent_span_id;
-  std::string_view trace_state;
-  std::string_view span_name;
-  std::string_view span_kind = "SPAN_KIND_UNSPECIFIED";
-  std::string_view res_service_name = "unknown_service";
-  std::string_view top_service_name;
-  std::string_view scope_name;
-  std::string_view scope_version;
-  std::string_view status_code = "STATUS_CODE_UNSET";
-  std::string_view status_msg;
-
-  bool has_events = false;
-  bool has_links = false;
-  bool has_recognized_field = false;
-
-  ScopedLuaRef res_attrs_scoped(L, LUA_NOREF);
-  ScopedLuaRef span_attrs_scoped(L, LUA_NOREF);
-
-  events_writer.Reset();
-  links_writer.Reset();
-
-  for (auto field_res : rec_obj) {
-    if (field_res.error() != simdjson::SUCCESS) {
-      err_out = std::string(simdjson::error_message(field_res.error()));
-      return false;
-    }
-    auto k_res = field_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) {
-      err_out = std::string(simdjson::error_message(k_res.error()));
-      return false;
-    }
-    std::string_view k = k_res.value();
-    auto fv_res = field_res.value();
-    if (fv_res.error() != simdjson::SUCCESS) {
-      err_out = std::string(simdjson::error_message(fv_res.error()));
-      return false;
-    }
-    auto fv = fv_res.value();
-
-    if ((k == "log" || k == "trace") && depth == 0) {
-      auto t_res = fv.type();
-      if (t_res.error() != simdjson::SUCCESS) {
-        err_out = std::string(simdjson::error_message(t_res.error()));
-        return false;
-      }
-      if (t_res.value() == simdjson::ondemand::json_type::object) {
-        auto inner_obj_res = fv.get_object();
-        if (inner_obj_res.error() != simdjson::SUCCESS) {
-          err_out = std::string(simdjson::error_message(inner_obj_res.error()));
-          return false;
-        }
-        auto inner_obj = inner_obj_res.value();
-        bool inner_matched = false;
-        if (!ExtractNativeTraceObjectJson(L, inner_obj, processed_at, events_writer, links_writer,
-                                          attr_writer, emitter, err_out, depth + 1,
-                                          &inner_matched)) {
-          return false;
-        }
-        if (inner_matched) {
-          if (out_matched != nullptr) *out_matched = true;
-          return true;
-        }
-        continue;
-      } else if (t_res.value() == simdjson::ondemand::json_type::array) {
-        auto inner_arr_res = fv.get_array();
-        if (inner_arr_res.error() != simdjson::SUCCESS) {
-          err_out = std::string(simdjson::error_message(inner_arr_res.error()));
-          return false;
-        }
-        bool any_matched = false;
-        for (auto elem_res : inner_arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) {
-            err_out = std::string(simdjson::error_message(elem_res.error()));
-            return false;
-          }
-          auto elem_obj_res = elem_res.value().get_object();
-          if (elem_obj_res.error() != simdjson::SUCCESS) {
-            err_out = std::string(simdjson::error_message(elem_obj_res.error()));
-            return false;
-          }
-          auto elem_obj = elem_obj_res.value();
-          bool elem_matched = false;
-          if (!ExtractNativeTraceObjectJson(L, elem_obj, processed_at, events_writer, links_writer,
-                                            attr_writer, emitter, err_out, depth + 1,
-                                            &elem_matched)) {
-            return false;
-          }
-          any_matched = any_matched || elem_matched;
-        }
-        if (any_matched) {
-          if (out_matched != nullptr) *out_matched = true;
-          return true;
-        }
-        continue;
-      }
-      continue;
-    }
-
-    if (k == "start_time_unix_nano" || k == "startTimeUnixNano" || k == "start_timestamp" ||
-        k == "timestamp") {
-      has_recognized_field = true;
-      uint64_t parsed = 0;
-      if (core::ParseJsonTimestamp(fv, parsed)) {
-        start_ns = parsed;
-        has_start = true;
-      }
-    } else if (k == "end_time_unix_nano" || k == "endTimeUnixNano" || k == "end_timestamp") {
-      has_recognized_field = true;
-      uint64_t parsed = 0;
-      if (core::ParseJsonTimestamp(fv, parsed)) {
-        end_ns = parsed;
-        has_end = true;
-      }
-    } else if (k == "ingest_timestamp" || k == "ingestTimestamp") {
-      has_recognized_field = true;
-      uint64_t parsed = 0;
-      if (core::ParseJsonTimestamp(fv, parsed)) {
-        ingest_ns = parsed;
-        has_ingest = true;
-      }
-    } else if (k == "trace_id" || k == "traceId") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        trace_id = s_res.value();
-      }
-    } else if (k == "span_id" || k == "spanId") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        span_id = s_res.value();
-      }
-    } else if (k == "parent_span_id" || k == "parentSpanId") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        parent_span_id = s_res.value();
-      }
-    } else if (k == "trace_state" || k == "traceState") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        trace_state = s_res.value();
-      }
-    } else if (k == "name" || k == "span_name" || k == "spanName") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        span_name = s_res.value();
-      }
-    } else if (k == "kind" || k == "span_kind" || k == "spanKind") {
-      has_recognized_field = true;
-      span_kind = ParseJsonSpanKind(fv);
-    } else if (k == "status") {
-      has_recognized_field = true;
-      auto status_obj_res = fv.get_object();
-      if (status_obj_res.error() == simdjson::SUCCESS) {
-        for (auto st_res : status_obj_res.value()) {
-          if (st_res.error() != simdjson::SUCCESS) continue;
-          auto stk_res = st_res.unescaped_key();
-          if (stk_res.error() != simdjson::SUCCESS) continue;
-          std::string_view stk = stk_res.value();
-          auto stv_res = st_res.value();
-          if (stv_res.error() != simdjson::SUCCESS) continue;
-          auto stv = stv_res.value();
-          if (stk == "code") {
-            status_code = ParseJsonStatusCode(stv);
-          } else if (stk == "message") {
-            auto m_res = stv.get_string();
-            if (m_res.error() == simdjson::SUCCESS) {
-              status_msg = m_res.value();
-            }
-          }
-        }
-      }
-    } else if (k == "status_code" || k == "statusCode") {
-      has_recognized_field = true;
-      if (status_code == "STATUS_CODE_UNSET") {
-        status_code = ParseJsonStatusCode(fv);
-      }
-    } else if (k == "status_message" || k == "statusMessage") {
-      has_recognized_field = true;
-      if (status_msg.empty()) {
-        auto m_res = fv.get_string();
-        if (m_res.error() == simdjson::SUCCESS) {
-          status_msg = m_res.value();
-        }
-      }
-    } else if (k == "resources" || k == "resource_attributes" || k == "resourceAttributes" ||
-               k == "resource") {
-      has_recognized_field = true;
-      if (L != nullptr) {
-        res_service_name = "unknown_service";
-        core::PushAttributesTable(L, fv, attr_writer, &res_service_name);
-        res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-      }
-    } else if (k == "scope") {
-      has_recognized_field = true;
-      auto s_obj_res = fv.get_object();
-      if (s_obj_res.error() == simdjson::SUCCESS) {
-        for (auto sf_res : s_obj_res.value()) {
-          if (sf_res.error() != simdjson::SUCCESS) continue;
-          auto sk_res = sf_res.unescaped_key();
-          if (sk_res.error() != simdjson::SUCCESS) continue;
-          std::string_view sk = sk_res.value();
-          auto sfv_res = sf_res.value();
-          if (sfv_res.error() != simdjson::SUCCESS) continue;
-          auto sfv = sfv_res.value();
-          if (sk == "name") {
-            auto s_res = sfv.get_string();
-            if (s_res.error() == simdjson::SUCCESS) {
-              scope_name = s_res.value();
-            }
-          } else if (sk == "version") {
-            auto s_res = sfv.get_string();
-            if (s_res.error() == simdjson::SUCCESS) {
-              scope_version = s_res.value();
-            }
-          }
-        }
-      }
-    } else if (k == "scope_name" || k == "scopeName") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS && scope_name.empty()) {
-        scope_name = s_res.value();
-      }
-    } else if (k == "scope_version" || k == "scopeVersion") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS && scope_version.empty()) {
-        scope_version = s_res.value();
-      }
-    } else if (k == "attributes" || k == "span_attributes" || k == "spanAttributes") {
-      has_recognized_field = true;
-      if (L != nullptr) {
-        core::PushAttributesTable(L, fv, attr_writer);
-        span_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-      }
-    } else if (k == "events") {
-      has_recognized_field = true;
-      events_writer.Reset();
-      SerializeNativeSpanEventsJson(fv, events_writer, attr_writer);
-      has_events = true;
-    } else if (k == "links") {
-      has_recognized_field = true;
-      links_writer.Reset();
-      SerializeNativeSpanLinksJson(fv, links_writer, attr_writer);
-      has_links = true;
-    } else if (k == "service_name" || k == "service") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        top_service_name = s_res.value();
-      }
-    }
-  }
-
-  if (!has_recognized_field) {
-    return true;
-  }
-  if (out_matched != nullptr) {
-    *out_matched = true;
-  }
-
-  if (!has_events) {
-    events_writer.Reset();
-    events_writer.StartArray();
-    events_writer.EndArray();
-  }
-  if (!has_links) {
-    links_writer.Reset();
-    links_writer.StartArray();
-    links_writer.EndArray();
-  }
-
-  std::string_view service_name = res_service_name;
-  if (service_name.empty() || service_name == "unknown_service") {
-    if (!top_service_name.empty()) {
-      service_name = top_service_name;
-    } else {
-      service_name = "unknown_service";
-    }
-  }
-
-  std::array<char, 32> ts_buf;
-  std::string_view timestamp_sv = processed_at;
-  if (has_start && start_ns > 0) {
-    core::FormatIso8601Nano(start_ns, ts_buf.data());
-    timestamp_sv = std::string_view(ts_buf.data(), 30);
-  } else if (has_ingest && ingest_ns > 0) {
-    core::FormatIso8601Nano(ingest_ns, ts_buf.data());
-    timestamp_sv = std::string_view(ts_buf.data(), 30);
-  } else if (has_start || has_ingest) {
-    core::FormatIso8601Nano(0, ts_buf.data());
-    timestamp_sv = std::string_view(ts_buf.data(), 30);
-  }
-
-  uint64_t delta =
-      (has_start && has_end && end_ns >= start_ns && start_ns > 0) ? (end_ns - start_ns) : 0;
-  constexpr uint64_t kMaxDuration = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-  int64_t duration = static_cast<int64_t>(std::min<uint64_t>(delta, kMaxDuration));
-
-  emitter.StartRecord();
-  emitter.SetString("Timestamp", timestamp_sv);
-  emitter.SetString("TraceId", trace_id);
-  emitter.SetString("SpanId", span_id);
-  emitter.SetString("ParentSpanId", parent_span_id);
-  emitter.SetString("TraceState", trace_state);
-  emitter.SetString("SpanName", span_name);
-  emitter.SetString("SpanKind", span_kind);
-  emitter.SetString("ServiceName", service_name);
-
-  if (L != nullptr) {
-    if (res_attrs_scoped.get() != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_scoped.get());
-      res_attrs_scoped.reset();
-    } else {
-      lua_newtable(L);
-    }
-    emitter.SetTableFromStack("ResourceAttributes");
-  }
-
-  emitter.SetString("ScopeName", scope_name);
-  emitter.SetString("ScopeVersion", scope_version);
-
-  if (L != nullptr) {
-    if (span_attrs_scoped.get() != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, span_attrs_scoped.get());
-      span_attrs_scoped.reset();
-    } else {
-      lua_newtable(L);
-    }
-    emitter.SetTableFromStack("SpanAttributes");
-  }
-
-  emitter.SetInt64("Duration", duration);
-  emitter.SetString("StatusCode", status_code);
-  emitter.SetString("StatusMessage", status_msg);
-  emitter.SetString("Events", events_writer.Str());
-  emitter.SetString("Links", links_writer.Str());
-  emitter.SetString("processed_at", processed_at);
-
-  emitter.EndRecord();
-  if (emitter.HasError()) {
-    err_out = std::string(emitter.ErrorMessage());
-    return false;
-  }
-  return true;
-}
-
 bool HasNativeTraceFields(lua_State* L, int table_idx) {
   int abs_idx = lua_absindex(L, table_idx);
   if (!lua_istable(L, abs_idx) || core::IsLuaTableEmpty(L, abs_idx)) {
@@ -1077,18 +757,359 @@ void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, core::FastJsonWr
   writer.EndArray();
 }
 
-bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view processed_at,
-                                   core::FastJsonWriter& writer, std::string& tls_service_scratch,
-                                   std::string& tls_scope_name_scratch,
-                                   std::string& tls_scope_ver_scratch,
-                                   std::string& tls_status_msg_scratch,
-                                   std::string& tls_item_scratch, core::LuaEmitter& emitter,
-                                   std::string& err_out) {
-  if (!lua_checkstack(L, 16)) {
-    err_out = "Lua stack overflow during native trace extraction";
-    return false;
+bool ExtractNativeTraceObjectJson(OperationContext& ctx, NativeTracesScratch& s,
+                                  simdjson::ondemand::object& rec_obj,
+                                  std::string_view processed_at, int depth = 0,
+                                  bool* out_matched = nullptr) {
+  // A nested wrapper object stages into its own row and writers, so an unrecognised wrapper never
+  // disturbs what the enclosing object has staged so far.
+  core::StagedRow& row = s.rows[depth];
+  core::FastJsonWriter& events_writer = s.events[depth];
+  core::FastJsonWriter& links_writer = s.links[depth];
+  core::FastJsonWriter& attr_writer = s.writer;
+  core::RowEmitter emitter(ctx, row);
+  emitter.StartRecord();
+  uint64_t start_ns = 0;
+  uint64_t end_ns = 0;
+  uint64_t ingest_ns = 0;
+  bool has_start = false;
+  bool has_end = false;
+  bool has_ingest = false;
+
+  std::string_view trace_id;
+  std::string_view span_id;
+  std::string_view parent_span_id;
+  std::string_view trace_state;
+  std::string_view span_name;
+  std::string_view span_kind = "SPAN_KIND_UNSPECIFIED";
+  std::string_view res_service_name = "unknown_service";
+  std::string_view top_service_name;
+  std::string_view scope_name;
+  std::string_view scope_version;
+  std::string_view status_code = "STATUS_CODE_UNSET";
+  std::string_view status_msg;
+
+  bool has_events = false;
+  bool has_links = false;
+  bool has_recognized_field = false;
+
+  bool has_res_attrs = false;
+  bool has_span_attrs = false;
+
+  events_writer.Reset();
+  links_writer.Reset();
+
+  for (auto field_res : rec_obj) {
+    if (field_res.error() != simdjson::SUCCESS) {
+      return FailJson(ctx, field_res.error());
+    }
+    auto k_res = field_res.unescaped_key();
+    if (k_res.error() != simdjson::SUCCESS) {
+      return FailJson(ctx, k_res.error());
+    }
+    std::string_view k = k_res.value();
+    auto fv_res = field_res.value();
+    if (fv_res.error() != simdjson::SUCCESS) {
+      return FailJson(ctx, fv_res.error());
+    }
+    auto fv = fv_res.value();
+
+    if ((k == "log" || k == "trace") && depth == 0) {
+      auto t_res = fv.type();
+      if (t_res.error() != simdjson::SUCCESS) {
+        return FailJson(ctx, t_res.error());
+      }
+      if (t_res.value() == simdjson::ondemand::json_type::object) {
+        auto inner_obj_res = fv.get_object();
+        if (inner_obj_res.error() != simdjson::SUCCESS) {
+          return FailJson(ctx, inner_obj_res.error());
+        }
+        auto inner_obj = inner_obj_res.value();
+        bool inner_matched = false;
+        if (!ExtractNativeTraceObjectJson(ctx, s, inner_obj, processed_at, depth + 1,
+                                          &inner_matched)) {
+          return false;
+        }
+        if (inner_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
+      } else if (t_res.value() == simdjson::ondemand::json_type::array) {
+        auto inner_arr_res = fv.get_array();
+        if (inner_arr_res.error() != simdjson::SUCCESS) {
+          return FailJson(ctx, inner_arr_res.error());
+        }
+        bool any_matched = false;
+        for (auto elem_res : inner_arr_res.value()) {
+          if (elem_res.error() != simdjson::SUCCESS) {
+            return FailJson(ctx, elem_res.error());
+          }
+          auto elem_obj_res = elem_res.value().get_object();
+          if (elem_obj_res.error() != simdjson::SUCCESS) {
+            return FailJson(ctx, elem_obj_res.error());
+          }
+          auto elem_obj = elem_obj_res.value();
+          bool elem_matched = false;
+          if (!ExtractNativeTraceObjectJson(ctx, s, elem_obj, processed_at, depth + 1,
+                                            &elem_matched)) {
+            return false;
+          }
+          any_matched = any_matched || elem_matched;
+        }
+        if (any_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
+      }
+      continue;
+    }
+
+    if (k == "start_time_unix_nano" || k == "startTimeUnixNano" || k == "start_timestamp" ||
+        k == "timestamp") {
+      has_recognized_field = true;
+      uint64_t parsed = 0;
+      if (core::ParseJsonTimestamp(fv, parsed)) {
+        start_ns = parsed;
+        has_start = true;
+      }
+    } else if (k == "end_time_unix_nano" || k == "endTimeUnixNano" || k == "end_timestamp") {
+      has_recognized_field = true;
+      uint64_t parsed = 0;
+      if (core::ParseJsonTimestamp(fv, parsed)) {
+        end_ns = parsed;
+        has_end = true;
+      }
+    } else if (k == "ingest_timestamp" || k == "ingestTimestamp") {
+      has_recognized_field = true;
+      uint64_t parsed = 0;
+      if (core::ParseJsonTimestamp(fv, parsed)) {
+        ingest_ns = parsed;
+        has_ingest = true;
+      }
+    } else if (k == "trace_id" || k == "traceId") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        trace_id = s_res.value();
+      }
+    } else if (k == "span_id" || k == "spanId") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        span_id = s_res.value();
+      }
+    } else if (k == "parent_span_id" || k == "parentSpanId") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        parent_span_id = s_res.value();
+      }
+    } else if (k == "trace_state" || k == "traceState") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        trace_state = s_res.value();
+      }
+    } else if (k == "name" || k == "span_name" || k == "spanName") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        span_name = s_res.value();
+      }
+    } else if (k == "kind" || k == "span_kind" || k == "spanKind") {
+      has_recognized_field = true;
+      span_kind = ParseJsonSpanKind(fv);
+    } else if (k == "status") {
+      has_recognized_field = true;
+      auto status_obj_res = fv.get_object();
+      if (status_obj_res.error() == simdjson::SUCCESS) {
+        for (auto st_res : status_obj_res.value()) {
+          if (st_res.error() != simdjson::SUCCESS) continue;
+          auto stk_res = st_res.unescaped_key();
+          if (stk_res.error() != simdjson::SUCCESS) continue;
+          std::string_view stk = stk_res.value();
+          auto stv_res = st_res.value();
+          if (stv_res.error() != simdjson::SUCCESS) continue;
+          auto stv = stv_res.value();
+          if (stk == "code") {
+            status_code = ParseJsonStatusCode(stv);
+          } else if (stk == "message") {
+            auto m_res = stv.get_string();
+            if (m_res.error() == simdjson::SUCCESS) {
+              status_msg = m_res.value();
+            }
+          }
+        }
+      }
+    } else if (k == "status_code" || k == "statusCode") {
+      has_recognized_field = true;
+      if (status_code == "STATUS_CODE_UNSET") {
+        status_code = ParseJsonStatusCode(fv);
+      }
+    } else if (k == "status_message" || k == "statusMessage") {
+      has_recognized_field = true;
+      if (status_msg.empty()) {
+        auto m_res = fv.get_string();
+        if (m_res.error() == simdjson::SUCCESS) {
+          status_msg = m_res.value();
+        }
+      }
+    } else if (k == "resources" || k == "resource_attributes" || k == "resourceAttributes" ||
+               k == "resource") {
+      has_recognized_field = true;
+      res_service_name = "unknown_service";
+      core::StageAttributes(row, "ResourceAttributes", fv, attr_writer, &res_service_name);
+      has_res_attrs = true;
+    } else if (k == "scope") {
+      has_recognized_field = true;
+      auto s_obj_res = fv.get_object();
+      if (s_obj_res.error() == simdjson::SUCCESS) {
+        for (auto sf_res : s_obj_res.value()) {
+          if (sf_res.error() != simdjson::SUCCESS) continue;
+          auto sk_res = sf_res.unescaped_key();
+          if (sk_res.error() != simdjson::SUCCESS) continue;
+          std::string_view sk = sk_res.value();
+          auto sfv_res = sf_res.value();
+          if (sfv_res.error() != simdjson::SUCCESS) continue;
+          auto sfv = sfv_res.value();
+          if (sk == "name") {
+            auto s_res = sfv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              scope_name = s_res.value();
+            }
+          } else if (sk == "version") {
+            auto s_res = sfv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              scope_version = s_res.value();
+            }
+          }
+        }
+      }
+    } else if (k == "scope_name" || k == "scopeName") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS && scope_name.empty()) {
+        scope_name = s_res.value();
+      }
+    } else if (k == "scope_version" || k == "scopeVersion") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS && scope_version.empty()) {
+        scope_version = s_res.value();
+      }
+    } else if (k == "attributes" || k == "span_attributes" || k == "spanAttributes") {
+      has_recognized_field = true;
+      core::StageAttributes(row, "SpanAttributes", fv, attr_writer);
+      has_span_attrs = true;
+    } else if (k == "events") {
+      has_recognized_field = true;
+      events_writer.Reset();
+      SerializeNativeSpanEventsJson(fv, events_writer, attr_writer);
+      has_events = true;
+    } else if (k == "links") {
+      has_recognized_field = true;
+      links_writer.Reset();
+      SerializeNativeSpanLinksJson(fv, links_writer, attr_writer);
+      has_links = true;
+    } else if (k == "service_name" || k == "service") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        top_service_name = s_res.value();
+      }
+    }
   }
-  int abs_rec_idx = lua_absindex(L, rec_idx);
+
+  if (!has_recognized_field) {
+    return true;
+  }
+  if (out_matched != nullptr) {
+    *out_matched = true;
+  }
+
+  if (!has_events) {
+    events_writer.Reset();
+    events_writer.StartArray();
+    events_writer.EndArray();
+  }
+  if (!has_links) {
+    links_writer.Reset();
+    links_writer.StartArray();
+    links_writer.EndArray();
+  }
+
+  std::string_view service_name = res_service_name;
+  if (service_name.empty() || service_name == "unknown_service") {
+    if (!top_service_name.empty()) {
+      service_name = top_service_name;
+    } else {
+      service_name = "unknown_service";
+    }
+  }
+
+  std::array<char, 32> ts_buf;
+  std::string_view timestamp_sv = processed_at;
+  if (has_start && start_ns > 0) {
+    core::FormatIso8601Nano(start_ns, ts_buf.data());
+    timestamp_sv = std::string_view(ts_buf.data(), 30);
+  } else if (has_ingest && ingest_ns > 0) {
+    core::FormatIso8601Nano(ingest_ns, ts_buf.data());
+    timestamp_sv = std::string_view(ts_buf.data(), 30);
+  } else if (has_start || has_ingest) {
+    core::FormatIso8601Nano(0, ts_buf.data());
+    timestamp_sv = std::string_view(ts_buf.data(), 30);
+  }
+
+  uint64_t delta =
+      (has_start && has_end && end_ns >= start_ns && start_ns > 0) ? (end_ns - start_ns) : 0;
+  constexpr uint64_t kMaxDuration = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  int64_t duration = static_cast<int64_t>(std::min<uint64_t>(delta, kMaxDuration));
+
+  emitter.SetString("Timestamp", timestamp_sv);
+  emitter.SetString("TraceId", trace_id);
+  emitter.SetString("SpanId", span_id);
+  emitter.SetString("ParentSpanId", parent_span_id);
+  emitter.SetString("TraceState", trace_state);
+  emitter.SetString("SpanName", span_name);
+  emitter.SetString("SpanKind", span_kind);
+  emitter.SetString("ServiceName", service_name);
+
+  if (!has_res_attrs) {
+    row.BeginMap("ResourceAttributes");
+    row.End();
+  }
+
+  emitter.SetString("ScopeName", scope_name);
+  emitter.SetString("ScopeVersion", scope_version);
+
+  if (!has_span_attrs) {
+    row.BeginMap("SpanAttributes");
+    row.End();
+  }
+
+  emitter.SetInt64("Duration", duration);
+  emitter.SetString("StatusCode", status_code);
+  emitter.SetString("StatusMessage", status_msg);
+  emitter.SetString("Events", events_writer.Str());
+  emitter.SetString("Links", links_writer.Str());
+  emitter.SetString("processed_at", processed_at);
+
+  emitter.EndRecord();
+  return !emitter.HasError();
+}
+
+// Table-mode extraction of one native trace record. Every Lua access is a raw, allocation-free
+// read (see read_keys.hpp): this runs in the dispatcher's outer frame and must never see a Lua
+// error.
+bool ExtractSingleNativeTraceTable(OperationContext& ctx, NativeTracesScratch& s, TableScratch& t,
+                                   int rec_idx, std::string_view processed_at) {
+  lua_State* L = ctx.L;
+  core::StagedRow& row = s.rows[0];
+  core::RowEmitter emitter(ctx, row);
+  const int abs_rec_idx = lua_absindex(L, rec_idx);
+  emitter.StartRecord();
 
   // 1. Timestamps & Duration
   uint64_t start_ns = 0;
@@ -1130,7 +1151,7 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
 
   // 2. ResourceAttributes & ServiceName
   std::string_view service_name;
-  ScopedLuaRef res_attrs_scoped(L, LUA_NOREF);
+  bool res_attrs_staged = false;
 
   bool has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resources", "resource_attributes");
   if (!has_res) {
@@ -1149,17 +1170,22 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
           lua_pop(L, 1);
         }
       }
-      core::PushTableAttributes(L, attrs_src_idx, writer, &service_name);
-      res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+      core::StageTableAttributes(row, "ResourceAttributes", L, attrs_src_idx, s.writer,
+                                 &service_name);
+      res_attrs_staged = true;
       if (has_nested_attrs) {
         lua_pop(L, 1);
       }
     }
     lua_pop(L, 1);
   }
+  if (!res_attrs_staged) {
+    row.BeginMap("ResourceAttributes");
+    row.End();
+  }
   if (service_name.empty() || service_name == "unknown_service") {
     std::string_view top_svc =
-        core::ReadTableStringView(L, abs_rec_idx, "service_name", "service", tls_service_scratch);
+        core::ReadTableStringView(L, abs_rec_idx, "service_name", "service", t.service);
     if (!top_svc.empty()) {
       service_name = top_svc;
     } else {
@@ -1169,18 +1195,17 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
 
   // 3. ScopeName & ScopeVersion
   std::string_view scope_name =
-      core::ReadTableStringView(L, abs_rec_idx, "scope_name", "scopeName", tls_scope_name_scratch);
-  std::string_view scope_version = core::ReadTableStringView(L, abs_rec_idx, "scope_version",
-                                                             "scopeVersion", tls_scope_ver_scratch);
+      core::ReadTableStringView(L, abs_rec_idx, "scope_name", "scopeName", t.scope_name);
+  std::string_view scope_version =
+      core::ReadTableStringView(L, abs_rec_idx, "scope_version", "scopeVersion", t.scope_version);
   if (core::GetTableFieldRaw(L, abs_rec_idx, "scope")) {
     int s_idx = lua_absindex(L, -1);
     if (lua_istable(L, s_idx)) {
       if (scope_name.empty()) {
-        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
+        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, t.scope_name);
       }
       if (scope_version.empty()) {
-        scope_version =
-            core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
+        scope_version = core::ReadTableStringView(L, s_idx, "version", nullptr, t.scope_version);
       }
     }
     lua_pop(L, 1);
@@ -1206,7 +1231,7 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
         status_code = ParseLuaStatusCodeValue(L, -1);
         lua_pop(L, 1);
       }
-      status_msg = core::ReadTableStringView(L, st_idx, "message", nullptr, tls_status_msg_scratch);
+      status_msg = core::ReadTableStringView(L, st_idx, "message", nullptr, t.status_msg);
     }
     lua_pop(L, 1);
   }
@@ -1216,12 +1241,11 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
     lua_pop(L, 1);
   }
   if (status_msg.empty()) {
-    status_msg = core::ReadTableStringView(L, abs_rec_idx, "status_message", "statusMessage",
-                                           tls_status_msg_scratch);
+    status_msg =
+        core::ReadTableStringView(L, abs_rec_idx, "status_message", "statusMessage", t.status_msg);
   }
 
   // 5. Emit all 18 columns of traces.schema
-  emitter.StartRecord();
   emitter.SetString("Timestamp", timestamp_sv);
   core::CopyStringFieldAlways(L, abs_rec_idx, "trace_id", "traceId", emitter, "TraceId");
   core::CopyStringFieldAlways(L, abs_rec_idx, "span_id", "spanId", emitter, "SpanId");
@@ -1245,14 +1269,6 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
   emitter.SetString("SpanKind", span_kind);
   emitter.SetString("ServiceName", service_name);
 
-  if (res_attrs_scoped.get() != LUA_NOREF) {
-    lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_scoped.get());
-    res_attrs_scoped.reset();
-  } else {
-    lua_newtable(L);
-  }
-  emitter.SetTableFromStack("ResourceAttributes");
-
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
 
@@ -1261,270 +1277,220 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
     has_span_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "spanAttributes");
   }
   if (has_span_attrs) {
-    core::PushTableAttributes(L, -1, writer);
-    emitter.SetTableFromStack("SpanAttributes");
+    core::StageTableAttributes(row, "SpanAttributes", L, -1, s.writer);
     lua_pop(L, 1);
   } else {
-    lua_newtable(L);
-    emitter.SetTableFromStack("SpanAttributes");
+    row.BeginMap("SpanAttributes");
+    row.End();
   }
 
   emitter.SetInt64("Duration", duration);
   emitter.SetString("StatusCode", status_code);
   emitter.SetString("StatusMessage", status_msg);
 
-  writer.Reset();
+  s.writer.Reset();
   if (core::GetTableFieldRaw(L, abs_rec_idx, "events")) {
-    SerializeTableSpanEventsToJson(L, -1, writer, tls_item_scratch);
+    SerializeTableSpanEventsToJson(L, -1, s.writer, t.item);
     lua_pop(L, 1);
   } else {
-    writer.StartArray();
-    writer.EndArray();
+    s.writer.StartArray();
+    s.writer.EndArray();
   }
-  emitter.SetString("Events", writer.Str());
+  emitter.SetString("Events", s.writer.Str());
 
-  writer.Reset();
+  s.writer.Reset();
   if (core::GetTableFieldRaw(L, abs_rec_idx, "links")) {
-    SerializeTableSpanLinksToJson(L, -1, writer, tls_item_scratch);
+    SerializeTableSpanLinksToJson(L, -1, s.writer, t.item);
     lua_pop(L, 1);
   } else {
-    writer.StartArray();
-    writer.EndArray();
+    s.writer.StartArray();
+    s.writer.EndArray();
   }
-  emitter.SetString("Links", writer.Str());
+  emitter.SetString("Links", s.writer.Str());
 
   emitter.SetString("processed_at", processed_at);
 
   emitter.EndRecord();
-  if (emitter.HasError()) {
-    err_out = std::string(emitter.ErrorMessage());
-    return false;
-  }
-  return true;
+  return !emitter.HasError();
 }
 
 }  // namespace
 
-extractors::ExtractionResult ProcessNativeTraces(lua_State* L, std::string_view raw_json,
-                                                 int emit_idx) {
-  if (raw_json.empty()) {
-    return ExtractionResult{false, "Empty JSON input", 0};
+bool ExtractNativeTracesJson(OperationContext& ctx, core::OtelParser& parser,
+                             simdjson::padded_string_view admitted) {
+  NativeTracesScratch& s = Scratch();
+  ResetWriters(s);
+  struct TrimGuard {
+    explicit TrimGuard(NativeTracesScratch& scratch) : s(scratch) {}
+    TrimGuard(const TrimGuard&) = delete;
+    TrimGuard& operator=(const TrimGuard&) = delete;
+    ~TrimGuard() noexcept {
+      TrimWriters(s);
+      core::ResetServiceNameScratch();
+    }
+    NativeTracesScratch& s;
+  } trim_guard{s};
+
+  core::RowEmitter emitter(ctx, s.rows[0]);
+
+  auto doc_res = parser.IteratePrepared(admitted);
+  if (doc_res.error() != simdjson::SUCCESS) {
+    return FailJson(ctx, doc_res.error());
   }
-  core::LuaEmitter emitter(L, emit_idx);
-  try {
-    auto& parser = core::OtelParser::Instance();
-    static thread_local core::FastJsonWriter events_writer;
-    static thread_local core::FastJsonWriter links_writer;
-    static thread_local core::FastJsonWriter attr_writer;
-
-    events_writer.Reset();
-    links_writer.Reset();
-    attr_writer.Reset();
-    struct WriterTrimGuard {
-      explicit WriterTrimGuard(core::FastJsonWriter& w1_in, core::FastJsonWriter& w2_in,
-                               core::FastJsonWriter& w3_in)
-          : w1(w1_in), w2(w2_in), w3(w3_in) {}
-      WriterTrimGuard(const WriterTrimGuard&) = delete;
-      WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
-      ~WriterTrimGuard() noexcept {
-        w1.Trim();
-        w2.Trim();
-        w3.Trim();
-        core::ResetServiceNameScratch();
-      }
-      core::FastJsonWriter& w1;
-      core::FastJsonWriter& w2;
-      core::FastJsonWriter& w3;
-    } trim_guard{events_writer, links_writer, attr_writer};
-
-    auto doc_res = parser.Iterate(raw_json);
-    if (doc_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
-    }
-
-    auto doc = std::move(doc_res.value());
-    auto type_res = doc.type();
-    if (type_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(type_res.error())), 0};
-    }
-
-    std::array<char, 32> proc_buf;
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-    std::string_view processed_at(proc_buf.data(), 30);
-    std::string err_out;
-
-    const auto root_type = type_res.value();
-    if (root_type == simdjson::ondemand::json_type::object) {
-      auto doc_obj_res = doc.get_object();
-      if (doc_obj_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())),
-                                0};
-      }
-      auto doc_obj = doc_obj_res.value();
-      if (!ExtractNativeTraceObjectJson(L, doc_obj, processed_at, events_writer, links_writer,
-                                        attr_writer, emitter, err_out)) {
-        return ExtractionResult{false, err_out, emitter.EmittedCount()};
-      }
-    } else if (root_type == simdjson::ondemand::json_type::array) {
-      auto doc_arr_res = doc.get_array();
-      if (doc_arr_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(doc_arr_res.error())),
-                                0};
-      }
-      for (auto elem_res : doc_arr_res.value()) {
-        if (elem_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(elem_res.error())),
-                                  emitter.EmittedCount()};
-        }
-        auto elem_obj_res = elem_res.value().get_object();
-        if (elem_obj_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(elem_obj_res.error())),
-                                  emitter.EmittedCount()};
-        }
-        auto elem_obj = elem_obj_res.value();
-        if (!ExtractNativeTraceObjectJson(L, elem_obj, processed_at, events_writer, links_writer,
-                                          attr_writer, emitter, err_out)) {
-          return ExtractionResult{false, err_out, emitter.EmittedCount()};
-        }
-      }
-    } else {
-      return ExtractionResult{false, "root JSON value must be an object or array", 0};
-    }
-
-    emitter.Flush();
-    if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-    }
-    return ExtractionResult{true, "", emitter.EmittedCount()};
-  } catch (const std::exception& ex) {
-    return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
-  } catch (...) {
-    return ExtractionResult{false, "Unknown C++ exception during native traces processing",
-                            emitter.EmittedCount()};
+  auto doc = std::move(doc_res.value());
+  auto type_res = doc.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return FailJson(ctx, type_res.error());
   }
+
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
+
+  const auto root_type = type_res.value();
+  if (root_type == simdjson::ondemand::json_type::object) {
+    auto doc_obj_res = doc.get_object();
+    if (doc_obj_res.error() != simdjson::SUCCESS) {
+      return FailJson(ctx, doc_obj_res.error());
+    }
+    auto doc_obj = doc_obj_res.value();
+    if (!ExtractNativeTraceObjectJson(ctx, s, doc_obj, processed_at)) {
+      return false;
+    }
+  } else if (root_type == simdjson::ondemand::json_type::array) {
+    auto doc_arr_res = doc.get_array();
+    if (doc_arr_res.error() != simdjson::SUCCESS) {
+      return FailJson(ctx, doc_arr_res.error());
+    }
+    for (auto elem_res : doc_arr_res.value()) {
+      if (elem_res.error() != simdjson::SUCCESS) {
+        return FailJson(ctx, elem_res.error());
+      }
+      auto elem_obj_res = elem_res.value().get_object();
+      if (elem_obj_res.error() != simdjson::SUCCESS) {
+        return FailJson(ctx, elem_obj_res.error());
+      }
+      auto elem_obj = elem_obj_res.value();
+      if (!ExtractNativeTraceObjectJson(ctx, s, elem_obj, processed_at)) {
+        return false;
+      }
+    }
+  } else {
+    ctx.error.Set(ErrorCode::Json, "root JSON value must be an object or array");
+    return false;
+  }
+
+  emitter.Flush();
+  return !emitter.HasError();
 }
 
-extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_idx, int emit_idx) {
-  if (L == nullptr) {
-    return ExtractionResult{false, "lua_State must not be null", 0};
-  }
-  const int entry_top = lua_gettop(L);
-  int abs_idx = lua_absindex(L, table_idx);
-  int abs_emit_idx = lua_absindex(L, emit_idx);
-  if (!lua_istable(L, abs_idx)) {
-    return ExtractionResult{false, "payload must be a table", 0};
-  }
-
-  static thread_local core::FastJsonWriter writer;
-  static thread_local std::string tls_service_scratch;
-  static thread_local std::string tls_scope_name_scratch;
-  static thread_local std::string tls_scope_ver_scratch;
-  static thread_local std::string tls_status_msg_scratch;
-  static thread_local std::string tls_item_scratch;
-  writer.Reset();
-  core::ReserveScratchString(tls_service_scratch);
-  core::ReserveScratchString(tls_scope_name_scratch);
-  core::ReserveScratchString(tls_scope_ver_scratch);
-  core::ReserveScratchString(tls_status_msg_scratch);
-  core::ReserveScratchString(tls_item_scratch);
-  struct TableScopeGuard {
-    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
-    TableScopeGuard(const TableScopeGuard&) = delete;
-    TableScopeGuard& operator=(const TableScopeGuard&) = delete;
-    ~TableScopeGuard() noexcept {
-      if (L != nullptr) {
-        lua_settop(L, top);
-      }
-      writer.Trim();
-      core::TrimScratchString(tls_service_scratch);
-      core::TrimScratchString(tls_scope_name_scratch);
-      core::TrimScratchString(tls_scope_ver_scratch);
-      core::TrimScratchString(tls_status_msg_scratch);
-      core::TrimScratchString(tls_item_scratch);
+bool ExtractNativeTracesTable(OperationContext& ctx) {
+  NativeTracesScratch& s = Scratch();
+  TableScratch& t = TScratch();
+  ResetWriters(s);
+  core::ReserveScratchString(t.service, 128);
+  core::ReserveScratchString(t.scope_name, 128);
+  core::ReserveScratchString(t.scope_version, 64);
+  core::ReserveScratchString(t.status_msg, 128);
+  core::ReserveScratchString(t.item, 128);
+  struct Guard {
+    Guard(lua_State* l, int top, NativeTracesScratch& scratch, TableScratch& table)
+        : L(l), entry_top(top), s(scratch), t(table) {}
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+    ~Guard() noexcept {
+      lua_settop(L, entry_top);
+      TrimWriters(s);
+      core::ResetScratchString(t.service);
+      core::ResetScratchString(t.scope_name);
+      core::ResetScratchString(t.scope_version);
+      core::ResetScratchString(t.status_msg);
+      core::ResetScratchString(t.item);
     }
     lua_State* L;
-    int top;
-    core::FastJsonWriter& writer;
-  } scope_guard{L, entry_top, writer};
+    int entry_top;
+    NativeTracesScratch& s;
+    TableScratch& t;
+  } guard{ctx.L, lua_gettop(ctx.L), s, t};
 
-  core::LuaEmitter emitter(L, abs_emit_idx);
-  try {
-    std::array<char, 32> proc_buf;
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-    std::string_view processed_at(proc_buf.data(), 30);
-    std::string err_out;
+  lua_State* L = ctx.L;
+  core::RowEmitter emitter(ctx, s.rows[1]);
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
 
-    auto extract_array = [&](int arr_idx, size_t len) -> bool {
-      for (size_t i = 1; i <= len; ++i) {
-        lua_rawgeti(L, arr_idx, static_cast<lua_Integer>(i));
-        if (lua_istable(L, -1)) {
-          int item_idx = lua_absindex(L, -1);
-          if (HasNativeTraceFields(L, item_idx)) {
-            if (!ExtractSingleNativeTraceTable(L, item_idx, processed_at, writer,
-                                               tls_service_scratch, tls_scope_name_scratch,
-                                               tls_scope_ver_scratch, tls_status_msg_scratch,
-                                               tls_item_scratch, emitter, err_out)) {
-              lua_pop(L, 1);
-              return false;
-            }
+  const int abs_idx = lua_absindex(L, ctx.input_index);
+
+  auto extract_array = [&](int arr_idx, size_t len) -> bool {
+    for (size_t i = 1; i <= len; ++i) {
+      lua_rawgeti(L, arr_idx, static_cast<lua_Integer>(i));
+      if (lua_istable(L, -1)) {
+        int item_idx = lua_absindex(L, -1);
+        if (HasNativeTraceFields(L, item_idx)) {
+          if (!ExtractSingleNativeTraceTable(ctx, s, t, item_idx, processed_at)) {
+            lua_pop(L, 1);
+            return false;
           }
         }
-        lua_pop(L, 1);
       }
-      return true;
-    };
+      lua_pop(L, 1);
+    }
+    return true;
+  };
 
-    const size_t raw_len = lua_rawlen(L, abs_idx);
-    if (raw_len > 0) {
-      if (!extract_array(abs_idx, raw_len)) {
-        return ExtractionResult{false, err_out, emitter.EmittedCount()};
-      }
-    } else {
-      bool handled_wrapper = false;
-      if (core::GetTableFieldRaw(L, abs_idx, "log", "trace")) {
-        int inner_idx = lua_absindex(L, -1);
-        if (lua_istable(L, inner_idx)) {
-          const size_t inner_len = lua_rawlen(L, inner_idx);
-          if (inner_len > 0) {
-            handled_wrapper = true;
-            if (!extract_array(inner_idx, inner_len)) {
-              lua_pop(L, 1);
-              return ExtractionResult{false, err_out, emitter.EmittedCount()};
-            }
-          } else if (HasNativeTraceFields(L, inner_idx)) {
-            handled_wrapper = true;
-            if (!ExtractSingleNativeTraceTable(L, inner_idx, processed_at, writer,
-                                               tls_service_scratch, tls_scope_name_scratch,
-                                               tls_scope_ver_scratch, tls_status_msg_scratch,
-                                               tls_item_scratch, emitter, err_out)) {
-              lua_pop(L, 1);
-              return ExtractionResult{false, err_out, emitter.EmittedCount()};
-            }
+  const size_t raw_len = lua_rawlen(L, abs_idx);
+  if (raw_len > 0) {
+    if (!extract_array(abs_idx, raw_len)) {
+      return false;
+    }
+  } else {
+    bool handled_wrapper = false;
+    if (core::GetTableFieldRaw(L, abs_idx, "log", "trace")) {
+      int inner_idx = lua_absindex(L, -1);
+      if (lua_istable(L, inner_idx)) {
+        const size_t inner_len = lua_rawlen(L, inner_idx);
+        if (inner_len > 0) {
+          handled_wrapper = true;
+          if (!extract_array(inner_idx, inner_len)) {
+            lua_pop(L, 1);
+            return false;
+          }
+        } else if (HasNativeTraceFields(L, inner_idx)) {
+          handled_wrapper = true;
+          if (!ExtractSingleNativeTraceTable(ctx, s, t, inner_idx, processed_at)) {
+            lua_pop(L, 1);
+            return false;
           }
         }
-        lua_pop(L, 1);
       }
-      if (!handled_wrapper && HasNativeTraceFields(L, abs_idx)) {
-        if (!ExtractSingleNativeTraceTable(L, abs_idx, processed_at, writer, tls_service_scratch,
-                                           tls_scope_name_scratch, tls_scope_ver_scratch,
-                                           tls_status_msg_scratch, tls_item_scratch, emitter,
-                                           err_out)) {
-          return ExtractionResult{false, err_out, emitter.EmittedCount()};
-        }
+      lua_pop(L, 1);
+    }
+    if (!handled_wrapper && HasNativeTraceFields(L, abs_idx)) {
+      if (!ExtractSingleNativeTraceTable(ctx, s, t, abs_idx, processed_at)) {
+        return false;
       }
     }
-
-    emitter.Flush();
-    if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-    }
-    return ExtractionResult{true, "", emitter.EmittedCount()};
-  } catch (const std::exception& ex) {
-    return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
-  } catch (...) {
-    return ExtractionResult{false, "Unknown C++ exception during native traces table processing",
-                            emitter.EmittedCount()};
   }
+
+  emitter.Flush();
+  return !emitter.HasError();
 }
+
+namespace {
+constexpr core::SignalExtractors kNativeTracesExtractors{ExtractNativeTracesJson,
+                                                         ExtractNativeTracesTable};
+}
+
+ExtractionResult ProcessNativeTraces(lua_State* L, std::string_view raw_json, int emit_idx) {
+  return core::RunCompatJson(L, core::ModuleKind::Native, core::Signal::Traces,
+                             kNativeTracesExtractors, raw_json, emit_idx);
+}
+
+ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_idx, int emit_idx) {
+  return core::RunCompatTable(L, core::ModuleKind::Native, core::Signal::Traces,
+                              kNativeTracesExtractors, table_idx, emit_idx);
+}
+
+const core::SignalExtractors& NativeTracesExtractors() { return kNativeTracesExtractors; }
 
 }  // namespace vector_otel::native_extractors
