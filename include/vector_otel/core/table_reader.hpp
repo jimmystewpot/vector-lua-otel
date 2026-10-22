@@ -146,9 +146,16 @@ std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::str
 void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer,
                          std::string_view* out_service_name = nullptr);
 
-// Stages the same flattened attributes as PushTableAttributes() into `row` as a map under `key`
-// (nothing is staged when `attrs_idx` is not a table). Reads are raw and allocation-free; the Lua
-// stack is restored on return. Service-name capture matches PushTableAttributes().
+// Stages the same flattened attributes as PushTableAttributes() into `row`. Reads are raw and
+// allocation-free; the Lua stack is restored on return. Service-name capture matches
+// PushTableAttributes().
+//  * StageTableAttributeFields stages the entries as fields of the currently open container (the
+//    row root when none is open) so a tape can be materialised as the attributes table itself;
+//    a non-table stages no fields.
+//  * StageTableAttributes wraps them in a map under `key` (an empty map for a non-table), exactly
+//    the table PushTableAttributes() would have left on the stack.
+void StageTableAttributeFields(StagedRow& row, lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                               std::string_view* out_service_name = nullptr);
 void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
                           FastJsonWriter& writer, std::string_view* out_service_name = nullptr);
 

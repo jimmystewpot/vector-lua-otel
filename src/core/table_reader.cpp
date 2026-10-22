@@ -1180,8 +1180,8 @@ bool StageAttributeValue(StagedRow& row, Key key, lua_State* L, int val_idx, Fas
 
 }  // namespace
 
-void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
-                          FastJsonWriter& writer, std::string_view* out_service_name) {
+void StageTableAttributeFields(StagedRow& row, lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                               std::string_view* out_service_name) {
   static thread_local std::string tls_stage_service_scratch;
   if (out_service_name != nullptr) {
     ResetScratchString(tls_stage_service_scratch);
@@ -1189,7 +1189,7 @@ void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
   }
   const int abs_idx = lua_absindex(L, attrs_idx);
   if (!lua_istable(L, abs_idx)) {
-    return;  // not a table: the field is omitted
+    return;  // not a table: no fields
   }
   const int top = lua_gettop(L);
 
@@ -1210,7 +1210,6 @@ void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
     }
   };
 
-  row.BeginMap(key);
   if (is_kv_array) {
     for (size_t i = 1; i <= len; ++i) {
       lua_rawgeti(L, abs_idx, static_cast<lua_Integer>(i));
@@ -1259,6 +1258,12 @@ void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
       lua_pop(L, 1);  // value; the key stays for lua_next
     }
   }
+}
+
+void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
+                          FastJsonWriter& writer, std::string_view* out_service_name) {
+  row.BeginMap(key);
+  StageTableAttributeFields(row, L, attrs_idx, writer, out_service_name);
   row.End();
 }
 

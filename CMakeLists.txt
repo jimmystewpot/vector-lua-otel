@@ -57,6 +57,7 @@ add_library(vector_otel_core STATIC
   src/core/protected_lua.cpp
   src/core/staged_row.cpp
   src/core/admission.cpp
+  src/core/process_runner.cpp
   src/extractors/logs_extractor.cpp
   src/extractors/traces_extractor.cpp
   src/extractors/metrics_extractor.cpp
@@ -152,6 +153,7 @@ add_executable(vector_otel_fault_tests
   tests/cpp/test_admission.cpp
   tests/cpp/test_staged_row.cpp
   tests/cpp/test_table_staging.cpp
+  tests/cpp/test_failure_safety.cpp
   src/module.cpp
   src/native_module.cpp
   tests/support/fault_new.cpp

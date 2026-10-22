@@ -758,6 +758,246 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
   }
 }
 
+// ---- staged attributes (no Lua) ---------------------------------------------------------------
+
+namespace {
+
+// Stages one AnyValue under `key`. Mirrors PushAnyValueScalar(): unsupported values stage nothing.
+// Returns true (and sets `*text`) when the value is a scalar string.
+bool StageAnyValueImpl(StagedRow& row, Key key, simdjson::ondemand::value& val,
+                       FastJsonWriter& json_writer, std::string_view* text) {
+  auto type_res = val.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return false;
+  }
+  auto type = type_res.value();
+  if (type == simdjson::ondemand::json_type::object) {
+    auto obj_res = val.get_object();
+    if (obj_res.error() != simdjson::SUCCESS) {
+      return false;
+    }
+    auto obj = obj_res.value();
+    bool matched = false;
+    bool is_scalar_string = false;
+    bool has_plain_fields = false;
+    for (auto field_res : obj) {
+      if (field_res.error() != simdjson::SUCCESS) continue;
+      auto k_res = field_res.unescaped_key();
+      if (k_res.error() != simdjson::SUCCESS) continue;
+      std::string_view k = k_res.value();
+
+      auto val_res = field_res.value();
+      if (val_res.error() != simdjson::SUCCESS) continue;
+      auto fv = val_res.value();
+
+      if (!has_plain_fields) {
+        if (k == "stringValue" || k == "string_value") {
+          auto s_res = fv.get_string();
+          if (s_res.error() == simdjson::SUCCESS) {
+            const std::string_view s = s_res.value();
+            row.Str(key, s);
+            if (text != nullptr) *text = s;
+            matched = true;
+            is_scalar_string = true;
+            break;
+          }
+        } else if (k == "intValue" || k == "int_value") {
+          row.Int(key, ParseInt64(fv));
+          matched = true;
+          break;
+        } else if (k == "uintValue" || k == "uint_value") {
+          row.Uint(key, ParseUint64(fv));  // clamped to INT64_MAX by the row
+          matched = true;
+          break;
+        } else if (k == "doubleValue" || k == "double_value") {
+          row.Dbl(key, ParseDouble(fv));
+          matched = true;
+          break;
+        } else if (k == "boolValue" || k == "bool_value") {
+          auto b_res = fv.get_bool();
+          row.Bool(key, b_res.error() == simdjson::SUCCESS ? b_res.value() : false);
+          matched = true;
+          break;
+        } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
+                   k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
+          std::string_view raw_sv;
+          auto raw_res = fv.raw_json();
+          if (raw_res.error() == simdjson::SUCCESS) {
+            raw_sv = raw_res.value();
+          }
+          json_writer.Reset();
+          json_writer.StartObject();
+          json_writer.Key(k);
+          if (!raw_sv.empty()) {
+            json_writer.RawJson(raw_sv);
+          } else {
+            json_writer.StartObject();
+            json_writer.EndObject();
+          }
+          json_writer.EndObject();
+          row.Str(key, json_writer.Str());
+          matched = true;
+          break;
+        }
+      }
+
+      if (!has_plain_fields) {
+        json_writer.Reset();
+        json_writer.StartObject();
+        has_plain_fields = true;
+      }
+      json_writer.Key(k);
+      auto raw_res = fv.raw_json();
+      if (raw_res.error() == simdjson::SUCCESS) {
+        std::string_view raw_fv = raw_res.value();
+        while (!raw_fv.empty() && (raw_fv.back() == ' ' || raw_fv.back() == '\t' ||
+                                   raw_fv.back() == '\r' || raw_fv.back() == '\n')) {
+          raw_fv.remove_suffix(1);
+        }
+        json_writer.RawJson(raw_fv);
+      } else {
+        json_writer.Null();
+      }
+    }
+    if (!matched && has_plain_fields) {
+      json_writer.EndObject();
+      row.Str(key, json_writer.Str());
+    }
+    return is_scalar_string;
+  } else if (type == simdjson::ondemand::json_type::string) {
+    auto s_res = val.get_string();
+    if (s_res.error() == simdjson::SUCCESS) {
+      const std::string_view s = s_res.value();
+      row.Str(key, s);
+      if (text != nullptr) *text = s;
+      return true;
+    }
+    return false;
+  } else if (type == simdjson::ondemand::json_type::number) {
+    auto num_res = val.get_number();
+    if (num_res.error() == simdjson::SUCCESS) {
+      auto num = num_res.value();
+      if (num.is_int64()) {
+        row.Int(key, num.get_int64());
+      } else if (num.is_uint64()) {
+        row.Uint(key, num.get_uint64());
+      } else {
+        row.Dbl(key, num.get_double());
+      }
+    }
+    return false;
+  } else if (type == simdjson::ondemand::json_type::boolean) {
+    auto b_res = val.get_bool();
+    if (b_res.error() == simdjson::SUCCESS) {
+      row.Bool(key, b_res.value());
+    }
+    return false;
+  } else if (type == simdjson::ondemand::json_type::array) {
+    auto raw_res = val.raw_json();
+    std::string_view raw_sv;
+    if (raw_res.error() == simdjson::SUCCESS) {
+      raw_sv = raw_res.value();
+    }
+    json_writer.Reset();
+    if (!raw_sv.empty()) {
+      json_writer.RawJson(raw_sv);
+    } else {
+      json_writer.StartArray();
+      json_writer.EndArray();
+    }
+    row.Str(key, json_writer.Str());
+    return false;
+  }
+  return false;
+}
+
+// service.name capture: last matching key wins; anything but a non-empty scalar string resets to
+// "unknown_service" (exactly CaptureServiceName() above).
+void CaptureServiceNameText(bool is_scalar_str, std::string_view text,
+                            std::string_view* out_service_name) {
+  if (!is_scalar_str || text.empty()) {
+    *out_service_name = "unknown_service";
+    return;
+  }
+  ReserveScratchString(tls_service_name_scratch, 128);
+  tls_service_name_scratch.assign(text.data(), text.size());
+  *out_service_name = std::string_view(tls_service_name_scratch);
+}
+
+}  // namespace
+
+bool StageAnyValue(StagedRow& row, Key key, simdjson::ondemand::value& val,
+                   FastJsonWriter& json_writer, std::string_view* scalar_text) {
+  return StageAnyValueImpl(row, key, val, json_writer, scalar_text);
+}
+
+void StageAttributeFields(StagedRow& row, simdjson::ondemand::value& attrs_val,
+                          FastJsonWriter& json_writer, std::string_view* out_service_name) {
+  auto type_res = attrs_val.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return;
+  }
+  auto type = type_res.value();
+
+  if (type == simdjson::ondemand::json_type::array) {
+    auto arr_res = attrs_val.get_array();
+    if (arr_res.error() != simdjson::SUCCESS) {
+      return;
+    }
+    for (auto elem_res : arr_res.value()) {
+      if (elem_res.error() != simdjson::SUCCESS) continue;
+      auto item_val = elem_res.value();
+      auto obj_res = item_val.get_object();
+      if (obj_res.error() != simdjson::SUCCESS) continue;
+      auto kv_obj = obj_res.value();
+
+      auto key_res = kv_obj.find_field_unordered("key");
+      if (key_res.error() != simdjson::SUCCESS) continue;
+      auto key_str_res = key_res.value().get_string();
+      if (key_str_res.error() != simdjson::SUCCESS) continue;
+      std::string_view k = key_str_res.value();
+
+      auto val_res = kv_obj.find_field_unordered("value");
+      if (val_res.error() != simdjson::SUCCESS) continue;
+      auto v = val_res.value();
+
+      std::string_view text;
+      const bool is_scalar_str = StageAnyValueImpl(row, Key::Dynamic(k), v, json_writer, &text);
+      if (out_service_name != nullptr && (k == "service.name" || k == "service_name")) {
+        CaptureServiceNameText(is_scalar_str, text, out_service_name);
+      }
+    }
+  } else if (type == simdjson::ondemand::json_type::object) {
+    auto obj_res = attrs_val.get_object();
+    if (obj_res.error() != simdjson::SUCCESS) {
+      return;
+    }
+    for (auto field_res : obj_res.value()) {
+      if (field_res.error() != simdjson::SUCCESS) continue;
+      auto key_res = field_res.unescaped_key();
+      if (key_res.error() != simdjson::SUCCESS) continue;
+      std::string_view k = key_res.value();
+
+      auto val_res = field_res.value();
+      if (val_res.error() != simdjson::SUCCESS) continue;
+      auto v = val_res.value();
+
+      std::string_view text;
+      const bool is_scalar_str = StageAnyValueImpl(row, Key::Dynamic(k), v, json_writer, &text);
+      if (out_service_name != nullptr && (k == "service.name" || k == "service_name")) {
+        CaptureServiceNameText(is_scalar_str, text, out_service_name);
+      }
+    }
+  }
+}
+
+void StageAttributes(StagedRow& row, Key key, simdjson::ondemand::value& attrs_val,
+                     FastJsonWriter& json_writer, std::string_view* out_service_name) {
+  row.BeginMap(key);
+  StageAttributeFields(row, attrs_val, json_writer, out_service_name);
+  row.End();
+}
+
 void ResetServiceNameScratch() noexcept { ResetScratchString(tls_service_name_scratch); }
 
 std::string_view TrimJsonWhitespace(std::string_view sv) noexcept {

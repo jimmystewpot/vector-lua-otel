@@ -113,7 +113,13 @@ constexpr int kLeafStackSlots = 64;
 using Node = StagedRow::Node;
 
 void PushKey(lua_State* L, const Node& n, const char* arena) {
-  lua_pushlstring(L, n.static_key ? n.static_key_data : arena + n.key_off, n.key_len);
+  if (n.static_key) {
+    // Literal keys are NUL-terminated without embedded NULs (checked at compile time by Key), so
+    // lua_pushstring can use Lua's address-keyed string cache instead of hashing every time.
+    lua_pushstring(L, n.static_key_data);
+    return;
+  }
+  lua_pushlstring(L, arena + n.key_off, n.key_len);
 }
 
 const Node* PushValue(lua_State* L, const Node* n, const char* arena);

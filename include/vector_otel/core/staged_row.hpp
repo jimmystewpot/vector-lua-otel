@@ -34,8 +34,14 @@ class Key {
  public:
   constexpr Key() noexcept = default;
   template <std::size_t N>
-  consteval Key(const char (&literal)[N]) noexcept  // NOLINT(google-explicit-constructor)
-      : data_(literal), size_(N - 1), kind_(Kind::kStatic) {}
+  consteval Key(const char (&literal)[N])  // NOLINT(google-explicit-constructor)
+      : data_(literal), size_(N - 1), kind_(Kind::kStatic) {
+    for (std::size_t i = 0; i + 1 < N; ++i) {
+      if (literal[i] == '\0') {
+        throw "static keys must not contain NUL";  // compile-time error: this ctor is consteval
+      }
+    }
+  }
 
   static Key Dynamic(std::string_view text) noexcept {
     Key k;

@@ -7,6 +7,7 @@
 #include <string>
 
 #include "contract_fixtures.hpp"
+#include "vector_otel/core/process_runner.hpp"
 
 namespace vector_otel::test {
 namespace {
@@ -86,7 +87,8 @@ TEST(ContractFixtures, RealLogsProcessDeliversEveryRecordAndLeavesStateBaselineU
   EXPECT_EQ(result.status, LUA_OK);
   EXPECT_EQ(result.count, 3);
   EXPECT_TRUE(result.second_is_nil);
-  EXPECT_EQ(counter.completed() - before, 3u);
+  // one callback per N rows (N = compile-time batch size)
+  EXPECT_EQ(counter.completed() - before, (3u + core::kEmitBatchSize - 1) / core::kEmitBatchSize);
 
   const StateSnapshot after = TakeSnapshot(state);
   EXPECT_EQ(after.registry_roots, baseline.registry_roots);

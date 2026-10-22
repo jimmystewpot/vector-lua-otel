@@ -112,7 +112,7 @@ inline void InitOperationContext(OperationContext& ctx, lua_State* L, ModuleKind
   ctx.module = module;
   ctx.signal = signal;
   ctx.anchor_index = anchor_index;
-  ctx.base_top = lua_gettop(L);
+  ctx.base_top = L != nullptr ? lua_gettop(L) : 0;  // dry runs have no Lua state
 }
 
 }  // namespace vector_otel::core

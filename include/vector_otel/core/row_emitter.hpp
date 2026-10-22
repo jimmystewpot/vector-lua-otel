@@ -30,7 +30,9 @@ class RowEmitter {
 
   // Finishes the record. Without an emit callback (dry run: ctx.dry_run) the row is discarded.
   void EndRecord() noexcept {
-    if (!failed_ && !ctx_.dry_run && !EmitStagedRow(ctx_, row_)) {
+    if (ctx_.dry_run) {
+      ++ctx_.delivered_count;  // dry runs report the rows they would have delivered
+    } else if (!failed_ && !EmitStagedRow(ctx_, row_)) {
       failed_ = true;
     }
     ++staged_count_;

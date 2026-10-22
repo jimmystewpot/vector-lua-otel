@@ -148,7 +148,7 @@ void RunDifferential(const std::string& chunk, bool expect_table = true) {
   EXPECT_TRUE(g.stack_restored);
   EXPECT_EQ(g.staged_service, g.legacy_service);
   if (!expect_table) {
-    EXPECT_TRUE(g.staged_nothing) << "a non-table stages no field";
+    EXPECT_TRUE(g.staged_nothing);
     return;
   }
   ASSERT_FALSE(g.staged_nothing);
@@ -209,10 +209,41 @@ TEST(TableStagingTest, StagedAttributesEqualTheLegacyLuaTable) {
   }
 }
 
-TEST(TableStagingTest, NonTableAttributesStageNothing) {
-  RunDifferential("return 'text'", /*expect_table=*/false);
-  RunDifferential("return 5", /*expect_table=*/false);
-  RunDifferential("return true", /*expect_table=*/false);
+// PushTableAttributes() leaves an empty table for a non-table; so does the staged map.
+TEST(TableStagingTest, NonTableAttributesStageAnEmptyMapLikeTheLegacyTable) {
+  RunDifferential("return 'text'");
+  RunDifferential("return 5");
+  RunDifferential("return true");
+}
+
+void FieldsBody(OperationContext& ctx, Scenario& sc) {
+  lua_State* L = ctx.L;
+  if (!LoadChunk(L, sc)) {
+    return;
+  }
+  const int idx = lua_gettop(L);
+  FastJsonWriter writer;
+  StagedRow tape;
+  tape.Reset();
+  StageTableAttributeFields(tape, L, idx, writer);
+  sc.leaf_ok = MaterializeToAnchor(ctx, tape, AnchorSlot::kScopeAttrs);
+  PushAnchor(L, ctx.anchor_index, AnchorSlot::kScopeAttrs);
+  Dump(L, -1, g.staged);
+  lua_pop(L, 1);
+}
+
+// Fields staged at the root become the attributes table itself (how shared resource/scope
+// attribute tables are built once per resource/scope).
+TEST(TableStagingTest, RootLevelFieldsMaterializeAsTheAttributesTable) {
+  RawState s;
+  g = Results{};
+  Scenario sc;
+  sc.body = FieldsBody;
+  sc.chunk = "return {{key='a',value='x'},{key='n',value={intValue=3}}}";
+  const Observed o = RunScenario(s, sc, [] {});
+  ASSERT_EQ(o.status, LUA_OK);
+  EXPECT_TRUE(sc.leaf_ok);
+  EXPECT_EQ(g.staged, "{\"a\":\"x\",\"n\":3}");
 }
 
 // ---- reads never touch the Lua allocator ------------------------------------------------------

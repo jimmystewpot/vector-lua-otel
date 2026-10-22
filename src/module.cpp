@@ -5,6 +5,7 @@ extern "C" {
 
 #include "vector_otel/core/module_runner.hpp"
 #include "vector_otel/core/module_state.hpp"
+#include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
@@ -15,7 +16,8 @@ namespace core = vector_otel::core;
 namespace extractors = vector_otel::extractors;
 
 int ProcessLogs(lua_State* L) {
-  return core::ProcessDispatcher<extractors::ProcessLogs, extractors::ProcessLogsTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Otel, core::Signal::Logs,
+                               extractors::LogsExtractors());
 }
 
 int ProcessTraces(lua_State* L) {
