@@ -456,6 +456,7 @@ bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWr
     auto obj = obj_res.value();
     bool matched = false;
     bool is_scalar_string = false;
+    bool has_plain_fields = false;
     for (auto field_res : obj) {
       if (field_res.error() != simdjson::SUCCESS) continue;
       auto k_res = field_res.unescaped_key();
@@ -524,10 +525,34 @@ bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWr
         lua_pushlstring(L, sv.data(), sv.size());
         matched = true;
         break;
+      } else {
+        if (!has_plain_fields) {
+          json_writer.Reset();
+          json_writer.StartObject();
+          has_plain_fields = true;
+        }
+        json_writer.Key(k);
+        auto raw_res = fv.raw_json();
+        if (raw_res.error() == simdjson::SUCCESS) {
+          std::string_view raw_fv = raw_res.value();
+          while (!raw_fv.empty() && (raw_fv.back() == ' ' || raw_fv.back() == '\t' ||
+                                     raw_fv.back() == '\r' || raw_fv.back() == '\n')) {
+            raw_fv.remove_suffix(1);
+          }
+          json_writer.RawJson(raw_fv);
+        } else {
+          json_writer.Null();
+        }
       }
     }
     if (!matched) {
-      lua_pushnil(L);
+      if (has_plain_fields) {
+        json_writer.EndObject();
+        std::string_view sv = json_writer.Str();
+        lua_pushlstring(L, sv.data(), sv.size());
+      } else {
+        lua_pushnil(L);
+      }
     }
     return is_scalar_string;
   } else if (type == simdjson::ondemand::json_type::string) {

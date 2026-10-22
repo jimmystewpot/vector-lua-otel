@@ -63,5 +63,40 @@ TEST(TimestampTest, CurrentTimeUnixNanoNonZero) {
   EXPECT_GE(now2, now1);
 }
 
+TEST(TimestampTest, CivilToUnixNanoAndRoundTrip) {
+  uint64_t ns = 0;
+  ASSERT_TRUE(CivilToUnixNano(2026, 10, 16, 12, 0, 0, 123456789, ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.123456789Z");
+
+  ASSERT_TRUE(CivilToUnixNano(1970, 1, 1, 0, 0, 0, 0, ns));
+  EXPECT_EQ(ns, 0ULL);
+
+  EXPECT_FALSE(CivilToUnixNano(1969, 12, 31, 23, 59, 59, 0, ns));
+  EXPECT_FALSE(CivilToUnixNano(2026, 13, 1, 0, 0, 0, 0, ns));
+  EXPECT_FALSE(CivilToUnixNano(2026, 2, 30, 0, 0, 0, 0, ns));
+  EXPECT_FALSE(CivilToUnixNano(2026, 10, 16, 12, 0, 0, 1000000000LL, ns));
+}
+
+TEST(TimestampTest, ParseIso8601ToUnixNanoVariants) {
+  uint64_t ns = 0;
+  ASSERT_TRUE(ParseIso8601ToUnixNano("2026-10-16T12:00:00.123456789Z", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.123456789Z");
+
+  ASSERT_TRUE(ParseIso8601ToUnixNano("2026-10-16T12:00:00.5Z", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.500000000Z");
+
+  ASSERT_TRUE(ParseIso8601ToUnixNano("2026-10-16T12:00:00Z", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.000000000Z");
+
+  ASSERT_TRUE(ParseIso8601ToUnixNano("2026-10-16T12:00:00.25+00:00", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.250000000Z");
+
+  ASSERT_TRUE(ParseIso8601ToUnixNano("1293840000123456789", ns));
+  EXPECT_EQ(ns, 1293840000123456789ULL);
+
+  EXPECT_FALSE(ParseIso8601ToUnixNano("not-a-timestamp", ns));
+  EXPECT_FALSE(ParseIso8601ToUnixNano("", ns));
+}
+
 }  // namespace core
 }  // namespace vector_otel

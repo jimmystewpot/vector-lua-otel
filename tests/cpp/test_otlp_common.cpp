@@ -7,6 +7,8 @@
 #include "simdjson.h"
 #include "vector_otel/core/fast_json_writer.hpp"
 #include "vector_otel/core/otlp_common.hpp"
+#include "vector_otel/core/table_reader.hpp"
+#include "vector_otel/core/timestamp.hpp"
 
 extern "C" {
 #include <lauxlib.h>
@@ -1525,6 +1527,73 @@ TEST_F(OtlpCommonTest, ExtractStringFieldDualKey) {
   // Primary key is null/number, secondary key missing -> default value returned
   EXPECT_EQ(ExtractStringField(obj, "null_id", "null_id_alt", "def"), "def");
   EXPECT_EQ(ExtractStringField(obj, "num_id", "num_id_alt", "def"), "def");
+}
+
+TEST_F(OtlpCommonTest, PushAttributesTablePlainNestedJsonObject) {
+  auto json = R"({
+    "attributes": {
+      "service.name": "svc",
+      "nested": { "a": 1, "b": "x" }
+    }
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto attrs = obj["attributes"].value();
+
+  std::string_view sn = "unknown_service";
+  PushAttributesTable(L_, attrs, writer_, &sn);
+  EXPECT_EQ(sn, "svc");
+  ASSERT_TRUE(lua_istable(L_, -1));
+
+  lua_getfield(L_, -1, "service.name");
+  ASSERT_TRUE(lua_isstring(L_, -1));
+  EXPECT_STREQ(lua_tostring(L_, -1), "svc");
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, -1, "nested");
+  ASSERT_TRUE(lua_isstring(L_, -1));
+  EXPECT_STREQ(lua_tostring(L_, -1), R"({"a":1,"b":"x"})");
+  lua_pop(L_, 2);
+}
+
+TEST_F(OtlpCommonTest, ReadLuaTimestampValueAndField) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      ts_tbl = { year = 2026, month = 10, day = 22, hour = 10, min = 15, sec = 30, nanosec = 123456789 },
+      ts_str = "2026-10-22T10:15:30.123456789Z",
+      ts_int = 1293840000123456789,
+      ts_neg = -100,
+      ts_bad = { year = 1969, month = 12, day = 31 }
+    }
+  )"),
+            LUA_OK);
+  ASSERT_TRUE(lua_istable(L_, -1));
+  int root_idx = lua_absindex(L_, -1);
+
+  uint64_t ns = 0;
+  lua_getfield(L_, root_idx, "ts_tbl");
+  ASSERT_TRUE(ReadLuaTimestampValue(L_, -1, ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-22T10:15:30.123456789Z");
+  lua_pop(L_, 1);
+
+  ns = 0;
+  ASSERT_TRUE(ReadTableTimestampField(L_, root_idx, "ts_tbl", nullptr, ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-22T10:15:30.123456789Z");
+
+  ns = 0;
+  ASSERT_TRUE(ReadTableTimestampField(L_, root_idx, "missing_key", "ts_str", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-22T10:15:30.123456789Z");
+
+  ns = 0;
+  ASSERT_TRUE(ReadTableTimestampField(L_, root_idx, "ts_int", nullptr, ns));
+  EXPECT_EQ(ns, 1293840000123456789ULL);
+
+  EXPECT_FALSE(ReadTableTimestampField(L_, root_idx, "ts_neg", nullptr, ns));
+  EXPECT_FALSE(ReadTableTimestampField(L_, root_idx, "ts_bad", nullptr, ns));
+  EXPECT_FALSE(ReadTableTimestampField(L_, root_idx, "missing_only", nullptr, ns));
+
+  lua_pop(L_, 1);
 }
 
 }  // namespace

@@ -1,8 +1,10 @@
 #include "vector_otel/core/timestamp.hpp"
 
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstring>
+#include <string_view>
 
 namespace vector_otel::core {
 
@@ -71,6 +73,113 @@ std::string FormatIso8601Nano(uint64_t unix_nanos) {
 uint64_t CurrentTimeUnixNano() {
   const auto now = std::chrono::system_clock::now().time_since_epoch();
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+bool CivilToUnixNano(int64_t year, int64_t month, int64_t day, int64_t hour, int64_t min,
+                     int64_t sec, int64_t nanosec, uint64_t& out_ns) noexcept {
+  if (year < 1970 || year > 2262 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 ||
+      hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 60 || nanosec < 0 ||
+      nanosec > 999'999'999LL) {
+    return false;
+  }
+
+  using namespace std::chrono;
+  const year_month_day ymd{std::chrono::year{static_cast<int>(year)},
+                           std::chrono::month{static_cast<unsigned>(month)},
+                           std::chrono::day{static_cast<unsigned>(day)}};
+  if (!ymd.ok()) {
+    return false;
+  }
+
+  const auto dp = sys_days{ymd};
+  const int64_t days_since_epoch = dp.time_since_epoch().count();
+  if (days_since_epoch < 0) {
+    return false;
+  }
+
+  const uint64_t total_secs = static_cast<uint64_t>(days_since_epoch) * 86400ULL +
+                              static_cast<uint64_t>(hour) * 3600ULL +
+                              static_cast<uint64_t>(min) * 60ULL + static_cast<uint64_t>(sec);
+  out_ns = total_secs * 1'000'000'000ULL + static_cast<uint64_t>(nanosec);
+  return true;
+}
+
+bool ParseIso8601ToUnixNano(std::string_view sv, uint64_t& out_ns) noexcept {
+  while (!sv.empty() &&
+         (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
+    sv.remove_prefix(1);
+  }
+  while (!sv.empty() &&
+         (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
+    sv.remove_suffix(1);
+  }
+  if (sv.empty()) {
+    return false;
+  }
+
+  if (sv.size() >= 20 && sv[4] == '-' && sv[7] == '-' &&
+      (sv[10] == 'T' || sv[10] == 't' || sv[10] == ' ') && sv[13] == ':' && sv[16] == ':') {
+    auto parse_fixed_digits = [](std::string_view s, int64_t& out) noexcept -> bool {
+      int64_t v = 0;
+      for (char c : s) {
+        if (c < '0' || c > '9') {
+          return false;
+        }
+        v = v * 10 + (c - '0');
+      }
+      out = v;
+      return true;
+    };
+
+    int64_t year = 0;
+    int64_t month = 0;
+    int64_t day = 0;
+    int64_t hour = 0;
+    int64_t min = 0;
+    int64_t sec = 0;
+    if (!parse_fixed_digits(sv.substr(0, 4), year) || !parse_fixed_digits(sv.substr(5, 2), month) ||
+        !parse_fixed_digits(sv.substr(8, 2), day) || !parse_fixed_digits(sv.substr(11, 2), hour) ||
+        !parse_fixed_digits(sv.substr(14, 2), min) || !parse_fixed_digits(sv.substr(17, 2), sec)) {
+      return false;
+    }
+
+    size_t pos = 19;
+    int64_t nanosec = 0;
+    if (pos < sv.size() && sv[pos] == '.') {
+      ++pos;
+      int frac_digits = 0;
+      while (pos < sv.size() && sv[pos] >= '0' && sv[pos] <= '9') {
+        if (frac_digits < 9) {
+          nanosec = nanosec * 10 + (sv[pos] - '0');
+        }
+        ++frac_digits;
+        ++pos;
+      }
+      if (frac_digits < 1 || frac_digits > 9) {
+        return false;
+      }
+      for (int i = frac_digits; i < 9; ++i) {
+        nanosec *= 10;
+      }
+    }
+
+    const std::string_view tz = sv.substr(pos);
+    if (tz != "Z" && tz != "z" && tz != "+00:00" && tz != "-00:00" && tz != "+0000" &&
+        tz != "-0000") {
+      return false;
+    }
+    return CivilToUnixNano(year, month, day, hour, min, sec, nanosec, out_ns);
+  }
+
+  uint64_t uval = 0;
+  const char* begin = sv.data();
+  const char* end = sv.data() + sv.size();
+  auto [ptr, ec] = std::from_chars(begin, end, uval);
+  if (ec == std::errc() && ptr == end) {
+    out_ns = uval;
+    return true;
+  }
+  return false;
 }
 
 }  // namespace vector_otel::core

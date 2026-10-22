@@ -21,6 +21,11 @@ class LuaEmitter;
 bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,
                    const char* name3 = nullptr);
 
+// Raw table lookup (lua_rawget, no metamethods) for table[name1] (or
+// table[name2] if name1 is nil, or table[name3] if name2 is nil).
+bool GetTableFieldRaw(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,
+                      const char* name3 = nullptr);
+
 // Reads string field from table at table_idx, or returns default_val.
 std::string ReadTableString(lua_State* L, int table_idx, const char* name1,
                             const char* name2 = nullptr, std::string_view default_val = "");
@@ -84,6 +89,15 @@ int64_t ParseTableSeverityNumber(lua_State* L, int val_idx);
 // Reads nanosecond timestamp from record (checks timeUnixNano, falls back to
 // observedTimeUnixNano).
 uint64_t ReadTableTimestampNano(lua_State* L, int rec_idx);
+
+// Reads a Lua timestamp value (Vector timestamp table, ISO-8601 string, or
+// non-negative numeric nanoseconds).
+bool ReadLuaTimestampValue(lua_State* L, int val_idx, uint64_t& out_ns) noexcept;
+
+// Reads a named timestamp field from table at table_idx (checking name1, then
+// name2).
+bool ReadTableTimestampField(lua_State* L, int table_idx, const char* name1, const char* name2,
+                             uint64_t& out_ns) noexcept;
 
 // Reads body string or serialises structured body to JSON string.
 std::string ReadTableBodyString(lua_State* L, int rec_idx, FastJsonWriter& writer);
