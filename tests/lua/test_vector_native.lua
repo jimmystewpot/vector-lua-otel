@@ -155,6 +155,15 @@ local function assert_same_keys(t1, t2, context)
   end
 end
 
+local function assert_all_columns_primitive(rec, label)
+  assert(type(rec) == "table", label .. " must be a table")
+  for k, v in pairs(rec) do
+    local t = type(v)
+    assert(t == "string" or t == "number" or t == "boolean",
+      string.format("%s.%s must be a primitive type (string/number/boolean), got %s", label, tostring(k), t))
+  end
+end
+
 --------------------------------------------------------------------------------
 -- 3. Native Logs Extraction & Schema Parity with vector_otel.logs
 --------------------------------------------------------------------------------
@@ -201,6 +210,7 @@ local n_logs, l_err = vn.logs.process(native_log_table, function(ev) table.inser
 assert(n_logs == 1 and l_err == nil and #native_log_events == 1)
 
 local nl = native_log_events[1].log
+assert_all_columns_primitive(nl, "nl")
 assert(nl.Timestamp == "2026-10-22T10:00:01.123456789Z")
 assert(nl.TraceId == "5b8efff798038103d269b633813fc60c")
 assert(nl.SpanId == "eee19b7ec3c1b174")
@@ -210,15 +220,17 @@ assert(nl.SeverityNumber == 9)
 assert(nl.ServiceName == "checkout-svc")
 assert(nl.Body == "hello native world")
 assert(nl.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.21.0")
-assert(nl.ResourceAttributes["service.name"] == "checkout-svc")
-assert(nl.ResourceAttributes["host.name"] == "node-1")
+assert(type(nl.ResourceAttributes) == "string")
+assert(nl.ResourceAttributes:find('"service.name":"checkout-svc"', 1, true) ~= nil)
+assert(nl.ResourceAttributes:find('"host.name":"node-1"', 1, true) ~= nil)
 assert(nl.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope/1.0")
 assert(nl.ScopeName == "my.logger")
 assert(nl.ScopeVersion == "1.2.0")
-assert(nl.ScopeAttributes.sc_k == "sc_v")
-assert(nl.LogAttributes["http.status_code"] == 200)
-assert(nl.LogAttributes.max_i == 9223372036854775807)
-assert(nl.LogAttributes.nested == '{"k":"v"}')
+assert(nl.ScopeAttributes == '{"sc_k":"sc_v"}')
+assert(type(nl.LogAttributes) == "string")
+assert(nl.LogAttributes:find('"http.status_code":200', 1, true) ~= nil)
+assert(nl.LogAttributes:find('"max_i":9223372036854775807', 1, true) ~= nil)
+assert(nl.LogAttributes:find('"nested":{"k":"v"}', 1, true) ~= nil)
 assert(nl.EventName == "checkout.completed")
 assert(nl.processed_at:match(ISO_8601_NANO_PATTERN))
 
@@ -235,8 +247,12 @@ n_logs, l_err = vn.logs.process('{"message":"no_ts_msg","resources":{"service.na
   table.insert(json_log_events, ev)
 end)
 assert(n_logs == 1 and l_err == nil)
+assert_all_columns_primitive(json_log_events[1].log, "json_log_events[1].log")
 assert(json_log_events[1].log.Body == "no_ts_msg")
 assert(json_log_events[1].log.ServiceName == "json-log-svc")
+assert(json_log_events[1].log.ResourceAttributes == '{"service.name":"json-log-svc"}')
+assert(json_log_events[1].log.ScopeAttributes == "{}")
+assert(json_log_events[1].log.LogAttributes == "{}")
 assert(json_log_events[1].log.Timestamp == json_log_events[1].log.processed_at)
 
 -- Array-wrapped logs in JSON
@@ -308,6 +324,7 @@ local n_traces, t_err = vn.traces.process(native_trace_table, function(ev) table
 assert(n_traces == 1 and t_err == nil and #native_trace_events == 1)
 
 local nt = native_trace_events[1].log
+assert_all_columns_primitive(nt, "nt")
 assert(nt.Timestamp == "2026-10-22T10:00:01.000000000Z")
 assert(nt.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
 assert(nt.SpanId == "00f067aa0ba902b7")
@@ -316,10 +333,12 @@ assert(nt.TraceState == "congo=t61rcWkgMzE")
 assert(nt.SpanName == "HTTP POST /orders")
 assert(nt.SpanKind == "SPAN_KIND_SERVER")
 assert(nt.ServiceName == "trace-svc")
+assert(nt.ResourceAttributes == '{"service.name":"trace-svc"}')
 assert(nt.ScopeName == "otel.tracer")
 assert(nt.ScopeVersion == "2.1.0")
-assert(nt.SpanAttributes["http.method"] == "POST")
-assert(nt.SpanAttributes["http.status_code"] == 201)
+assert(type(nt.SpanAttributes) == "string")
+assert(nt.SpanAttributes:find('"http.method":"POST"', 1, true) ~= nil)
+assert(nt.SpanAttributes:find('"http.status_code":201', 1, true) ~= nil)
 assert(nt.Duration == 50000000)
 assert(nt.StatusCode == "STATUS_CODE_OK")
 assert(nt.StatusMessage == "ok")
@@ -397,48 +416,130 @@ local native_metrics_batch = {
       sum = 450.5,
     },
   },
+  {
+    name = "exp_latency",
+    namespace = "rpc",
+    kind = "cumulative",
+    timestamp = "2026-10-22T10:02:00.000000000Z",
+    tags = {
+      ["resource.service.name"] = "exp-svc",
+      ["http.route"] = "/api/v1/exp",
+    },
+    exponential_histogram = {
+      count = 42,
+      sum = 105.5,
+      min = 0.5,
+      max = 12.0,
+      scale = 3,
+      zero_count = 2,
+      zero_threshold = 0.0,
+      positive = {
+        offset = -1,
+        bucket_counts = { 5, 15, 20 },
+      },
+      negative = {
+        offset = 0,
+        bucket_counts = { 0 },
+      },
+    },
+  },
+  {
+    name = "sum_latency",
+    namespace = "rpc",
+    timestamp = "2026-10-22T10:03:00.000000000Z",
+    tags = {
+      ["resource.service.name"] = "sum-svc",
+      ["rpc.method"] = "Charge",
+    },
+    aggregated_summary = {
+      count = 50,
+      sum = 1234.5,
+      quantiles = { 0.5, 0.99 },
+      values = { 12.0, 85.0 },
+    },
+  },
 }
 
 local native_metric_events = {}
 local n_metrics, m_err = vn.metrics.process(native_metrics_batch, function(ev) table.insert(native_metric_events, ev) end)
-assert(n_metrics == 2 and m_err == nil and #native_metric_events == 2)
+assert(n_metrics == 4 and m_err == nil and #native_metric_events == 4)
 
 local nm1 = native_metric_events[1].log
+assert_all_columns_primitive(nm1, "nm1")
 assert(nm1.MetricName == "http.req_total")
 assert(nm1.MetricType == "sum")
 assert(nm1.ServiceName == "pay-svc")
-assert(nm1.ResourceAttributes["service.name"] == "pay-svc")
-assert(nm1.ResourceAttributes["host.name"] == "h1")
+assert(type(nm1.ResourceAttributes) == "string")
+assert(nm1.ResourceAttributes:find('"service.name":"pay-svc"', 1, true) ~= nil)
+assert(nm1.ResourceAttributes:find('"host.name":"h1"', 1, true) ~= nil)
 assert(nm1.ScopeName == "meter.http")
 assert(nm1.ScopeVersion == "2.0")
-assert(nm1.ScopeAttributes.attr == "sval")
-assert(nm1.Attributes["http.method"] == "GET")
+assert(nm1.ScopeAttributes == '{"attr":"sval"}')
+assert(nm1.Attributes == '{"http.method":"GET"}')
 assert(nm1.StartTimeUnix == "2026-10-22T10:00:05.500000000Z")
 assert(nm1.TimeUnix == "2026-10-22T10:00:15.500000000Z")
 assert(math.abs(nm1.Value - 42.5) < 1e-6)
 assert(nm1.Histogram == nil)
+assert(nm1.Exemplars == "[]")
 
 local nm2 = native_metric_events[2].log
+assert_all_columns_primitive(nm2, "nm2")
 assert(nm2.MetricName == "rpc.req_latency")
 assert(nm2.MetricType == "histogram")
 assert(nm2.ServiceName == "hist-svc")
-assert(nm2.Attributes.endpoint == "/v2/pay")
+assert(nm2.Attributes == '{"endpoint":"/v2/pay"}')
 assert(nm2.Value == nil)
-assert(type(nm2.Histogram) == "table")
-assert(nm2.Histogram.Count == 11 and nm2.Histogram.count == 11)
-assert(#nm2.Histogram.ExplicitBounds == 3 and #nm2.Histogram.explicitBounds == 3)
-assert(#nm2.Histogram.BucketCounts == 4 and #nm2.Histogram.bucketCounts == 4)
+assert(type(nm2.Histogram) == "string")
+assert(nm2.Histogram == '{"aggregationTemporality":0,"count":11,"sum":450.5,"bucketCounts":[1,3,5,2],"explicitBounds":[10,50,100]}')
+assert(nm2.Exemplars == "[]")
 
--- Compare schema keys against vector_otel.metrics (gauge/sum & histogram)
+local nm3 = native_metric_events[3].log
+assert_all_columns_primitive(nm3, "nm3")
+assert(nm3.MetricName == "rpc.exp_latency")
+assert(nm3.MetricType == "exponential_histogram")
+assert(nm3.ServiceName == "exp-svc")
+assert(nm3.AggregationTemporality == 2)
+assert(nm3.Attributes == '{"http.route":"/api/v1/exp"}')
+assert(nm3.Value == nil)
+assert(type(nm3.ExponentialHistogram) == "string")
+assert(nm3.ExponentialHistogram == '{"aggregationTemporality":2,"count":42,"sum":105.5,"min":0.5,"max":12,"scale":3,"zeroCount":2,"zeroThreshold":0,"positive":{"offset":-1,"bucketCounts":[5,15,20]},"negative":{"offset":0,"bucketCounts":[0]}}')
+assert(nm3.Exemplars == "[]")
+
+local nm4 = native_metric_events[4].log
+assert_all_columns_primitive(nm4, "nm4")
+assert(nm4.MetricName == "rpc.sum_latency")
+assert(nm4.MetricType == "summary")
+assert(nm4.ServiceName == "sum-svc")
+assert(nm4.Attributes == '{"rpc.method":"Charge"}')
+assert(nm4.Value == nil)
+assert(type(nm4.Summary) == "string")
+assert(nm4.Summary == '{"count":50,"sum":1234.5,"quantileValues":[{"quantile":0.5,"value":12},{"quantile":0.99,"value":85}]}')
+assert(nm4.Exemplars == "[]")
+
+-- Also verify native exponential_histogram & summary in JSON mode
+local native_exp_json = [[{"name":"exp_latency_json","kind":"delta","timestamp":"2026-10-22T10:02:00.000000000Z","tags":{"resource.service.name":"exp-json-svc"},"exponential_histogram":{"count":"42","sum":105.5,"min":0.5,"max":12.0,"scale":-1,"zero_count":"2","zero_threshold":0.0,"positive":{"offset":1,"bucket_counts":["5","15","20"]},"negative":{"offset":-2,"bucket_counts":["0"]}}}]]
+local native_exp_json_events = {}
+local n_ej, ej_err = vn.metrics.process(native_exp_json, function(ev) table.insert(native_exp_json_events, ev) end)
+assert(n_ej == 1 and ej_err == nil)
+assert_all_columns_primitive(native_exp_json_events[1].log, "native_exp_json_events[1].log")
+assert(native_exp_json_events[1].log.MetricType == "exponential_histogram")
+assert(native_exp_json_events[1].log.AggregationTemporality == 1)
+assert(native_exp_json_events[1].log.ExponentialHistogram == '{"aggregationTemporality":1,"count":42,"sum":105.5,"min":0.5,"max":12,"scale":-1,"zeroCount":2,"zeroThreshold":0,"positive":{"offset":1,"bucketCounts":[5,15,20]},"negative":{"offset":-2,"bucketCounts":[0]}}')
+
+-- Compare schema keys against vector_otel.metrics (sum, histogram, exponential_histogram, summary)
 local otel_metric_events = {}
 vo.metrics.process([[{"resourceMetrics":[{"resource":{},"scopeMetrics":[{"scope":{},"metrics":[
   {"name":"m1","sum":{"dataPoints":[{"timeUnixNano":"1792663215500000000","asDouble":42.5,"exemplars":[]}]}},
-  {"name":"m2","histogram":{"dataPoints":[{"timeUnixNano":"1792663260000000000","count":"11","sum":450.5,"explicitBounds":[10,50,100],"bucketCounts":["1","3","5","2"],"exemplars":[]}]}}
+  {"name":"m2","histogram":{"dataPoints":[{"timeUnixNano":"1792663260000000000","count":"11","sum":450.5,"explicitBounds":[10,50,100],"bucketCounts":["1","3","5","2"],"exemplars":[]}]}},
+  {"name":"m3","exponentialHistogram":{"aggregationTemporality":2,"dataPoints":[{"timeUnixNano":"1792663320000000000","count":"42","sum":105.5,"scale":3,"zeroCount":"2","positive":{"offset":-1,"bucketCounts":["5","15","20"]},"negative":{"offset":0,"bucketCounts":["0"]}}]}},
+  {"name":"m4","summary":{"dataPoints":[{"timeUnixNano":"1792663380000000000","count":"50","sum":1234.5,"quantileValues":[{"quantile":0.5,"value":12},{"quantile":0.99,"value":85}]}]}}
 ]}]}]}]], function(ev)
   table.insert(otel_metric_events, ev)
 end)
 assert_same_keys(nm1, otel_metric_events[1].log, "Metrics Sum ClickHouse Schema Parity")
 assert_same_keys(nm2, otel_metric_events[2].log, "Metrics Histogram ClickHouse Schema Parity")
+assert_same_keys(nm3, otel_metric_events[3].log, "Metrics ExponentialHistogram ClickHouse Schema Parity")
+assert_same_keys(nm4, otel_metric_events[4].log, "Metrics Summary ClickHouse Schema Parity")
 
 -- Summary metric with structured quantiles
 local summary_metric_events = {}
@@ -460,12 +561,10 @@ local n_sum, s_err = vn.metrics.process({
 }, function(ev) table.insert(summary_metric_events, ev) end)
 assert(n_sum == 1 and s_err == nil and #summary_metric_events == 1)
 local sm = summary_metric_events[1].log
+assert_all_columns_primitive(sm, "sm")
 assert(sm.MetricType == "summary")
-assert(type(sm.Summary) == "table")
-assert(sm.Summary.Count == 100 and sm.Summary.count == 100)
-assert(math.abs(sm.Summary.Sum - 450.5) < 1e-6 and math.abs(sm.Summary.sum - 450.5) < 1e-6)
-assert(type(sm.Summary.QuantileValues) == "table" and #sm.Summary.QuantileValues == 3)
-assert(sm.Summary.QuantileValues[1].Quantile == 0.5 and math.abs(sm.Summary.QuantileValues[1].Value - 1.5) < 1e-6)
+assert(type(sm.Summary) == "string")
+assert(sm.Summary == '{"count":100,"sum":450.5,"quantileValues":[{"quantile":0.5,"value":1.5},{"quantile":0.9,"value":4.2},{"quantile":0.99,"value":9.8}]}')
 
 print("   Native metrics extraction and schema parity passed.")
 
