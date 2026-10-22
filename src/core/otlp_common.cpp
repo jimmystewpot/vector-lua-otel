@@ -32,7 +32,86 @@ std::string_view CaptureServiceName(lua_State* L, bool is_scalar_str) noexcept {
   tls_service_name_scratch.assign(s, slen);
   return std::string_view(tls_service_name_scratch);
 }
+
+constexpr char kHexDigits[] = "0123456789abcdef";
+
+inline void HexEncode(std::string_view raw, char* out) noexcept {
+  for (size_t i = 0; i < raw.size(); ++i) {
+    const uint8_t b = static_cast<uint8_t>(raw[i]);
+    out[i * 2] = kHexDigits[(b >> 4) & 0x0f];
+    out[i * 2 + 1] = kHexDigits[b & 0x0f];
+  }
+}
 }  // namespace
+
+std::string_view NormalizeOtelId(std::string_view raw, size_t expected_binary_len,
+                                 IdHexBuffer& stack_buf) noexcept {
+  // 1. Empty Input
+  if (raw.empty()) {
+    return "";
+  }
+
+  // 2. Exact Binary Width (raw.size() == expected_binary_len)
+  // Unconditionally encode all B bytes into 2B lowercase hex chars in stack_buf.
+  if (raw.size() == expected_binary_len) {
+    if (raw.size() * 2 <= kMaxIdHexBufSize) {
+      HexEncode(raw, stack_buf.data());
+      return std::string_view(stack_buf.data(), raw.size() * 2);
+    }
+    return "";
+  }
+
+  // 3. Single-Pass Character Classification (raw.size() != expected_binary_len)
+  bool all_lower_hex = true;
+  bool all_hex = true;
+  bool all_printable_ascii = true;
+
+  for (char c : raw) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (uc < 0x20 || uc > 0x7e) {
+      all_printable_ascii = false;
+    }
+    const bool is_digit = (c >= '0' && c <= '9');
+    const bool is_lower = (c >= 'a' && c <= 'f');
+    const bool is_upper = (c >= 'A' && c <= 'F');
+    if (!is_digit && !is_lower) {
+      all_lower_hex = false;
+    }
+    if (!is_digit && !is_lower && !is_upper) {
+      all_hex = false;
+    }
+  }
+
+  // Rule 3a — Already Lowercase Hex
+  if (all_lower_hex) {
+    return raw;
+  }
+
+  // Rule 3b — Valid Hex With Uppercase (all_hex == true and raw.size() <= 64)
+  if (all_hex && raw.size() <= kMaxIdHexBufSize) {
+    for (size_t i = 0; i < raw.size(); ++i) {
+      char c = raw[i];
+      if (c >= 'A' && c <= 'F') {
+        stack_buf[i] = static_cast<char>(c + ('a' - 'A'));
+      } else {
+        stack_buf[i] = c;
+      }
+    }
+    return std::string_view(stack_buf.data(), raw.size());
+  }
+
+  // Rule 3c — Non-Printable / Binary / Embedded NUL / High-Bit (!all_printable_ascii)
+  if (!all_printable_ascii) {
+    if (raw.size() <= 32) {
+      HexEncode(raw, stack_buf.data());
+      return std::string_view(stack_buf.data(), raw.size() * 2);
+    }
+    return "";
+  }
+
+  // Rule 3d — Printable Non-Hex ASCII (all_printable_ascii == true and !all_hex)
+  return raw;
+}
 
 std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string_view key,
                                     std::string_view default_val) {
@@ -46,6 +125,27 @@ std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string
     return default_val;
   }
   return str_res.value();
+}
+
+std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string_view key1,
+                                    std::string_view key2, std::string_view default_val) {
+  auto val_res = obj.find_field_unordered(key1);
+  if (val_res.error() == simdjson::SUCCESS) {
+    auto val = val_res.value();
+    auto str_res = val.get_string();
+    if (str_res.error() == simdjson::SUCCESS) {
+      return str_res.value();
+    }
+  }
+  val_res = obj.find_field_unordered(key2);
+  if (val_res.error() == simdjson::SUCCESS) {
+    auto val = val_res.value();
+    auto str_res = val.get_string();
+    if (str_res.error() == simdjson::SUCCESS) {
+      return str_res.value();
+    }
+  }
+  return default_val;
 }
 
 int64_t ParseInt64(simdjson::ondemand::value& val) {
