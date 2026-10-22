@@ -616,25 +616,31 @@ namespace {
 vector_otel::extractors::ExtractionResult ThrowingStdExtractor(lua_State*, std::string_view, int) {
   throw std::runtime_error("simulated std::exception");
 }
-vector_otel::extractors::ExtractionResult ThrowingNonStdExtractor(lua_State*, std::string_view, int) {
+vector_otel::extractors::ExtractionResult ThrowingNonStdExtractor(lua_State*, std::string_view,
+                                                                  int) {
   throw 42;
 }
 vector_otel::extractors::ExtractionResult EmptyErrorExtractor(lua_State*, std::string_view, int) {
-  return vector_otel::extractors::ExtractionResult{.success = false, .error = "", .emitted_count = 0};
+  return vector_otel::extractors::ExtractionResult{
+      .success = false, .error = "", .emitted_count = 0};
 }
 vector_otel::extractors::ExtractionResult DummyTableExtractor(lua_State*, int, int) {
-  return vector_otel::extractors::ExtractionResult{.success = true, .error = "", .emitted_count = 0};
+  return vector_otel::extractors::ExtractionResult{
+      .success = true, .error = "", .emitted_count = 0};
 }
 }  // namespace
 
 TEST_F(ModuleExportsTest, ProcessDispatcherExceptionHandlingAndEmptyError) {
-  lua_pushcfunction(L_, (vector_otel::core::ProcessDispatcher<ThrowingStdExtractor, DummyTableExtractor>));
+  lua_pushcfunction(
+      L_, (vector_otel::core::ProcessDispatcher<ThrowingStdExtractor, DummyTableExtractor>));
   lua_setglobal(L_, "test_std_throw");
 
-  lua_pushcfunction(L_, (vector_otel::core::ProcessDispatcher<ThrowingNonStdExtractor, DummyTableExtractor>));
+  lua_pushcfunction(
+      L_, (vector_otel::core::ProcessDispatcher<ThrowingNonStdExtractor, DummyTableExtractor>));
   lua_setglobal(L_, "test_non_std_throw");
 
-  lua_pushcfunction(L_, (vector_otel::core::ProcessDispatcher<EmptyErrorExtractor, DummyTableExtractor>));
+  lua_pushcfunction(
+      L_, (vector_otel::core::ProcessDispatcher<EmptyErrorExtractor, DummyTableExtractor>));
   lua_setglobal(L_, "test_empty_err");
 
   const char* script = R"(
