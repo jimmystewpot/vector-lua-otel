@@ -160,6 +160,22 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e5.MetricType == "summary", "e5 MetricType mismatch")
     assert(e5.Value == nil, "e5 Value should be nil for summary")
     assert(e5.Attributes["service"] == "auth", "e5 Attributes mismatch")
+    assert(e5.Summary ~= nil, "e5 Summary sub-table missing")
+    assert(e5.Summary.count == 50, "e5 Summary.count mismatch: " .. tostring(e5.Summary.count))
+    assert(e5.Summary.Count == 50, "e5 Summary.Count mismatch: " .. tostring(e5.Summary.Count))
+    assert(math.abs(e5.Summary.sum - 1234.5) < 0.001, "e5 Summary.sum mismatch: " .. tostring(e5.Summary.sum))
+    assert(math.abs(e5.Summary.Sum - 1234.5) < 0.001, "e5 Summary.Sum mismatch: " .. tostring(e5.Summary.Sum))
+    assert(e5.Summary.quantileValues ~= nil, "e5 Summary.quantileValues missing")
+    assert(e5.Summary.QuantileValues == e5.Summary.quantileValues, "e5 Summary.QuantileValues must alias quantileValues")
+    assert(#e5.Summary.quantileValues == 2, "e5 Summary.quantileValues length mismatch: " .. tostring(#e5.Summary.quantileValues))
+    assert(math.abs(e5.Summary.quantileValues[1].quantile - 0.5) < 0.001, "e5 q1 quantile mismatch")
+    assert(math.abs(e5.Summary.quantileValues[1].Quantile - 0.5) < 0.001, "e5 q1 Quantile mismatch")
+    assert(math.abs(e5.Summary.quantileValues[1].value - 12.0) < 0.001, "e5 q1 value mismatch")
+    assert(math.abs(e5.Summary.quantileValues[1].Value - 12.0) < 0.001, "e5 q1 Value mismatch")
+    assert(math.abs(e5.Summary.quantileValues[2].quantile - 0.99) < 0.001, "e5 q2 quantile mismatch")
+    assert(math.abs(e5.Summary.quantileValues[2].Quantile - 0.99) < 0.001, "e5 q2 Quantile mismatch")
+    assert(math.abs(e5.Summary.quantileValues[2].value - 85.0) < 0.001, "e5 q2 value mismatch")
+    assert(math.abs(e5.Summary.quantileValues[2].Value - 85.0) < 0.001, "e5 q2 Value mismatch")
   )";
 
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -720,19 +736,24 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
           "description": "RPC latency summary test",
           "unit": "ms",
           "summary": {
-            "dataPoints": [{
-              "startTimeUnixNano": "1630000000000000000",
-              "timeUnixNano": "1630000002000000000",
-              "count": 1000,
-              "sum": 50000.0,
-              "quantileValues": [
-                {"quantile": 0.5, "value": 45.0},
-                {"quantile": 0.9, "value": 90.0},
-                {"quantile": 0.99, "value": 150.0}
-              ],
-              "attributes": [{"key": "endpoint", "value": {"stringValue": "/api/v1/checkout"}}],
-              "flags": 1
-            }]
+            "dataPoints": [
+              {
+                "startTimeUnixNano": "1630000000000000000",
+                "timeUnixNano": "1630000002000000000",
+                "count": "18446744073709551615",
+                "sum": 50000.0,
+                "quantileValues": [
+                  {"quantile": 0.5, "value": 45.0},
+                  {"quantile": 0.9, "value": 90.0},
+                  {"quantile": 0.99, "value": 150.0}
+                ],
+                "attributes": [{"key": "endpoint", "value": {"stringValue": "/api/v1/checkout"}}],
+                "flags": 1
+              },
+              {
+                "timeUnixNano": "1630000002500000000"
+              }
+            ]
           }
         }]
       }]
@@ -741,7 +762,7 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
 
   auto json_res = ProcessMetrics(L_, json_payload, 1);
   EXPECT_TRUE(json_res.success) << json_res.error;
-  EXPECT_EQ(json_res.emitted_count, 1);
+  EXPECT_EQ(json_res.emitted_count, 2);
 
   // Table mode summary
   const char* push_table_summary = R"(
@@ -760,7 +781,7 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
                       {
                         startTimeUnixNano = "1630000000000000000",
                         timeUnixNano = "1630000003000000000",
-                        count = 200,
+                        count = "18446744073709551615",
                         sum = 600.0,
                         quantileValues = {
                           { quantile = 0.5, value = 2.5 },
@@ -770,6 +791,9 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
                           { key = "handler", value = { stringValue = "login" } }
                         },
                         flags = 0
+                      },
+                      {
+                        timeUnixNano = "1630000003500000000"
                       }
                     }
                   }
@@ -784,13 +808,13 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
   ASSERT_EQ(luaL_dostring(L_, push_table_summary), LUA_OK) << lua_tostring(L_, -1);
   auto tbl_res = ProcessMetricsTable(L_, -1, 1);
   EXPECT_TRUE(tbl_res.success) << tbl_res.error;
-  EXPECT_EQ(tbl_res.emitted_count, 1);
+  EXPECT_EQ(tbl_res.emitted_count, 2);
   lua_pop(L_, 1);
 
   const char* verify_script = R"(
-    assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
+    assert(#emitted == 4, "expected 4 emitted events, got " .. #emitted)
 
-    -- Event 1: JSON Summary
+    -- Event 1: JSON Summary with quantiles and clamped count
     local e1 = emitted[1].log
     assert(e1.MetricName == "rpc_latency_summary")
     assert(e1.MetricDescription == "RPC latency summary test")
@@ -801,51 +825,111 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
     assert(e1.ScopeVersion == "1.0")
     assert(e1.Value == nil, "Summary Value must be nil")
     assert(e1.Histogram == nil, "Summary Histogram must be nil")
+    assert(e1.ExponentialHistogram == nil, "Summary ExponentialHistogram must be nil")
     assert(e1.Attributes["endpoint"] == "/api/v1/checkout")
     assert(e1.Flags == 1)
     assert(e1.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
     assert(e1.TimeUnix == "2021-08-26T17:46:42.000000000Z")
+    assert(e1.Summary ~= nil, "e1 Summary sub-table missing")
+    assert(e1.Summary.count == 9223372036854775807)
+    assert(e1.Summary.Count == 9223372036854775807)
+    assert(math.abs(e1.Summary.sum - 50000.0) < 0.001)
+    assert(math.abs(e1.Summary.Sum - 50000.0) < 0.001)
+    assert(e1.Summary.quantileValues ~= nil)
+    assert(e1.Summary.QuantileValues == e1.Summary.quantileValues)
+    assert(#e1.Summary.quantileValues == 3)
+    assert(math.abs(e1.Summary.quantileValues[1].quantile - 0.5) < 0.001)
+    assert(math.abs(e1.Summary.quantileValues[1].Quantile - 0.5) < 0.001)
+    assert(math.abs(e1.Summary.quantileValues[1].value - 45.0) < 0.001)
+    assert(math.abs(e1.Summary.quantileValues[1].Value - 45.0) < 0.001)
+    assert(math.abs(e1.Summary.quantileValues[2].quantile - 0.9) < 0.001)
+    assert(math.abs(e1.Summary.quantileValues[2].value - 90.0) < 0.001)
+    assert(math.abs(e1.Summary.quantileValues[3].quantile - 0.99) < 0.001)
+    assert(math.abs(e1.Summary.quantileValues[3].value - 150.0) < 0.001)
 
-    -- Event 2: Table Summary
+    -- Event 2: JSON Summary with empty quantileValues
     local e2 = emitted[2].log
-    assert(e2.MetricName == "table_summary_metric")
-    assert(e2.MetricDescription == "Table summary metric test")
-    assert(e2.MetricUnit == "s")
-    assert(e2.MetricType == "summary")
-    assert(e2.Value == nil, "Table summary Value must be nil")
-    assert(e2.Histogram == nil, "Table summary Histogram must be nil")
-    assert(e2.Attributes["handler"] == "login")
-    assert(e2.Flags == 0)
-    assert(e2.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
-    assert(e2.TimeUnix == "2021-08-26T17:46:43.000000000Z")
+    assert(e2.Summary ~= nil)
+    assert(e2.Summary.count == 0 and e2.Summary.Count == 0)
+    assert(e2.Summary.sum == 0.0 and e2.Summary.Sum == 0.0)
+    assert(type(e2.Summary.quantileValues) == "table" and #e2.Summary.quantileValues == 0)
+    assert(e2.Summary.QuantileValues == e2.Summary.quantileValues)
+
+    -- Event 3: Table Summary with quantiles and clamped count
+    local e3 = emitted[3].log
+    assert(e3.MetricName == "table_summary_metric")
+    assert(e3.MetricDescription == "Table summary metric test")
+    assert(e3.MetricUnit == "s")
+    assert(e3.MetricType == "summary")
+    assert(e3.Value == nil, "Table summary Value must be nil")
+    assert(e3.Histogram == nil, "Table summary Histogram must be nil")
+    assert(e3.ExponentialHistogram == nil, "Table summary ExponentialHistogram must be nil")
+    assert(e3.Attributes["handler"] == "login")
+    assert(e3.Flags == 0)
+    assert(e3.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
+    assert(e3.TimeUnix == "2021-08-26T17:46:43.000000000Z")
+    assert(e3.Summary ~= nil, "e3 Summary sub-table missing")
+    assert(e3.Summary.count == 9223372036854775807)
+    assert(e3.Summary.Count == 9223372036854775807)
+    assert(math.abs(e3.Summary.sum - 600.0) < 0.001)
+    assert(math.abs(e3.Summary.Sum - 600.0) < 0.001)
+    assert(#e3.Summary.quantileValues == 2)
+    assert(e3.Summary.QuantileValues == e3.Summary.quantileValues)
+    assert(math.abs(e3.Summary.quantileValues[1].quantile - 0.5) < 0.001)
+    assert(math.abs(e3.Summary.quantileValues[1].Quantile - 0.5) < 0.001)
+    assert(math.abs(e3.Summary.quantileValues[1].value - 2.5) < 0.001)
+    assert(math.abs(e3.Summary.quantileValues[1].Value - 2.5) < 0.001)
+    assert(math.abs(e3.Summary.quantileValues[2].quantile - 0.95) < 0.001)
+    assert(math.abs(e3.Summary.quantileValues[2].value - 5.0) < 0.001)
+
+    -- Event 4: Table Summary with omitted quantileValues
+    local e4 = emitted[4].log
+    assert(e4.Summary ~= nil)
+    assert(e4.Summary.count == 0 and e4.Summary.Count == 0)
+    assert(e4.Summary.sum == 0.0 and e4.Summary.Sum == 0.0)
+    assert(type(e4.Summary.quantileValues) == "table" and #e4.Summary.quantileValues == 0)
+    assert(e4.Summary.QuantileValues == e4.Summary.quantileValues)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
-TEST_F(MetricsExtractorTest, ExponentialHistogramDataPointsSkippedSafely) {
-  // 1. JSON mode: exponentialHistogram along with standard gauge
+TEST_F(MetricsExtractorTest, ExponentialHistogramFullFidelityAndEdgeCases) {
+  // 1. JSON mode: mixed batch with full exponentialHistogram + gauge
   const std::string json_payload = R"({
     "resourceMetrics": [{
       "scopeMetrics": [{
         "metrics": [
           {
-            "name": "exp_hist_skipped",
+            "name": "exp_hist_full",
+            "description": "Exponential histogram latency",
+            "unit": "ms",
             "exponentialHistogram": {
+              "aggregationTemporality": 2,
               "dataPoints": [{
                 "startTimeUnixNano": "1630000000000000000",
                 "timeUnixNano": "1630000001000000000",
-                "count": 10,
+                "count": "18446744073709551615",
                 "sum": 25.0,
-                "scale": 1,
-                "zeroCount": 2,
+                "min": 0.1,
+                "max": 10.5,
+                "scale": -2,
+                "zeroCount": "9007199254740993",
+                "zeroThreshold": 0.001,
                 "positive": {
-                  "offset": 1,
-                  "bucketCounts": ["1", "3", "4"]
+                  "offset": -3,
+                  "bucketCounts": ["1", "9007199254740993", "18446744073709551615"]
                 },
                 "negative": {
-                  "offset": 0,
-                  "bucketCounts": []
-                }
+                  "offset": 2,
+                  "bucket_counts": [4, 5]
+                },
+                "exemplars": [{
+                  "timeUnixNano": "1630000000500000000",
+                  "asDouble": 3.25,
+                  "traceId": "0123456789abcdef0123456789abcdef",
+                  "spanId": "0123456789abcdef",
+                  "filteredAttributes": [{"key": "region", "value": {"stringValue": "us-east-1"}}]
+                }]
               }]
             }
           },
@@ -865,20 +949,19 @@ TEST_F(MetricsExtractorTest, ExponentialHistogramDataPointsSkippedSafely) {
 
   auto json_res = ProcessMetrics(L_, json_payload, 1);
   EXPECT_TRUE(json_res.success) << json_res.error;
-  EXPECT_EQ(json_res.emitted_count, 1);
+  EXPECT_EQ(json_res.emitted_count, 2);
 
-  // 2. Only exponentialHistogram in JSON payload -> returns success with 0
-  // emitted
+  // 2. Exponential-histogram-only JSON payload (snake_case, omitted optional fields)
   const std::string only_exp_json = R"({
     "resourceMetrics": [{
       "scopeMetrics": [{
         "metrics": [{
-          "name": "only_exp_hist",
-          "exponentialHistogram": {
-            "dataPoints": [{
+          "name": "only_exp_hist_sparse",
+          "exponential_histogram": {
+            "data_points": [{
               "count": 5,
               "scale": 3,
-              "zeroCount": 1
+              "zero_count": 1
             }]
           }
         }]
@@ -886,10 +969,10 @@ TEST_F(MetricsExtractorTest, ExponentialHistogramDataPointsSkippedSafely) {
     }]
   })";
   auto only_res = ProcessMetrics(L_, only_exp_json, 1);
-  EXPECT_TRUE(only_res.success);
-  EXPECT_EQ(only_res.emitted_count, 0);
+  EXPECT_TRUE(only_res.success) << only_res.error;
+  EXPECT_EQ(only_res.emitted_count, 1);
 
-  // 3. Table mode: exponentialHistogram along with sum
+  // 3. Table mode: full exponentialHistogram, sparse exponential_histogram, and sum
   const char* push_table_exp = R"(
     return {
       resourceMetrics = {
@@ -898,10 +981,48 @@ TEST_F(MetricsExtractorTest, ExponentialHistogramDataPointsSkippedSafely) {
             {
               metrics = {
                 {
-                  name = "table_exp_hist",
+                  name = "table_exp_hist_full",
                   exponentialHistogram = {
+                    aggregationTemporality = 2,
                     dataPoints = {
-                      { scale = 2, zeroCount = 0, count = 10 }
+                      {
+                        startTimeUnixNano = "1630000000000000000",
+                        timeUnixNano = "1630000001000000000",
+                        count = "18446744073709551615",
+                        sum = 25.0,
+                        min = 0.1,
+                        max = 10.5,
+                        scale = -2,
+                        zeroCount = "9007199254740993",
+                        zeroThreshold = 0.001,
+                        positive = {
+                          offset = -3,
+                          bucketCounts = { "1", "9007199254740993", "18446744073709551615" }
+                        },
+                        negative = {
+                          offset = 2,
+                          bucket_counts = { 4, 5 }
+                        },
+                        exemplars = {
+                          {
+                            timeUnixNano = "1630000000500000000",
+                            asDouble = 3.25,
+                            traceId = "0123456789abcdef0123456789abcdef",
+                            spanId = "0123456789abcdef",
+                            filteredAttributes = {
+                              { key = "region", value = { stringValue = "us-east-1" } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  name = "table_exp_hist_sparse",
+                  exponential_histogram = {
+                    data_points = {
+                      { scale = 3, zero_count = 1, count = 5 }
                     }
                   }
                 },
@@ -923,18 +1044,87 @@ TEST_F(MetricsExtractorTest, ExponentialHistogramDataPointsSkippedSafely) {
   ASSERT_EQ(luaL_dostring(L_, push_table_exp), LUA_OK) << lua_tostring(L_, -1);
   auto tbl_res = ProcessMetricsTable(L_, -1, 1);
   EXPECT_TRUE(tbl_res.success) << tbl_res.error;
-  EXPECT_EQ(tbl_res.emitted_count, 1);
+  EXPECT_EQ(tbl_res.emitted_count, 3);
   lua_pop(L_, 1);
 
   const char* verify_script = R"(
-    assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
-    local e1 = emitted[1].log
-    assert(e1.MetricName == "valid_gauge_alongside")
-    assert(math.abs(e1.Value - 77.5) < 0.001)
+    assert(#emitted == 6, "expected 6 emitted events, got " .. #emitted)
 
-    local e2 = emitted[2].log
-    assert(e2.MetricName == "table_valid_sum")
-    assert(e2.Value == 500)
+    local function check_full_exp(e, expected_name)
+      assert(e.MetricName == expected_name)
+      assert(e.MetricType == "exponential_histogram")
+      assert(e.Value == nil, "Value must be nil for exponential_histogram")
+      assert(e.Histogram == nil, "Histogram must be nil for exponential_histogram")
+      assert(e.Summary == nil, "Summary must be nil for exponential_histogram")
+      assert(e.AggregationTemporality == 2)
+      local eh = e.ExponentialHistogram
+      assert(eh ~= nil, "ExponentialHistogram missing")
+      assert(eh.aggregationTemporality == 2 and eh.AggregationTemporality == 2)
+      assert(eh.count == 9223372036854775807 and eh.Count == 9223372036854775807)
+      assert(math.abs(eh.sum - 25.0) < 0.001 and math.abs(eh.Sum - 25.0) < 0.001)
+      assert(math.abs(eh.min - 0.1) < 0.001 and math.abs(eh.Min - 0.1) < 0.001)
+      assert(math.abs(eh.max - 10.5) < 0.001 and math.abs(eh.Max - 10.5) < 0.001)
+      assert(eh.scale == -2 and eh.Scale == -2)
+      assert(eh.zeroCount == 9007199254740993 and eh.ZeroCount == 9007199254740993)
+      assert(math.type(eh.zeroCount) == "integer")
+      assert(math.abs(eh.zeroThreshold - 0.001) < 1e-6 and math.abs(eh.ZeroThreshold - 0.001) < 1e-6)
+      assert(eh.positive ~= nil and eh.Positive == eh.positive)
+      assert(eh.positive.offset == -3 and eh.positive.Offset == -3)
+      assert(eh.positive.bucketCounts == eh.positive.BucketCounts)
+      assert(#eh.positive.bucketCounts == 3)
+      assert(eh.positive.bucketCounts[1] == 1)
+      assert(eh.positive.bucketCounts[2] == 9007199254740993)
+      assert(math.type(eh.positive.bucketCounts[2]) == "integer")
+      assert(eh.positive.bucketCounts[3] == 9223372036854775807)
+      assert(eh.negative ~= nil and eh.Negative == eh.negative)
+      assert(eh.negative.offset == 2 and eh.negative.Offset == 2)
+      assert(eh.negative.bucketCounts == eh.negative.BucketCounts)
+      assert(#eh.negative.bucketCounts == 2)
+      assert(eh.negative.bucketCounts[1] == 4 and eh.negative.bucketCounts[2] == 5)
+      assert(e.Exemplars ~= nil and #e.Exemplars == 1)
+      local ex = e.Exemplars[1]
+      assert(math.abs(ex.Value - 3.25) < 0.001)
+      assert(ex.TraceId == "0123456789abcdef0123456789abcdef")
+      assert(ex.SpanId == "0123456789abcdef")
+      assert(ex.FilteredAttributes["region"] == "us-east-1")
+    end
+
+    local function check_sparse_exp(e, expected_name, is_table_mode)
+      assert(e.MetricName == expected_name)
+      assert(e.MetricType == "exponential_histogram")
+      assert(e.Value == nil)
+      assert(e.AggregationTemporality == 0)
+      local eh = e.ExponentialHistogram
+      assert(eh ~= nil)
+      assert(eh.aggregationTemporality == 0 and eh.AggregationTemporality == 0)
+      assert(eh.count == 5 and eh.Count == 5)
+      assert(eh.scale == 3 and eh.Scale == 3)
+      assert(eh.zeroCount == 1 and eh.ZeroCount == 1)
+      assert(eh.zeroThreshold == 0.0 and eh.ZeroThreshold == 0.0)
+      assert(eh.sum == nil and eh.Sum == nil, "omitted sum must be nil")
+      assert(eh.min == nil and eh.Min == nil, "omitted min must be nil")
+      assert(eh.max == nil and eh.Max == nil, "omitted max must be nil")
+      assert(eh.positive ~= nil and eh.Positive == eh.positive)
+      assert(eh.positive.offset == 0 and eh.positive.Offset == 0)
+      assert(type(eh.positive.bucketCounts) == "table" and #eh.positive.bucketCounts == 0)
+      assert(eh.negative ~= nil and eh.Negative == eh.negative)
+      assert(eh.negative.offset == 0 and eh.negative.Offset == 0)
+      assert(type(eh.negative.bucketCounts) == "table" and #eh.negative.bucketCounts == 0)
+      if is_table_mode then
+        assert(type(e.Exemplars) == "table" and #e.Exemplars == 0)
+      else
+        assert(e.Exemplars == nil)
+      end
+    end
+
+    check_full_exp(emitted[1].log, "exp_hist_full")
+    assert(emitted[2].log.MetricName == "valid_gauge_alongside")
+    assert(math.abs(emitted[2].log.Value - 77.5) < 0.001)
+    check_sparse_exp(emitted[3].log, "only_exp_hist_sparse", false)
+    check_full_exp(emitted[4].log, "table_exp_hist_full")
+    check_sparse_exp(emitted[5].log, "table_exp_hist_sparse", true)
+    assert(emitted[6].log.MetricName == "table_valid_sum")
+    assert(emitted[6].log.Value == 500)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1072,6 +1262,16 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
             }
           },
           {
+            "name": "cumulative_sum_str",
+            "sum": {
+              "aggregation_temporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+              "is_monotonic": false,
+              "dataPoints": [{
+                "asInt": 250
+              }]
+            }
+          },
+          {
             "name": "cumulative_hist",
             "histogram": {
               "aggregation_temporality": 2,
@@ -1079,6 +1279,26 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
                 "count": 25,
                 "sum": 100.0,
                 "flags": 4
+              }]
+            }
+          },
+          {
+            "name": "delta_exp_hist",
+            "exponentialHistogram": {
+              "aggregationTemporality": "AGGREGATION_TEMPORALITY_DELTA",
+              "dataPoints": [{
+                "count": 10,
+                "scale": 1
+              }]
+            }
+          },
+          {
+            "name": "unspec_exp_hist",
+            "exponential_histogram": {
+              "aggregation_temporality": 0,
+              "dataPoints": [{
+                "count": 5,
+                "scale": 0
               }]
             }
           }
@@ -1089,17 +1309,113 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
 
   auto res = ProcessMetrics(L_, json_payload, 1);
   EXPECT_TRUE(res.success) << res.error;
-  EXPECT_EQ(res.emitted_count, 2);
+  EXPECT_EQ(res.emitted_count, 5);
+
+  const char* push_table = R"(
+    return {
+      resourceMetrics = {
+        {
+          scopeMetrics = {
+            {
+              metrics = {
+                {
+                  name = "tbl_sum_delta",
+                  sum = {
+                    aggregationTemporality = "DELTA",
+                    isMonotonic = true,
+                    dataPoints = { { asInt = 10, flags = 2 } }
+                  }
+                },
+                {
+                  name = "tbl_sum_non_mono",
+                  sum = {
+                    aggregation_temporality = 2,
+                    is_monotonic = false,
+                    dataPoints = { { asInt = 20 } }
+                  }
+                },
+                {
+                  name = "tbl_hist_cum",
+                  histogram = {
+                    aggregationTemporality = "CUMULATIVE",
+                    dataPoints = { { count = 5, sum = 15.0 } }
+                  }
+                },
+                {
+                  name = "tbl_exp_delta",
+                  exponentialHistogram = {
+                    aggregation_temporality = 1,
+                    dataPoints = { { count = 7, scale = 2 } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_table), LUA_OK) << lua_tostring(L_, -1);
+  auto tbl_res = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res.success) << tbl_res.error;
+  EXPECT_EQ(tbl_res.emitted_count, 4);
+  lua_pop(L_, 1);
 
   const char* verify_script = R"(
-    assert(#emitted == 2)
+    assert(#emitted == 9, "expected 9 emitted events, got " .. #emitted)
+
     local e1 = emitted[1].log
     assert(e1.MetricName == "delta_sum")
+    assert(e1.AggregationTemporality == 1)
+    assert(e1.IsMonotonic == true)
     assert(e1.Flags == 1)
 
     local e2 = emitted[2].log
-    assert(e2.MetricName == "cumulative_hist")
-    assert(e2.Flags == 4)
+    assert(e2.MetricName == "cumulative_sum_str")
+    assert(e2.AggregationTemporality == 2)
+    assert(e2.IsMonotonic == false)
+
+    local e3 = emitted[3].log
+    assert(e3.MetricName == "cumulative_hist")
+    assert(e3.AggregationTemporality == 2)
+    assert(e3.Histogram.aggregationTemporality == 2)
+    assert(e3.Histogram.AggregationTemporality == 2)
+    assert(e3.Flags == 4)
+
+    local e4 = emitted[4].log
+    assert(e4.MetricName == "delta_exp_hist")
+    assert(e4.AggregationTemporality == 1)
+    assert(e4.ExponentialHistogram.aggregationTemporality == 1)
+    assert(e4.ExponentialHistogram.AggregationTemporality == 1)
+
+    local e5 = emitted[5].log
+    assert(e5.MetricName == "unspec_exp_hist")
+    assert(e5.AggregationTemporality == 0)
+    assert(e5.ExponentialHistogram.aggregationTemporality == 0)
+    assert(e5.ExponentialHistogram.AggregationTemporality == 0)
+
+    local e6 = emitted[6].log
+    assert(e6.MetricName == "tbl_sum_delta")
+    assert(e6.AggregationTemporality == 1)
+    assert(e6.IsMonotonic == true)
+    assert(e6.Flags == 2)
+
+    local e7 = emitted[7].log
+    assert(e7.MetricName == "tbl_sum_non_mono")
+    assert(e7.AggregationTemporality == 2)
+    assert(e7.IsMonotonic == false)
+
+    local e8 = emitted[8].log
+    assert(e8.MetricName == "tbl_hist_cum")
+    assert(e8.AggregationTemporality == 2)
+    assert(e8.Histogram.aggregationTemporality == 2)
+    assert(e8.Histogram.AggregationTemporality == 2)
+
+    local e9 = emitted[9].log
+    assert(e9.MetricName == "tbl_exp_delta")
+    assert(e9.AggregationTemporality == 1)
+    assert(e9.ExponentialHistogram.aggregationTemporality == 1)
+    assert(e9.ExponentialHistogram.AggregationTemporality == 1)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1448,6 +1764,178 @@ TEST_F(MetricsExtractorTest, BatchModeEmitFailureReportsOnlyDeliveredRows) {
   lua_getglobal(L_, "batch_emit_calls");
   EXPECT_EQ(lua_tointeger(L_, -1), 2);
   lua_pop(L_, 1);
+}
+
+TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
+  // 1. Null protobuf oneof sibling in JSON + bucket counts edge cases in JSON
+  const std::string json_payload = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [
+          {
+            "name": "null_oneof",
+            "gauge": null,
+            "exponentialHistogram": {
+              "dataPoints": [{
+                "timeUnixNano": "1",
+                "count": "3",
+                "scale": 1
+              }]
+            }
+          },
+          {
+            "name": "json_bucket_edge_cases",
+            "histogram": {
+              "dataPoints": [{
+                "timeUnixNano": "2",
+                "count": 1,
+                "bucketCounts": [-5, "-5", "inf", "99999999999999999999", "99999999999999999999abc", "18446744073709551615"]
+              }]
+            }
+          }
+        ]
+      }]
+    }]
+  })";
+  auto json_res = ProcessMetrics(L_, json_payload, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 2);
+
+  // 2. Table mode edge cases:
+  //    - generic `value = "9007199254740993"` on data point and exemplar preserves exact integer
+  //    - `value = 45.2` and `value = "45.2"` emit double 45.2
+  //    - `asDouble = "invalid_double"`, `asInt = "bad"`, `value = "bad"` omit Value (nil)
+  //    - bucketCounts with -5, "-5", math.huge, "99999999999999999999", "99999999999999999999abc",
+  //    "18446744073709551615"
+  //    - explicitBounds = "not_a_table" -> {} and explicitBounds = {1.0, "2.5"} -> fresh table
+  //    {1.0, 2.5}
+  //    - negative flags = -1 -> Flags == 0
+  const char* push_table = R"(
+    shared_bounds_input = { 1.0, "2.5" }
+    return {
+      resourceMetrics = {
+        {
+          scopeMetrics = {
+            {
+              metrics = {
+                {
+                  name = "tbl_generic_values",
+                  gauge = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = "1",
+                        value = "9007199254740993",
+                        flags = -1,
+                        exemplars = {
+                          { timeUnixNano = "1", value = "9007199254740993" },
+                          { timeUnixNano = "1", value = 45.2 },
+                          { timeUnixNano = "1", value = "45.2" },
+                          { timeUnixNano = "1", asDouble = "invalid_double" },
+                          { timeUnixNano = "1", asInt = "bad" },
+                          { timeUnixNano = "1", value = "bad" }
+                        }
+                      },
+                      { timeUnixNano = "2", value = 45.2 },
+                      { timeUnixNano = "3", value = "45.2" },
+                      { timeUnixNano = "4", asDouble = "invalid_double" },
+                      { timeUnixNano = "5", asInt = "bad" },
+                      { timeUnixNano = "6", value = "bad" }
+                    }
+                  }
+                },
+                {
+                  name = "tbl_bucket_and_bounds",
+                  histogram = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = "7",
+                        count = 1,
+                        bucketCounts = { -5, "-5", math.huge, "99999999999999999999", "99999999999999999999abc", "18446744073709551615" },
+                        explicitBounds = "not_a_table"
+                      },
+                      {
+                        timeUnixNano = "8",
+                        count = 2,
+                        explicitBounds = shared_bounds_input
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, push_table), LUA_OK) << lua_tostring(L_, -1);
+  auto tbl_res = ProcessMetricsTable(L_, -1, 1);
+  EXPECT_TRUE(tbl_res.success) << tbl_res.error;
+  EXPECT_EQ(tbl_res.emitted_count, 8);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 10, "expected 10 emitted events, got " .. #emitted)
+
+    -- Event 1: null_oneof -> exponential_histogram
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "null_oneof")
+    assert(e1.MetricType == "exponential_histogram")
+    assert(e1.ExponentialHistogram.count == 3)
+    assert(e1.ExponentialHistogram.scale == 1)
+
+    -- Event 2: json_bucket_edge_cases
+    local bc_json = emitted[2].log.Histogram.bucketCounts
+    assert(#bc_json == 6)
+    assert(bc_json[1] == 0 and bc_json[2] == 0 and bc_json[3] == 0 and bc_json[4] == 0 and bc_json[5] == 0)
+    assert(bc_json[6] == 9223372036854775807)
+
+    -- Event 3: table value = "9007199254740993", flags = -1, exemplars
+    local e3 = emitted[3].log
+    assert(e3.Value == 9007199254740993)
+    assert(math.type(e3.Value) == "integer")
+    assert(e3.Flags == 0, "negative flags must normalize to 0, got " .. tostring(e3.Flags))
+    assert(#e3.Exemplars == 6)
+    assert(e3.Exemplars[1].Value == 9007199254740993 and math.type(e3.Exemplars[1].Value) == "integer")
+    assert(math.abs(e3.Exemplars[2].Value - 45.2) < 0.001 and math.type(e3.Exemplars[2].Value) == "float")
+    assert(math.abs(e3.Exemplars[3].Value - 45.2) < 0.001 and math.type(e3.Exemplars[3].Value) == "float")
+    assert(e3.Exemplars[4].Value == nil)
+    assert(e3.Exemplars[5].Value == nil)
+    assert(e3.Exemplars[6].Value == nil)
+
+    -- Events 4..8: table Value variants
+    assert(math.abs(emitted[4].log.Value - 45.2) < 0.001 and math.type(emitted[4].log.Value) == "float")
+    assert(math.abs(emitted[5].log.Value - 45.2) < 0.001 and math.type(emitted[5].log.Value) == "float")
+    assert(emitted[6].log.Value == nil)
+    assert(emitted[7].log.Value == nil)
+    assert(emitted[8].log.Value == nil)
+
+    -- Event 9: table bucketCounts and explicitBounds = "not_a_table"
+    local h9 = emitted[9].log.Histogram
+    local bc_tbl = h9.bucketCounts
+    assert(#bc_tbl == 6)
+    assert(bc_tbl[1] == 0 and bc_tbl[2] == 0 and bc_tbl[3] == 0 and bc_tbl[4] == 0 and bc_tbl[5] == 0)
+    assert(bc_tbl[6] == 9223372036854775807)
+    assert(type(h9.explicitBounds) == "table" and #h9.explicitBounds == 0)
+    assert(h9.ExplicitBounds == h9.explicitBounds)
+
+    -- Event 10: valid explicitBounds = {1.0, "2.5"} is a fresh non-aliased table
+    local h10 = emitted[10].log.Histogram
+    assert(type(h10.explicitBounds) == "table" and #h10.explicitBounds == 2)
+    assert(h10.explicitBounds ~= shared_bounds_input, "explicitBounds must not alias input table")
+    assert(math.abs(h10.explicitBounds[1] - 1.0) < 0.001)
+    assert(math.abs(h10.explicitBounds[2] - 2.5) < 0.001)
+    assert(math.type(h10.explicitBounds[2]) == "float")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+
+  // 3. Mid-array syntax error in JSON dataPoints returns success == false with emitted_count == 1
+  const std::string mid_array_err_json =
+      R"({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"mid_err","gauge":{"dataPoints":[{"timeUnixNano":"1","asInt":1},{"timeUnixNano":"2","asInt":}]}}]}]}]})";
+  auto mid_res = ProcessMetrics(L_, mid_array_err_json, 1);
+  EXPECT_FALSE(mid_res.success);
+  EXPECT_FALSE(mid_res.error.empty());
+  EXPECT_EQ(mid_res.emitted_count, 1);
 }
 
 TEST_F(MetricsExtractorTest, JsonModeExemplarIdsNormalizedToLowercaseHex) {
