@@ -647,10 +647,10 @@ All extracted columns are aligned with canonical OpenTelemetry ClickHouse export
 | `ScopeVersion` | `string` | `scope.version` | Instrumentation scope version |
 | `SpanAttributes` | `table` | `attributes` | Span key-value attributes |
 | `Duration` | `integer` | `endTimeUnixNano - startTimeUnixNano` | Span duration in nanoseconds (preserved 64-bit int) |
-| `StatusCode` | `string` | `status.code` | `"STATUS_CODE_UNSET"`, `"OK"`, or `"ERROR"` |
+| `StatusCode` | `string` | `status.code` | `"STATUS_CODE_UNSET"`, `"STATUS_CODE_OK"`, or `"STATUS_CODE_ERROR"` |
 | `StatusMessage` | `string` | `status.message` | Status description message |
-| `Events` | `table` | `events` | Array of `{ Timestamp, Name, Attributes }` |
-| `Links` | `table` | `links` | Array of `{ TraceId, SpanId, TraceState, Attributes }` |
+| `Events` | `string` (`vector_native`) / `table` (`vector_otel`) | `events` | JSON array (or table) of `{ Timestamp, Name, Attributes }` |
+| `Links` | `string` (`vector_native`) / `table` (`vector_otel`) | `links` | JSON array (or table) of `{ TraceId, SpanId, TraceState, Attributes }` |
 | `processed_at` | `string` | `std::chrono::system_clock` | Transform ISO-8601 UTC nanosecond timestamp |
 
 ### Metrics Schema

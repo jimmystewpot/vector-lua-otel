@@ -128,7 +128,10 @@ std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::str
 
 // Pushes a new flattened key-value table of attributes onto the Lua stack.
 // Handles both OTLP array-of-KeyValue and direct key-value maps.
-void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer);
+// If out_service_name is non-null, captures string "service.name" (or
+// "service_name") in-pass without a second hash lookup.
+void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                         std::string_view* out_service_name = nullptr);
 
 // Serialises any Lua value or OTLP AnyValue table to JSON via FastJsonWriter
 // with maximum recursion depth protection against stack exhaustion.

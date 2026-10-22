@@ -15,6 +15,7 @@ extern "C" {
 #include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/parser.hpp"
+#include "vector_otel/core/scratch.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
@@ -121,7 +122,7 @@ int64_t ParseJsonSeverityNumber(simdjson::ondemand::value& fv) {
 bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_obj,
                                 std::string_view processed_at, core::FastJsonWriter& writer,
                                 core::FastJsonWriter& body_writer, core::LuaEmitter& emitter,
-                                std::string& err_out, int depth = 0) {
+                                std::string& err_out, int depth = 0, bool* out_matched = nullptr) {
   uint64_t t_ns = 0;
   uint64_t obs_t_ns = 0;
   bool has_ts = false;
@@ -163,7 +164,7 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
     }
     auto fv = fv_res.value();
 
-    if (k == "log" && depth == 0) {
+    if (k == "log" && depth == 0 && !has_recognized_field) {
       auto t_res = fv.type();
       if (t_res.error() != simdjson::SUCCESS) {
         err_out = std::string(simdjson::error_message(t_res.error()));
@@ -175,21 +176,24 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
           err_out = std::string(simdjson::error_message(inner_obj_res.error()));
           return false;
         }
-        res_attrs_scoped.reset();
-        scope_attrs_scoped.reset();
-        log_attrs_scoped.reset();
         auto inner_obj = inner_obj_res.value();
-        return ExtractNativeLogObjectJson(L, inner_obj, processed_at, writer, body_writer, emitter,
-                                          err_out, depth + 1);
+        bool inner_matched = false;
+        if (!ExtractNativeLogObjectJson(L, inner_obj, processed_at, writer, body_writer, emitter,
+                                        err_out, depth + 1, &inner_matched)) {
+          return false;
+        }
+        if (inner_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
       } else if (t_res.value() == simdjson::ondemand::json_type::array) {
         auto inner_arr_res = fv.get_array();
         if (inner_arr_res.error() != simdjson::SUCCESS) {
           err_out = std::string(simdjson::error_message(inner_arr_res.error()));
           return false;
         }
-        res_attrs_scoped.reset();
-        scope_attrs_scoped.reset();
-        log_attrs_scoped.reset();
+        bool any_matched = false;
         for (auto elem_res : inner_arr_res.value()) {
           if (elem_res.error() != simdjson::SUCCESS) {
             err_out = std::string(simdjson::error_message(elem_res.error()));
@@ -201,12 +205,18 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
             return false;
           }
           auto elem_obj = elem_obj_res.value();
+          bool elem_matched = false;
           if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, writer, body_writer, emitter,
-                                          err_out, depth + 1)) {
+                                          err_out, depth + 1, &elem_matched)) {
             return false;
           }
+          any_matched = any_matched || elem_matched;
         }
-        return true;
+        if (any_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
       }
       continue;
     }
@@ -350,13 +360,14 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
       if (s_res.error() == simdjson::SUCCESS) {
         top_service_name = s_res.value();
       }
-    } else if (k == "source_type") {
-      has_recognized_field = true;
     }
   }
 
   if (!has_recognized_field) {
     return true;
+  }
+  if (out_matched != nullptr) {
+    *out_matched = true;
   }
 
   std::string_view service_name = res_service_name;
@@ -486,7 +497,6 @@ bool HasNativeLogFields(lua_State* L, int table_idx) {
       "schemaUrl",
       "service_name",
       "service",
-      "source_type",
   };
   for (const char* k : kKeys) {
     if (core::GetTableFieldRaw(L, abs_idx, k)) {
@@ -612,10 +622,7 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
           lua_pop(L, 1);
         }
       }
-      core::PushTableAttributes(L, attrs_src_idx, writer);
-      int pushed_attrs_idx = lua_absindex(L, -1);
-      service_name = core::ReadTableStringView(L, pushed_attrs_idx, "service.name", "service_name",
-                                               tls_service_scratch);
+      core::PushTableAttributes(L, attrs_src_idx, writer, &service_name);
       res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
       if (has_nested_attrs) {
         lua_pop(L, 1);
@@ -764,6 +771,7 @@ extractors::ExtractionResult ProcessNativeLogs(lua_State* L, std::string_view ra
       ~WriterTrimGuard() noexcept {
         w1.Trim();
         w2.Trim();
+        core::ResetServiceNameScratch();
       }
       core::FastJsonWriter& w1;
       core::FastJsonWriter& w2;
@@ -863,16 +871,11 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
         lua_settop(L, top);
       }
       writer.Trim();
-      auto trim_scratch = [](std::string& s) noexcept {
-        if (s.capacity() > 4096) {
-          std::string().swap(s);
-        }
-      };
-      trim_scratch(tls_res_schema_scratch);
-      trim_scratch(tls_service_scratch);
-      trim_scratch(tls_scope_schema_scratch);
-      trim_scratch(tls_scope_name_scratch);
-      trim_scratch(tls_scope_ver_scratch);
+      core::TrimScratchString(tls_res_schema_scratch);
+      core::TrimScratchString(tls_service_scratch);
+      core::TrimScratchString(tls_scope_schema_scratch);
+      core::TrimScratchString(tls_scope_name_scratch);
+      core::TrimScratchString(tls_scope_ver_scratch);
     }
     lua_State* L;
     int top;
@@ -916,14 +919,15 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
       if (core::GetTableFieldRaw(L, abs_idx, "log")) {
         int log_idx = lua_absindex(L, -1);
         if (lua_istable(L, log_idx)) {
-          handled_log_wrapper = true;
           const size_t inner_len = lua_rawlen(L, log_idx);
           if (inner_len > 0) {
+            handled_log_wrapper = true;
             if (!extract_array(log_idx, inner_len)) {
               lua_pop(L, 1);
               return ExtractionResult{false, err_out, emitter.EmittedCount()};
             }
           } else if (HasNativeLogFields(L, log_idx)) {
+            handled_log_wrapper = true;
             if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, writer,
                                              tls_res_schema_scratch, tls_service_scratch,
                                              tls_scope_schema_scratch, tls_scope_name_scratch,
