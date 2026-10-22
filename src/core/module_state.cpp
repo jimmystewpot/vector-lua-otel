@@ -22,6 +22,20 @@ constexpr int InvocationIndex(AnchorSlot slot) noexcept {
   return 1 + kImmutableSlotCount + static_cast<int>(slot);
 }
 
+}  // namespace
+
+std::size_t FormatPayloadLimitText(char* buffer, std::size_t capacity) noexcept {
+  const int n = std::snprintf(buffer, capacity, "payload exceeds %zu-byte uncompressed JSON limit",
+                              static_cast<std::size_t>(kMaxPayloadBytes));
+  if (n < 0) {
+    buffer[0] = '\0';
+    return 0;
+  }
+  return static_cast<std::size_t>(n) < capacity ? static_cast<std::size_t>(n) : capacity - 1;
+}
+
+namespace {
+
 // Runs under lua_pcall with only trivial automatic objects. Builds the anchor and publishes it as
 // the LAST operation, so a failure anywhere leaves nothing published.
 int BootstrapLeaf(lua_State* L) {
@@ -29,10 +43,8 @@ int BootstrapLeaf(lua_State* L) {
   lua_createtable(L, kImmutableSlotCount + kInvocationSlotCount, 0);  // anchor at index 2
 
   char limit_text[96];
-  const int limit_len = std::snprintf(limit_text, sizeof(limit_text),
-                                      "payload exceeds %zu-byte uncompressed JSON limit",
-                                      static_cast<std::size_t>(kMaxPayloadBytes));
-  lua_pushlstring(L, limit_text, static_cast<std::size_t>(limit_len));
+  const std::size_t limit_len = FormatPayloadLimitText(limit_text, sizeof(limit_text));
+  lua_pushlstring(L, limit_text, limit_len);
   lua_rawseti(L, 2, ImmutableIndex(ImmutableSlot::kPayloadLimitMessage));
 
   struct Fixed {

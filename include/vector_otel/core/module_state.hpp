@@ -85,6 +85,11 @@ inline constexpr std::string_view kReentrantText =
 inline constexpr std::string_view kStackText = "out of lua stack space";
 static_assert(kMaxIncomingRecords == 2048, "kRecordLimitText hard-codes the record limit");
 
+// Formats "payload exceeds <C>-byte uncompressed JSON limit" into `buffer` (NUL terminated, at
+// most `capacity` bytes) and returns its length. Shared by bootstrap interning and admission so
+// the immutable message and the diagnostic can never drift apart.
+std::size_t FormatPayloadLimitText(char* buffer, std::size_t capacity) noexcept;
+
 // Finds or creates the anchor for `kind` in `L`. On success the anchor table is left on top of the
 // stack. On failure a protected Lua error object is left on top and NOTHING is published; a later
 // call retries. The caller must have at least 4 free stack slots (every C function does).

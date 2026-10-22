@@ -55,6 +55,7 @@ add_library(vector_otel_core STATIC
   src/core/table_reader.cpp
   src/core/module_state.cpp
   src/core/protected_lua.cpp
+  src/core/admission.cpp
   src/extractors/logs_extractor.cpp
   src/extractors/traces_extractor.cpp
   src/extractors/metrics_extractor.cpp
@@ -146,6 +147,7 @@ add_executable(vector_otel_fault_tests
   tests/cpp/test_contract_fixtures.cpp
   tests/cpp/test_parser_workspace.cpp
   tests/cpp/test_operation_context.cpp
+  tests/cpp/test_admission.cpp
   src/module.cpp
   src/native_module.cpp
   tests/support/fault_new.cpp

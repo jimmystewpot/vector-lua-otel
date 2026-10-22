@@ -75,6 +75,9 @@ struct OperationContext {
   // Rows delivered by emit callbacks that RETURNED successfully (batch length in grouped mode).
   // Updated immediately after the successful call, before any further fallible work.
   int delivered_count = 0;
+
+  // Candidate records counted by admission (stops at kMaxIncomingRecords + 1).
+  std::size_t incoming_records = 0;
   ErrorStatus error;
 
   // Index of the module anchor table valid in the dispatcher frame (normally
