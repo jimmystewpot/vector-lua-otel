@@ -408,12 +408,7 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
       }
       auto res_span_obj_res = res_span_elem.value().get_object();
       if (res_span_obj_res.error() != simdjson::SUCCESS) {
-        if (res_span_obj_res.error() == simdjson::INCORRECT_TYPE) {
-          continue;
-        }
-        return ExtractionResult{false,
-                                std::string(simdjson::error_message(res_span_obj_res.error())),
-                                emitter.EmittedCount()};
+        continue;
       }
       auto res_span_obj = res_span_obj_res.value();
 
@@ -440,9 +435,6 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           } else {
             service_name = core::ExtractServiceName(res_obj);
           }
-        } else if (res_obj_res.error() != simdjson::INCORRECT_TYPE) {
-          return ExtractionResult{false, std::string(simdjson::error_message(res_obj_res.error())),
-                                  emitter.EmittedCount()};
         }
       } else if (res_field.error() != simdjson::NO_SUCH_FIELD) {
         return ExtractionResult{false, std::string(simdjson::error_message(res_field.error())),
@@ -482,12 +474,7 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
         }
         auto scope_span_obj_res = scope_span_elem.value().get_object();
         if (scope_span_obj_res.error() != simdjson::SUCCESS) {
-          if (scope_span_obj_res.error() == simdjson::INCORRECT_TYPE) {
-            continue;
-          }
-          return ExtractionResult{false,
-                                  std::string(simdjson::error_message(scope_span_obj_res.error())),
-                                  emitter.EmittedCount()};
+          continue;
         }
         auto scope_span_obj = scope_span_obj_res.value();
 
@@ -501,10 +488,6 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
             auto scope_obj = scope_obj_res.value();
             scope_name = core::ExtractStringField(scope_obj, "name", "");
             scope_version = core::ExtractStringField(scope_obj, "version", "");
-          } else if (scope_obj_res.error() != simdjson::INCORRECT_TYPE) {
-            return ExtractionResult{false,
-                                    std::string(simdjson::error_message(scope_obj_res.error())),
-                                    emitter.EmittedCount()};
           }
         } else if (scope_field.error() != simdjson::NO_SUCH_FIELD) {
           return ExtractionResult{false, std::string(simdjson::error_message(scope_field.error())),
@@ -534,12 +517,7 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           }
           auto span_obj_res = span_elem.value().get_object();
           if (span_obj_res.error() != simdjson::SUCCESS) {
-            if (span_obj_res.error() == simdjson::INCORRECT_TYPE) {
-              continue;
-            }
-            return ExtractionResult{false,
-                                    std::string(simdjson::error_message(span_obj_res.error())),
-                                    emitter.EmittedCount()};
+            continue;
           }
           auto span_obj = span_obj_res.value();
 
@@ -726,6 +704,294 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
   }
 }
 
+namespace {
+
+ExtractionResult ProcessTracesTableImpl(lua_State* L, int abs_idx, core::LuaEmitter& emitter,
+                                        core::FastJsonWriter& writer,
+                                        std::string& tls_scope_name_scratch,
+                                        std::string& tls_scope_ver_scratch,
+                                        std::string& tls_status_msg_scratch,
+                                        std::string& span_kind_buf, std::string& status_code_buf) {
+  int rs_arr_idx = 0;
+
+  if (core::GetTableField(L, abs_idx, "resourceSpans", "resource_spans")) {
+    rs_arr_idx = lua_absindex(L, -1);
+  } else if (core::GetTableField(L, abs_idx, "trace")) {
+    int tr_idx = lua_absindex(L, -1);
+    if (core::GetTableField(L, tr_idx, "resourceSpans", "resource_spans")) {
+      lua_remove(L, tr_idx);
+      rs_arr_idx = lua_absindex(L, -1);
+    } else {
+      lua_pop(L, 1);
+    }
+  } else if (core::GetTableField(L, abs_idx, "log")) {
+    int log_idx = lua_absindex(L, -1);
+    if (core::GetTableField(L, log_idx, "resourceSpans", "resource_spans")) {
+      lua_remove(L, log_idx);
+      rs_arr_idx = lua_absindex(L, -1);
+    } else {
+      lua_pop(L, 1);
+    }
+  }
+
+  if (rs_arr_idx == 0) {
+    rs_arr_idx = abs_idx;
+  }
+
+  if (!lua_istable(L, rs_arr_idx)) {
+    return ExtractionResult{true, "", 0};
+  }
+
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
+
+  lua_Integer rs_len = static_cast<lua_Integer>(lua_rawlen(L, rs_arr_idx));
+  for (lua_Integer i = 1; i <= rs_len; ++i) {
+    lua_rawgeti(L, rs_arr_idx, i);
+    if (!lua_istable(L, -1)) {
+      lua_pop(L, 1);
+      continue;
+    }
+    int rs_obj_idx = lua_absindex(L, -1);
+
+    std::string_view service_name = "unknown_service";
+    core::ScopedLuaRef res_attr_ref(L, LUA_NOREF);
+
+    if (core::GetTableField(L, rs_obj_idx, "resource")) {
+      int res_idx = lua_absindex(L, -1);
+      if (core::GetTableField(L, res_idx, "attributes")) {
+        core::PushTableAttributes(L, -1, writer, &service_name);
+        res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);
+    }
+    if (!res_attr_ref.valid()) {
+      lua_newtable(L);
+      res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+    }
+
+    if (!core::GetTableField(L, rs_obj_idx, "scopeSpans", "scope_spans")) {
+      lua_pop(L, 1);
+      continue;
+    }
+    int ss_arr_idx = lua_absindex(L, -1);
+    if (!lua_istable(L, ss_arr_idx)) {
+      lua_pop(L, 2);
+      continue;
+    }
+
+    lua_Integer ss_len = static_cast<lua_Integer>(lua_rawlen(L, ss_arr_idx));
+    for (lua_Integer j = 1; j <= ss_len; ++j) {
+      lua_rawgeti(L, ss_arr_idx, j);
+      if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        continue;
+      }
+      int ss_obj_idx = lua_absindex(L, -1);
+
+      std::string_view scope_name;
+      std::string_view scope_version;
+      if (core::GetTableField(L, ss_obj_idx, "scope")) {
+        int s_idx = lua_absindex(L, -1);
+        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
+        scope_version =
+            core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
+        lua_pop(L, 1);
+      }
+
+      if (core::GetTableField(L, ss_obj_idx, "spans")) {
+        int spans_arr_idx = lua_absindex(L, -1);
+        if (lua_istable(L, spans_arr_idx)) {
+          lua_Integer spans_len = static_cast<lua_Integer>(lua_rawlen(L, spans_arr_idx));
+          for (lua_Integer k = 1; k <= spans_len; ++k) {
+            lua_rawgeti(L, spans_arr_idx, k);
+            if (!lua_istable(L, -1)) {
+              lua_pop(L, 1);
+              continue;
+            }
+            int span_obj_idx = lua_absindex(L, -1);
+
+            std::string_view span_kind = "SPAN_KIND_UNSPECIFIED";
+            if (core::GetTableField(L, span_obj_idx, "kind")) {
+              int64_t ki = 0;
+              if (core::TryParseTableInt64At(L, -1, ki)) {
+                switch (ki) {
+                  case 1:
+                    span_kind = "SPAN_KIND_INTERNAL";
+                    break;
+                  case 2:
+                    span_kind = "SPAN_KIND_SERVER";
+                    break;
+                  case 3:
+                    span_kind = "SPAN_KIND_CLIENT";
+                    break;
+                  case 4:
+                    span_kind = "SPAN_KIND_PRODUCER";
+                    break;
+                  case 5:
+                    span_kind = "SPAN_KIND_CONSUMER";
+                    break;
+                  default:
+                    span_kind = "SPAN_KIND_UNSPECIFIED";
+                    break;
+                }
+              } else if (lua_type(L, -1) == LUA_TSTRING) {
+                size_t slen = 0;
+                const char* s = lua_tolstring(L, -1, &slen);
+                std::string_view sv(s, slen);
+                if (sv == "INTERNAL" || sv == "SPAN_KIND_INTERNAL") {
+                  span_kind = "SPAN_KIND_INTERNAL";
+                } else if (sv == "SERVER" || sv == "SPAN_KIND_SERVER") {
+                  span_kind = "SPAN_KIND_SERVER";
+                } else if (sv == "CLIENT" || sv == "SPAN_KIND_CLIENT") {
+                  span_kind = "SPAN_KIND_CLIENT";
+                } else if (sv == "PRODUCER" || sv == "SPAN_KIND_PRODUCER") {
+                  span_kind = "SPAN_KIND_PRODUCER";
+                } else if (sv == "CONSUMER" || sv == "SPAN_KIND_CONSUMER") {
+                  span_kind = "SPAN_KIND_CONSUMER";
+                } else if (sv == "UNSPECIFIED" || sv == "SPAN_KIND_UNSPECIFIED") {
+                  span_kind = "SPAN_KIND_UNSPECIFIED";
+                } else {
+                  span_kind_buf.assign(sv.data(), sv.size());
+                  span_kind = span_kind_buf;
+                }
+              }
+              lua_pop(L, 1);
+            }
+
+            uint64_t start_time =
+                core::ReadTableUint64(L, span_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
+            uint64_t end_time =
+                core::ReadTableUint64(L, span_obj_idx, "endTimeUnixNano", "end_time_unix_nano");
+            uint64_t delta =
+                (end_time >= start_time && start_time > 0) ? (end_time - start_time) : 0;
+            constexpr uint64_t kMaxDuration =
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+            int64_t duration = (delta <= kMaxDuration) ? static_cast<int64_t>(delta)
+                                                       : std::numeric_limits<int64_t>::max();
+            std::array<char, 32> ts_buf;
+            core::FormatIso8601Nano(start_time, ts_buf.data());
+
+            std::string_view status_code = "STATUS_CODE_UNSET";
+            std::string_view status_msg;
+            if (core::GetTableField(L, span_obj_idx, "status")) {
+              int st_idx = lua_absindex(L, -1);
+              if (core::GetTableField(L, st_idx, "code")) {
+                int64_t c = 0;
+                if (core::TryParseTableInt64At(L, -1, c)) {
+                  if (c == 1) {
+                    status_code = "STATUS_CODE_OK";
+                  } else if (c == 2) {
+                    status_code = "STATUS_CODE_ERROR";
+                  } else {
+                    status_code = "STATUS_CODE_UNSET";
+                  }
+                } else if (lua_type(L, -1) == LUA_TSTRING) {
+                  size_t slen = 0;
+                  const char* s = lua_tolstring(L, -1, &slen);
+                  std::string_view sv(s, slen);
+                  if (sv == "OK" || sv == "STATUS_CODE_OK") {
+                    status_code = "STATUS_CODE_OK";
+                  } else if (sv == "ERROR" || sv == "STATUS_CODE_ERROR") {
+                    status_code = "STATUS_CODE_ERROR";
+                  } else if (sv == "UNSET" || sv == "STATUS_CODE_UNSET") {
+                    status_code = "STATUS_CODE_UNSET";
+                  } else {
+                    status_code_buf.assign(sv.data(), sv.size());
+                    status_code = status_code_buf;
+                  }
+                }
+                lua_pop(L, 1);
+              }
+              status_msg =
+                  core::ReadTableStringView(L, st_idx, "message", nullptr, tls_status_msg_scratch);
+              lua_pop(L, 1);  // pop status table BEFORE StartRecord
+            }
+
+            emitter.StartRecord();
+            emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
+            core::CopyIdField(L, span_obj_idx, "traceId", "trace_id", core::kTraceIdBinaryLen,
+                              emitter, "TraceId", "TraceId");
+            core::CopyIdField(L, span_obj_idx, "spanId", "span_id", core::kSpanIdBinaryLen, emitter,
+                              "SpanId", "SpanId");
+            core::CopyIdField(L, span_obj_idx, "parentSpanId", "parent_span_id",
+                              core::kSpanIdBinaryLen, emitter, "ParentSpanId", "ParentSpanId");
+            core::CopyStringField(L, span_obj_idx, "traceState", "trace_state", emitter,
+                                  "TraceState");
+            core::CopyStringField(L, span_obj_idx, "name", nullptr, emitter, "SpanName");
+            emitter.SetString("SpanKind", span_kind);
+            emitter.SetString("ServiceName", service_name);
+
+            lua_rawgeti(L, LUA_REGISTRYINDEX, res_attr_ref.get());
+            emitter.SetTableFromStack("ResourceAttributes");
+
+            emitter.SetString("ScopeName", scope_name);
+            emitter.SetString("ScopeVersion", scope_version);
+
+            if (core::GetTableField(L, span_obj_idx, "attributes")) {
+              core::PushTableAttributes(L, -1, writer);
+              emitter.SetTableFromStack("SpanAttributes");
+              lua_pop(L, 1);
+            } else {
+              lua_newtable(L);
+              emitter.SetTableFromStack("SpanAttributes");
+            }
+
+            emitter.SetInt64("Duration", duration);
+            emitter.SetString("StatusCode", status_code);
+            emitter.SetString("StatusMessage", status_msg);
+
+            // Events & Links: serialises to JSON string (matching string
+            // extractor output)
+            writer.Reset();
+            if (core::GetTableField(L, span_obj_idx, "events")) {
+              core::SerializeTableSpanEventsToJson(L, -1, writer);
+              lua_pop(L, 1);
+            } else {
+              writer.StartArray();
+              writer.EndArray();
+            }
+            emitter.SetString("Events", writer.Str());
+
+            writer.Reset();
+            if (core::GetTableField(L, span_obj_idx, "links")) {
+              core::SerializeTableSpanLinksToJson(L, -1, writer);
+              lua_pop(L, 1);
+            } else {
+              writer.StartArray();
+              writer.EndArray();
+            }
+            emitter.SetString("Links", writer.Str());
+
+            emitter.SetString("processed_at", processed_at);
+
+            emitter.EndRecord();
+            lua_pop(L, 1);  // pop span_obj
+            if (emitter.HasError()) {
+              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                                      emitter.EmittedCount()};
+            }
+          }
+        }
+        lua_pop(L, 1);  // pop spans_arr
+      }
+      lua_pop(L, 1);  // pop ss_obj
+    }
+    lua_pop(L, 1);  // pop ss_arr
+    lua_pop(L, 1);  // pop rs_obj
+  }
+
+  emitter.Flush();
+  if (emitter.HasError()) {
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+  }
+  return ExtractionResult{true, "", emitter.EmittedCount()};
+}
+
+}  // namespace
+
 ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   if (!lua_checkstack(L, 32)) {
     return ExtractionResult{false, "Lua stack overflow in ProcessTracesTable", 0};
@@ -775,282 +1041,9 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   core::LuaEmitter emitter(L, abs_emit_idx);
 
   try {
-    int rs_arr_idx = 0;
-
-    if (core::GetTableField(L, abs_idx, "resourceSpans", "resource_spans")) {
-      rs_arr_idx = lua_absindex(L, -1);
-    } else if (core::GetTableField(L, abs_idx, "trace")) {
-      int tr_idx = lua_absindex(L, -1);
-      if (core::GetTableField(L, tr_idx, "resourceSpans", "resource_spans")) {
-        lua_remove(L, tr_idx);
-        rs_arr_idx = lua_absindex(L, -1);
-      } else {
-        lua_pop(L, 1);
-      }
-    } else if (core::GetTableField(L, abs_idx, "log")) {
-      int log_idx = lua_absindex(L, -1);
-      if (core::GetTableField(L, log_idx, "resourceSpans", "resource_spans")) {
-        lua_remove(L, log_idx);
-        rs_arr_idx = lua_absindex(L, -1);
-      } else {
-        lua_pop(L, 1);
-      }
-    }
-
-    if (rs_arr_idx == 0) {
-      rs_arr_idx = abs_idx;
-    }
-
-    if (!lua_istable(L, rs_arr_idx)) {
-      return ExtractionResult{true, "", 0};
-    }
-
-    std::array<char, 32> proc_buf;
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-    std::string_view processed_at(proc_buf.data(), 30);
-
-    lua_Integer rs_len = static_cast<lua_Integer>(lua_rawlen(L, rs_arr_idx));
-    for (lua_Integer i = 1; i <= rs_len; ++i) {
-      lua_rawgeti(L, rs_arr_idx, i);
-      if (!lua_istable(L, -1)) {
-        lua_pop(L, 1);
-        continue;
-      }
-      int rs_obj_idx = lua_absindex(L, -1);
-
-      std::string_view service_name = "unknown_service";
-      core::ScopedLuaRef res_attr_ref(L, LUA_NOREF);
-
-      if (core::GetTableField(L, rs_obj_idx, "resource")) {
-        int res_idx = lua_absindex(L, -1);
-        if (core::GetTableField(L, res_idx, "attributes")) {
-          core::PushTableAttributes(L, -1, writer, &service_name);
-          res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-          lua_pop(L, 1);
-        }
-        lua_pop(L, 1);
-      }
-      if (!res_attr_ref.valid()) {
-        lua_newtable(L);
-        res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-      }
-
-      if (!core::GetTableField(L, rs_obj_idx, "scopeSpans", "scope_spans")) {
-        lua_pop(L, 1);
-        continue;
-      }
-      int ss_arr_idx = lua_absindex(L, -1);
-      if (!lua_istable(L, ss_arr_idx)) {
-        lua_pop(L, 2);
-        continue;
-      }
-
-      lua_Integer ss_len = static_cast<lua_Integer>(lua_rawlen(L, ss_arr_idx));
-      for (lua_Integer j = 1; j <= ss_len; ++j) {
-        lua_rawgeti(L, ss_arr_idx, j);
-        if (!lua_istable(L, -1)) {
-          lua_pop(L, 1);
-          continue;
-        }
-        int ss_obj_idx = lua_absindex(L, -1);
-
-        std::string_view scope_name;
-        std::string_view scope_version;
-        if (core::GetTableField(L, ss_obj_idx, "scope")) {
-          int s_idx = lua_absindex(L, -1);
-          scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
-          scope_version =
-              core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
-          lua_pop(L, 1);
-        }
-
-        if (core::GetTableField(L, ss_obj_idx, "spans")) {
-          int spans_arr_idx = lua_absindex(L, -1);
-          if (lua_istable(L, spans_arr_idx)) {
-            lua_Integer spans_len = static_cast<lua_Integer>(lua_rawlen(L, spans_arr_idx));
-            for (lua_Integer k = 1; k <= spans_len; ++k) {
-              lua_rawgeti(L, spans_arr_idx, k);
-              if (!lua_istable(L, -1)) {
-                lua_pop(L, 1);
-                continue;
-              }
-              int span_obj_idx = lua_absindex(L, -1);
-
-              std::string_view span_kind = "SPAN_KIND_UNSPECIFIED";
-              if (core::GetTableField(L, span_obj_idx, "kind")) {
-                int64_t ki = 0;
-                if (core::TryParseTableInt64At(L, -1, ki)) {
-                  switch (ki) {
-                    case 1:
-                      span_kind = "SPAN_KIND_INTERNAL";
-                      break;
-                    case 2:
-                      span_kind = "SPAN_KIND_SERVER";
-                      break;
-                    case 3:
-                      span_kind = "SPAN_KIND_CLIENT";
-                      break;
-                    case 4:
-                      span_kind = "SPAN_KIND_PRODUCER";
-                      break;
-                    case 5:
-                      span_kind = "SPAN_KIND_CONSUMER";
-                      break;
-                    default:
-                      span_kind = "SPAN_KIND_UNSPECIFIED";
-                      break;
-                  }
-                } else if (lua_type(L, -1) == LUA_TSTRING) {
-                  size_t slen = 0;
-                  const char* s = lua_tolstring(L, -1, &slen);
-                  std::string_view sv(s, slen);
-                  if (sv == "INTERNAL" || sv == "SPAN_KIND_INTERNAL") {
-                    span_kind = "SPAN_KIND_INTERNAL";
-                  } else if (sv == "SERVER" || sv == "SPAN_KIND_SERVER") {
-                    span_kind = "SPAN_KIND_SERVER";
-                  } else if (sv == "CLIENT" || sv == "SPAN_KIND_CLIENT") {
-                    span_kind = "SPAN_KIND_CLIENT";
-                  } else if (sv == "PRODUCER" || sv == "SPAN_KIND_PRODUCER") {
-                    span_kind = "SPAN_KIND_PRODUCER";
-                  } else if (sv == "CONSUMER" || sv == "SPAN_KIND_CONSUMER") {
-                    span_kind = "SPAN_KIND_CONSUMER";
-                  } else if (sv == "UNSPECIFIED" || sv == "SPAN_KIND_UNSPECIFIED") {
-                    span_kind = "SPAN_KIND_UNSPECIFIED";
-                  } else {
-                    span_kind_buf.assign(sv.data(), sv.size());
-                    span_kind = span_kind_buf;
-                  }
-                }
-                lua_pop(L, 1);
-              }
-
-              uint64_t start_time = core::ReadTableUint64(L, span_obj_idx, "startTimeUnixNano",
-                                                          "start_time_unix_nano");
-              uint64_t end_time =
-                  core::ReadTableUint64(L, span_obj_idx, "endTimeUnixNano", "end_time_unix_nano");
-              uint64_t delta =
-                  (end_time >= start_time && start_time > 0) ? (end_time - start_time) : 0;
-              constexpr uint64_t kMaxDuration =
-                  static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-              int64_t duration = (delta <= kMaxDuration) ? static_cast<int64_t>(delta)
-                                                         : std::numeric_limits<int64_t>::max();
-              std::array<char, 32> ts_buf;
-              core::FormatIso8601Nano(start_time, ts_buf.data());
-
-              std::string_view status_code = "STATUS_CODE_UNSET";
-              std::string_view status_msg;
-              if (core::GetTableField(L, span_obj_idx, "status")) {
-                int st_idx = lua_absindex(L, -1);
-                if (core::GetTableField(L, st_idx, "code")) {
-                  int64_t c = 0;
-                  if (core::TryParseTableInt64At(L, -1, c)) {
-                    if (c == 1) {
-                      status_code = "STATUS_CODE_OK";
-                    } else if (c == 2) {
-                      status_code = "STATUS_CODE_ERROR";
-                    } else {
-                      status_code = "STATUS_CODE_UNSET";
-                    }
-                  } else if (lua_type(L, -1) == LUA_TSTRING) {
-                    size_t slen = 0;
-                    const char* s = lua_tolstring(L, -1, &slen);
-                    std::string_view sv(s, slen);
-                    if (sv == "OK" || sv == "STATUS_CODE_OK") {
-                      status_code = "STATUS_CODE_OK";
-                    } else if (sv == "ERROR" || sv == "STATUS_CODE_ERROR") {
-                      status_code = "STATUS_CODE_ERROR";
-                    } else if (sv == "UNSET" || sv == "STATUS_CODE_UNSET") {
-                      status_code = "STATUS_CODE_UNSET";
-                    } else {
-                      status_code_buf.assign(sv.data(), sv.size());
-                      status_code = status_code_buf;
-                    }
-                  }
-                  lua_pop(L, 1);
-                }
-                status_msg = core::ReadTableStringView(L, st_idx, "message", nullptr,
-                                                       tls_status_msg_scratch);
-                lua_pop(L, 1);  // pop status table BEFORE StartRecord
-              }
-
-              emitter.StartRecord();
-              emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
-              core::CopyIdField(L, span_obj_idx, "traceId", "trace_id", core::kTraceIdBinaryLen,
-                                emitter, "TraceId", "TraceId");
-              core::CopyIdField(L, span_obj_idx, "spanId", "span_id", core::kSpanIdBinaryLen,
-                                emitter, "SpanId", "SpanId");
-              core::CopyIdField(L, span_obj_idx, "parentSpanId", "parent_span_id",
-                                core::kSpanIdBinaryLen, emitter, "ParentSpanId", "ParentSpanId");
-              core::CopyStringField(L, span_obj_idx, "traceState", "trace_state", emitter,
-                                    "TraceState");
-              core::CopyStringField(L, span_obj_idx, "name", nullptr, emitter, "SpanName");
-              emitter.SetString("SpanKind", span_kind);
-              emitter.SetString("ServiceName", service_name);
-
-              lua_rawgeti(L, LUA_REGISTRYINDEX, res_attr_ref.get());
-              emitter.SetTableFromStack("ResourceAttributes");
-
-              emitter.SetString("ScopeName", scope_name);
-              emitter.SetString("ScopeVersion", scope_version);
-
-              if (core::GetTableField(L, span_obj_idx, "attributes")) {
-                core::PushTableAttributes(L, -1, writer);
-                emitter.SetTableFromStack("SpanAttributes");
-                lua_pop(L, 1);
-              } else {
-                lua_newtable(L);
-                emitter.SetTableFromStack("SpanAttributes");
-              }
-
-              emitter.SetInt64("Duration", duration);
-              emitter.SetString("StatusCode", status_code);
-              emitter.SetString("StatusMessage", status_msg);
-
-              // Events & Links: serialises to JSON string (matching string
-              // extractor output)
-              writer.Reset();
-              if (core::GetTableField(L, span_obj_idx, "events")) {
-                core::SerializeTableSpanEventsToJson(L, -1, writer);
-                lua_pop(L, 1);
-              } else {
-                writer.StartArray();
-                writer.EndArray();
-              }
-              emitter.SetString("Events", writer.Str());
-
-              writer.Reset();
-              if (core::GetTableField(L, span_obj_idx, "links")) {
-                core::SerializeTableSpanLinksToJson(L, -1, writer);
-                lua_pop(L, 1);
-              } else {
-                writer.StartArray();
-                writer.EndArray();
-              }
-              emitter.SetString("Links", writer.Str());
-
-              emitter.SetString("processed_at", processed_at);
-
-              emitter.EndRecord();
-              lua_pop(L, 1);  // pop span_obj
-              if (emitter.HasError()) {
-                return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                        emitter.EmittedCount()};
-              }
-            }
-          }
-          lua_pop(L, 1);  // pop spans_arr
-        }
-        lua_pop(L, 1);  // pop ss_obj
-      }
-      lua_pop(L, 1);  // pop ss_arr
-      lua_pop(L, 1);  // pop rs_obj
-    }
-
-    emitter.Flush();
-    if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-    }
-    return ExtractionResult{true, "", emitter.EmittedCount()};
+    return ProcessTracesTableImpl(L, abs_idx, emitter, writer, tls_scope_name_scratch,
+                                  tls_scope_ver_scratch, tls_status_msg_scratch, span_kind_buf,
+                                  status_code_buf);
   } catch (const std::exception& e) {
     return ExtractionResult{false, std::string("C++ exception: ") + e.what(),
                             emitter.EmittedCount()};
