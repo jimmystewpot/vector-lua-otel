@@ -467,82 +467,84 @@ bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWr
       if (val_res.error() != simdjson::SUCCESS) continue;
       auto fv = val_res.value();
 
-      if (k == "stringValue" || k == "string_value") {
-        auto s_res = fv.get_string();
-        if (s_res.error() == simdjson::SUCCESS) {
-          auto s = s_res.value();
-          lua_pushlstring(L, s.data(), s.size());
-          matched = true;
-          is_scalar_string = true;
-          break;
-        }
-      } else if (k == "intValue" || k == "int_value") {
-        int64_t i = ParseInt64(fv);
-        lua_pushinteger(L, static_cast<lua_Integer>(i));
-        matched = true;
-        break;
-      } else if (k == "uintValue" || k == "uint_value") {
-        uint64_t u = ParseUint64(fv);
-        lua_Integer clamped = u > static_cast<uint64_t>(INT64_MAX)
-                                  ? std::numeric_limits<lua_Integer>::max()
-                                  : static_cast<lua_Integer>(u);
-        lua_pushinteger(L, clamped);
-        matched = true;
-        break;
-      } else if (k == "doubleValue" || k == "double_value") {
-        lua_pushnumber(L, ParseDouble(fv));
-        matched = true;
-        break;
-      } else if (k == "boolValue" || k == "bool_value") {
-        auto b_res = fv.get_bool();
-        if (b_res.error() == simdjson::SUCCESS) {
-          lua_pushboolean(L, b_res.value() ? 1 : 0);
+      if (!has_plain_fields) {
+        if (k == "stringValue" || k == "string_value") {
+          auto s_res = fv.get_string();
+          if (s_res.error() == simdjson::SUCCESS) {
+            auto s = s_res.value();
+            lua_pushlstring(L, s.data(), s.size());
+            matched = true;
+            is_scalar_string = true;
+            break;
+          }
+        } else if (k == "intValue" || k == "int_value") {
+          int64_t i = ParseInt64(fv);
+          lua_pushinteger(L, static_cast<lua_Integer>(i));
           matched = true;
           break;
-        }
-        lua_pushboolean(L, 0);
-        matched = true;
-        break;
-      } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
-                 k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
-        std::string_view raw_sv;
-        auto raw_res = fv.raw_json();
-        if (raw_res.error() == simdjson::SUCCESS) {
-          raw_sv = raw_res.value();
-        }
-        json_writer.Reset();
-        json_writer.StartObject();
-        json_writer.Key(k);
-        if (!raw_sv.empty()) {
-          json_writer.RawJson(raw_sv);
-        } else {
-          json_writer.StartObject();
-          json_writer.EndObject();
-        }
-        json_writer.EndObject();
-
-        std::string_view sv = json_writer.Str();
-        lua_pushlstring(L, sv.data(), sv.size());
-        matched = true;
-        break;
-      } else {
-        if (!has_plain_fields) {
+        } else if (k == "uintValue" || k == "uint_value") {
+          uint64_t u = ParseUint64(fv);
+          lua_Integer clamped = u > static_cast<uint64_t>(INT64_MAX)
+                                    ? std::numeric_limits<lua_Integer>::max()
+                                    : static_cast<lua_Integer>(u);
+          lua_pushinteger(L, clamped);
+          matched = true;
+          break;
+        } else if (k == "doubleValue" || k == "double_value") {
+          lua_pushnumber(L, ParseDouble(fv));
+          matched = true;
+          break;
+        } else if (k == "boolValue" || k == "bool_value") {
+          auto b_res = fv.get_bool();
+          if (b_res.error() == simdjson::SUCCESS) {
+            lua_pushboolean(L, b_res.value() ? 1 : 0);
+            matched = true;
+            break;
+          }
+          lua_pushboolean(L, 0);
+          matched = true;
+          break;
+        } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
+                   k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
+          std::string_view raw_sv;
+          auto raw_res = fv.raw_json();
+          if (raw_res.error() == simdjson::SUCCESS) {
+            raw_sv = raw_res.value();
+          }
           json_writer.Reset();
           json_writer.StartObject();
-          has_plain_fields = true;
-        }
-        json_writer.Key(k);
-        auto raw_res = fv.raw_json();
-        if (raw_res.error() == simdjson::SUCCESS) {
-          std::string_view raw_fv = raw_res.value();
-          while (!raw_fv.empty() && (raw_fv.back() == ' ' || raw_fv.back() == '\t' ||
-                                     raw_fv.back() == '\r' || raw_fv.back() == '\n')) {
-            raw_fv.remove_suffix(1);
+          json_writer.Key(k);
+          if (!raw_sv.empty()) {
+            json_writer.RawJson(raw_sv);
+          } else {
+            json_writer.StartObject();
+            json_writer.EndObject();
           }
-          json_writer.RawJson(raw_fv);
-        } else {
-          json_writer.Null();
+          json_writer.EndObject();
+
+          std::string_view sv = json_writer.Str();
+          lua_pushlstring(L, sv.data(), sv.size());
+          matched = true;
+          break;
         }
+      }
+
+      if (!has_plain_fields) {
+        json_writer.Reset();
+        json_writer.StartObject();
+        has_plain_fields = true;
+      }
+      json_writer.Key(k);
+      auto raw_res = fv.raw_json();
+      if (raw_res.error() == simdjson::SUCCESS) {
+        std::string_view raw_fv = raw_res.value();
+        while (!raw_fv.empty() && (raw_fv.back() == ' ' || raw_fv.back() == '\t' ||
+                                   raw_fv.back() == '\r' || raw_fv.back() == '\n')) {
+          raw_fv.remove_suffix(1);
+        }
+        json_writer.RawJson(raw_fv);
+      } else {
+        json_writer.Null();
       }
     }
     if (!matched) {

@@ -1596,5 +1596,19 @@ TEST_F(OtlpCommonTest, ReadLuaTimestampValueAndField) {
   lua_pop(L_, 1);
 }
 
+TEST_F(OtlpCommonTest, PushAnyValuePlainObjectWithLaterStringValueKey) {
+  auto json = R"({
+    "mixed": { "other": 1, "stringValue": "v" }
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto val = obj["mixed"].value();
+
+  PushAnyValue(L_, val, writer_);
+  ASSERT_TRUE(lua_isstring(L_, -1));
+  EXPECT_STREQ(lua_tostring(L_, -1), R"({"other":1,"stringValue":"v"})");
+  lua_pop(L_, 1);
+}
+
 }  // namespace
 }  // namespace vector_otel::core

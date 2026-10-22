@@ -655,7 +655,7 @@ bool ExtractNativeMetricObjectJson(
     }
     auto fv = fv_res.value();
 
-    if ((k == "metric" || k == "log") && depth == 0 && !has_recognized_field) {
+    if ((k == "metric" || k == "log") && depth == 0) {
       auto t_res = fv.type();
       if (t_res.error() == simdjson::SUCCESS) {
         if (t_res.value() == simdjson::ondemand::json_type::object) {

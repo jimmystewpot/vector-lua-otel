@@ -630,7 +630,7 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
     }
     auto fv = fv_res.value();
 
-    if ((k == "log" || k == "trace") && depth == 0 && !has_recognized_field) {
+    if ((k == "log" || k == "trace") && depth == 0) {
       auto t_res = fv.type();
       if (t_res.error() == simdjson::SUCCESS) {
         if (t_res.value() == simdjson::ondemand::json_type::object) {

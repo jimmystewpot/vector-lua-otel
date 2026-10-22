@@ -591,14 +591,14 @@ Within one resource, every emitted record's `ResourceAttributes` points at the *
 
 - **`now()` (`processed_at`) Timestamp Fallback**:
   - **Native Logs**: Uses `timestamp` if present and non-zero, else `observed_timestamp` if present and non-zero. If an explicit epoch zero (`timestamp = 0` with no `observed_timestamp`) is present, formats `"1970-01-01T00:00:00.000000000Z"`. When both timestamps are absent, falls back to the record's `processed_at` (`now()`) ISO-8601 UTC nanosecond timestamp.
-  - **Native Traces**: Uses `start_time_unix_nano` if present and non-zero, else `ingest_timestamp` / `timestamp` if present and non-zero, else `processed_at` (`now()`). `Duration` is computed as `end_time_unix_nano - start_time_unix_nano` (clamped to `INT64_MAX`) only when both `start_time_unix_nano` and `end_time_unix_nano` are non-zero (`end >= start`), and `0` otherwise.
-  - **Native Metrics**: Uses `timestamp` if present and non-zero, else `processed_at` (`now()`). `StartTimeUnix` is computed as `timestamp - (interval_ms * 1,000,000)` when both `timestamp` and `interval_ms > 0` are present, and `""` otherwise.
+  - **Native Traces**: Uses `start_time_unix_nano` if present and non-zero, else `ingest_timestamp` / `timestamp` if present and non-zero. If an explicit epoch zero (`start_time_unix_nano = 0` with no secondary `ingest_timestamp`) is present, formats `"1970-01-01T00:00:00.000000000Z"`. When both timestamps are absent, falls back to `processed_at` (`now()`). `Duration` is computed as `end_time_unix_nano - start_time_unix_nano` (clamped to `INT64_MAX`) only when both `start_time_unix_nano` and `end_time_unix_nano` are non-zero (`end >= start`), and `0` otherwise.
+  - **Native Metrics**: Uses `timestamp` if present and non-zero. If an explicit epoch zero (`timestamp = 0`) is present, formats `"1970-01-01T00:00:00.000000000Z"`. When `timestamp` is absent, falls back to `processed_at` (`now()`). `StartTimeUnix` is computed as `timestamp - (interval_ms * 1,000,000)` when both a non-zero `timestamp` and `interval_ms > 0` are present, and `""` otherwise.
 - **Tag Prefix Splitting & Multi-Value Tags**:
   - In `vector_native.metrics`, tags prefixed with `resource.` populate `ResourceAttributes` (with `resource.service.name` setting `ServiceName`), tags prefixed with `scope.` populate `ScopeName`, `ScopeVersion`, or `ScopeAttributes`, and all remaining tags populate `Attributes`.
   - Both single-value string tags and Vector's `tag-values: full` array tags (selecting the last non-null element) are supported.
 - **Exclusion of Vector-Only Non-OTLP Metric Variants (`distribution`, `set`, `sketch`)**:
   - `vector_native.metrics` supports the four OTLP-aligned Vector metric variants: `counter` (`MetricType = "sum"`), `gauge` (`MetricType = "gauge"`), `aggregated_histogram` (`MetricType = "histogram"`, stripping trailing `+Inf` / `"inf"` upper bounds and populating both PascalCase and camelCase histogram keys), and `aggregated_summary` (`MetricType = "summary"`).
-  - Vector-only non-OTLP metric variants (`distribution`, `set`, `sketch`) are intentionally excluded and return the standard error tuple `(nil, "Unsupported non-OTLP metric variant: <variant>", partial_count)`.
+  - Vector-only non-OTLP metric variants (`distribution`, `set`, `sketch`) are intentionally excluded and return the standard error tuple `(nil, "Unsupported non-OTLP metric variant '<variant>': vector_native only supports OpenTelemetry metric types (counter, gauge, aggregated_histogram, aggregated_summary)", partial_count)`.
 
 ---
 
