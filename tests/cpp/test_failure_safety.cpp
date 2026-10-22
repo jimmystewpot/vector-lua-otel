@@ -13,6 +13,7 @@
 #include "vector_otel/extractors/logs_extractor.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
+#include "vector_otel/native_extractors/native_logs_extractor.hpp"
 
 namespace vector_otel::core {
 namespace {
@@ -318,6 +319,8 @@ struct Sig {
   extractors::ExtractionResult (*compat_table)(lua_State*, int, int);
   // Optional: true when a delivered row's dump holds everything its type requires.
   bool (*row_complete)(const std::string& dump);
+  bool native = false;        // driven through vector_native instead of vector_otel
+  bool shared_tables = true;  // rows of one resource/scope share their attribute tables
 };
 
 const Sig kLogsSig{
@@ -404,6 +407,68 @@ const Sig kAnyMetricsSig{
     extractors::ProcessMetricsTable,
     AnyMetricRowComplete};
 
+// ---- native logs ------------------------------------------------------------------------------
+
+// Vector native log events are flat: `resources * records` independent records, each carrying its
+// own resource, scope and attributes. The JSON form is an array of events, the table form a Lua
+// array of the same.
+std::string NativeLogRecordJson(int r, int i) {
+  const std::string n = std::to_string(i);
+  return "{\"timestamp\":\"2023-11-14T22:13:20.0000000" + std::string(i < 10 ? "0" : "") + n +
+         "Z\",\"message\":\"msg-" + n +
+         "\",\"severity_text\":\"INFO\",\"resources\":{"
+         "\"service.name\":\"svc-" +
+         std::to_string(r) + "\"},\"scope\":{\"name\":\"scope-" + std::to_string(r) +
+         "\"},\"attributes\":{\"k\":\"v" + n + "\"}}";
+}
+
+std::string NativeLogRecordLua(int r, int i) {
+  const std::string n = std::to_string(i);
+  return "{timestamp=\"2023-11-14T22:13:20.0000000" + std::string(i < 10 ? "0" : "") + n +
+         "Z\",message=\"msg-" + n +
+         "\",severity_text=\"INFO\",resources={[\"service.name\"]="
+         "\"svc-" +
+         std::to_string(r) + "\"},scope={name=\"scope-" + std::to_string(r) +
+         "\"},attributes={k=\"v" + n + "\"}}";
+}
+
+std::string NativeLogsJson(int resources, int records) {
+  std::string out = "[";
+  for (int r = 0; r < resources; ++r) {
+    for (int i = 0; i < records; ++i) {
+      if (r > 0 || i > 0) out += ',';
+      out += NativeLogRecordJson(r, i);
+    }
+  }
+  return out + "]";
+}
+
+std::string NativeLogsLua(int resources, int records) {
+  std::string out = "return {";
+  for (int r = 0; r < resources; ++r) {
+    for (int i = 0; i < records; ++i) {
+      out += NativeLogRecordLua(r, i) + ",";
+    }
+  }
+  return out + "}";
+}
+
+const Sig kNativeLogsSig{
+    "logs",
+    NativeLogsJson,
+    NativeLogsLua,
+    true,
+    {"\"Body\":\"msg-0\"", "\"ServiceName\":\"svc-0\"", "\"LogAttributes\":{\"k\":\"v0\"}",
+     "\"ScopeName\":\"scope-0\"", "\"SeverityText\":\"INFO\""},
+    {"{}", "[]", "[{}]", "{\"log\":{}}", "{\"log\":[]}", "{\"log\":[{}]}", "[{\"log\":{}}]"},
+    {"return {}", "return {{}}", "return {log={}}", "return {log={{}}}", "return {{log={}}}",
+     "return {{unrelated=1}}"},
+    native_extractors::ProcessNativeLogs,
+    native_extractors::ProcessNativeLogsTable,
+    nullptr,
+    /*native=*/true,
+    /*shared_tables=*/false};
+
 const Sig* g_sig = &kLogsSig;  // the signal under test (set by the fixture)
 
 class FailureSafetyOtelTest : public testing::TestWithParam<const Sig*> {
@@ -416,9 +481,11 @@ Payload PayloadFor(bool table, int resources, int records) {
                : JsonPayload(g_sig->json(resources, records));
 }
 
+ModuleKind SigModule() { return g_sig->native ? ModuleKind::Native : ModuleKind::Otel; }
+
 void ExpectAnchorsReleased(lua_State* L) {
   for (int i = 0; i < kInvocationSlotCount; ++i) {
-    EXPECT_EQ(AnchorSlotType(L, ModuleKind::Otel, static_cast<AnchorSlot>(i)), LUA_TBOOLEAN)
+    EXPECT_EQ(AnchorSlotType(L, SigModule(), static_cast<AnchorSlot>(i)), LUA_TBOOLEAN)
         << "anchor slot " << i << " still holds a value";
   }
 }
@@ -435,12 +502,13 @@ int CeilDiv(int a, int b) { return (a + b - 1) / b; }
 // ---- behaviour --------------------------------------------------------------------------------
 
 TEST_P(FailureSafetyOtelTest, ShareOneResourceAndScopeTablePerResource) {
+  if (!g_sig->shared_tables) GTEST_SKIP() << "native rows carry their own attribute tables";
   for (bool table : {false, true}) {
     SCOPED_TRACE(table ? "table input" : "json input");
     RawState s;
     ProcRecorder rec;
     rec.dump = true;
-    const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(table, 2, 3), rec);
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 2, 3), rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 2);
     EXPECT_TRUE(r.first_nil == false);
@@ -489,8 +557,8 @@ TEST_P(FailureSafetyOtelTest, JsonAndTableInputsStageIdenticalRows) {
   ProcRecorder ja;
   ProcRecorder tb;
   ja.dump = tb.dump = true;
-  ASSERT_EQ(CallProcess(a, false, g_sig->name, PayloadFor(false, 2, 2), ja).count, 4);
-  ASSERT_EQ(CallProcess(b, false, g_sig->name, PayloadFor(true, 2, 2), tb).count, 4);
+  ASSERT_EQ(CallProcess(a, g_sig->native, g_sig->name, PayloadFor(false, 2, 2), ja).count, 4);
+  ASSERT_EQ(CallProcess(b, g_sig->native, g_sig->name, PayloadFor(true, 2, 2), tb).count, 4);
   ASSERT_EQ(ja.events.size(), tb.events.size());
   for (std::size_t i = 0; i < ja.events.size(); ++i) {
     EXPECT_EQ(Normalized(ja.events[i]), Normalized(tb.events[i])) << "event " << i;
@@ -506,7 +574,7 @@ TEST_P(FailureSafetyOtelTest, EmptyAndSparseInputsAreNotErrors) {
   for (const char* j : g_sig->empty_json) {
     SCOPED_TRACE(j);
     ProcRecorder rec;
-    const ProcResult r = CallProcess(s, false, g_sig->name, JsonPayload(j), rec);
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, JsonPayload(j), rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 2);
     EXPECT_FALSE(r.first_nil);
@@ -516,7 +584,7 @@ TEST_P(FailureSafetyOtelTest, EmptyAndSparseInputsAreNotErrors) {
   for (const char* t : g_sig->empty_lua) {
     SCOPED_TRACE(t);
     ProcRecorder rec;
-    const ProcResult r = CallProcess(s, false, g_sig->name, TablePayload(t), rec);
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, TablePayload(t), rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 2);
     EXPECT_FALSE(r.first_nil);
@@ -534,7 +602,7 @@ TEST_P(FailureSafetyOtelTest, ArgumentErrorsUseTheExactMessages) {
   Payload number = none;
   number.raw_type = LUA_TNUMBER;
   for (const Payload& p : {none, number}) {
-    const ProcResult r = CallProcess(s, false, g_sig->name, p, rec);
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, p, rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 3);
     EXPECT_TRUE(r.first_nil);
@@ -542,7 +610,7 @@ TEST_P(FailureSafetyOtelTest, ArgumentErrorsUseTheExactMessages) {
     EXPECT_EQ(r.count, 0);
   }
   const ProcResult r = CallProcess(
-      s, false, g_sig->name, JsonPayload("{}"), rec, [](auto&& run) { run(); },
+      s, g_sig->native, g_sig->name, JsonPayload("{}"), rec, [](auto&& run) { run(); },
       /*pass_emit=*/false);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 3);
@@ -555,7 +623,7 @@ TEST_P(FailureSafetyOtelTest, ArgumentErrorsUseTheExactMessages) {
 TEST_P(FailureSafetyOtelTest, InvalidJsonIsAnErrorWithNothingEmitted) {
   RawState s;
   ProcRecorder rec;
-  const ProcResult r = CallProcess(s, false, g_sig->name, JsonPayload("not json"), rec);
+  const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, JsonPayload("not json"), rec);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 3);
   EXPECT_TRUE(r.first_nil);
@@ -568,11 +636,11 @@ TEST_P(FailureSafetyOtelTest, InvalidJsonIsAnErrorWithNothingEmitted) {
 TEST_P(FailureSafetyOtelTest, RecordLimitIsEnforcedBeforeAnyEmission) {
   RawState s;
   ProcRecorder rec;
-  const ProcResult ok = CallProcess(s, false, g_sig->name, PayloadFor(false, 1, 2048), rec);
+  const ProcResult ok = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(false, 1, 2048), rec);
   ASSERT_EQ(ok.nresults, 2);
   EXPECT_EQ(ok.count, 2048);
   ProcRecorder over;
-  const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(false, 1, 2049), over);
+  const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(false, 1, 2049), over);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 3);
   EXPECT_TRUE(r.first_nil);
@@ -580,7 +648,8 @@ TEST_P(FailureSafetyOtelTest, RecordLimitIsEnforcedBeforeAnyEmission) {
   EXPECT_EQ(r.count, 0);
   EXPECT_EQ(over.calls, 0);
   ProcRecorder over_t;
-  const ProcResult rt = CallProcess(s, false, g_sig->name, PayloadFor(true, 1, 2049), over_t);
+  const ProcResult rt =
+      CallProcess(s, g_sig->native, g_sig->name, PayloadFor(true, 1, 2049), over_t);
   ASSERT_EQ(rt.nresults, 3);
   EXPECT_EQ(rt.error, "event exceeds 2048-record limit");
   EXPECT_EQ(over_t.calls, 0);
@@ -592,7 +661,7 @@ TEST_P(FailureSafetyOtelTest, CallbackFailureReportsRowsFromCompletedCallbacks) 
     RawState s;
     ProcRecorder rec;
     rec.fail_at_call = 1;  // the second delivery raises
-    const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(table, 1, 5), rec);
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 1, 5), rec);
     ASSERT_EQ(r.status, LUA_OK);
     if (kN >= 5) {
       // a single delivery for all five rows: call index 1 never happens
@@ -613,7 +682,7 @@ TEST_P(FailureSafetyOtelTest, ReentrantProcessIsRejectedWithoutDisturbingTheOute
   RawState s;
   ProcRecorder rec;
   rec.reenter = true;
-  const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(false, 1, 3), rec);
+  const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(false, 1, 3), rec);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 2);
   EXPECT_EQ(r.count, 3);
@@ -642,12 +711,12 @@ void SweepLuaAllocations(bool table, int resources, int records) {
   for (std::size_t skip = 0; skip < 1500 && !saw_success; ++skip) {
     SCOPED_TRACE("persistent Lua denial from growth request " + std::to_string(skip));
     RawState s;
-    ASSERT_TRUE(EnsureModuleState(s.L(), ModuleKind::Otel));
+    ASSERT_TRUE(EnsureModuleState(s.L(), SigModule()));
     lua_pop(s.L(), 1);
     ProcRecorder rec;
     rec.dump = true;
     const Payload payload = PayloadFor(table, resources, records);
-    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, payload, rec, [&](auto&& run) {
       s.alloc().SetPlan(LuaFaultMode::kPersistent, skip);
       run();
       s.alloc().ClearPlan();
@@ -675,7 +744,7 @@ void SweepLuaAllocations(bool table, int resources, int records) {
     }
     lua_gc(s.L(), LUA_GCCOLLECT);
     ProcRecorder again;
-    const ProcResult ok = CallProcess(s, false, g_sig->name, payload, again);
+    const ProcResult ok = CallProcess(s, g_sig->native, g_sig->name, payload, again);
     ASSERT_EQ(ok.status, LUA_OK);
     ASSERT_EQ(ok.nresults, 2);
     EXPECT_EQ(ok.count, total);
@@ -704,13 +773,13 @@ void SweepLuaWindows(bool table) {
   for (std::size_t skip = 0; skip < 3000; ++skip) {
     SCOPED_TRACE("two-request Lua denial at growth request " + std::to_string(skip));
     RawState s;
-    ASSERT_TRUE(EnsureModuleState(s.L(), ModuleKind::Otel));
+    ASSERT_TRUE(EnsureModuleState(s.L(), SigModule()));
     lua_pop(s.L(), 1);
     ProcRecorder rec;
     rec.dump = true;
     const Payload payload = PayloadFor(table, resources, records);
     std::size_t attempts = 0;
-    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, payload, rec, [&](auto&& run) {
       s.alloc().SetPlan(LuaFaultMode::kWindow, skip, 2);
       run();
       attempts = s.alloc().stats().attempts;
@@ -754,7 +823,7 @@ int RaisingEmit(lua_State* L) {
 TEST_P(FailureSafetyOtelTest, CompatCallsRestoreTheCallersStackOnFailure) {
   RawState s;
   lua_State* L = s.L();
-  ASSERT_EQ(luaopen_vector_otel(L), 1);
+  ASSERT_EQ(g_sig->native ? luaopen_vector_native(L) : luaopen_vector_otel(L), 1);
   lua_pop(L, 1);
   for (bool table : {false, true}) {
     SCOPED_TRACE(table ? "table input" : "json input");
@@ -795,11 +864,11 @@ CppSweepResult RunColdThread(bool table, std::size_t skip, int resources, int re
   CppSweepResult out;
   std::thread worker([&] {
     RawState s;
-    if (!EnsureModuleState(s.L(), ModuleKind::Otel)) return;
+    if (!EnsureModuleState(s.L(), SigModule())) return;
     lua_pop(s.L(), 1);
     ProcRecorder rec;
     const Payload payload = PayloadFor(table, resources, records);
-    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, payload, rec, [&](auto&& run) {
       CppFaultScope scope(CppFaultMode::kPersistent, skip);
       run();
     });
@@ -856,10 +925,10 @@ TEST_P(FailureSafetyOtelTest, WarmExtractionNeverAllocatesFromTheCppHeap) {
     RawState s;
     const Payload payload = PayloadFor(table, 2, 3);
     ProcRecorder warm;
-    ASSERT_EQ(CallProcess(s, false, g_sig->name, payload, warm).count, 6);
+    ASSERT_EQ(CallProcess(s, g_sig->native, g_sig->name, payload, warm).count, 6);
     ProcRecorder rec;
     std::size_t attempts = 0;
-    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, payload, rec, [&](auto&& run) {
       CppFaultScope scope(CppFaultMode::kPersistent, 0);
       run();
       attempts = scope.stats().attempts;
@@ -1046,12 +1115,170 @@ TEST(FailureSafetyMetrics, ArraysAndAttributesNeverLeakAcrossDataPoints) {
   }
 }
 
+// ---- native logs: accepted shapes, ordering, malformed entries -------------------------------
+
+struct NativeShape {
+  const char* name;
+  const char* json;
+  int json_count;
+  const char* lua;
+  int lua_count;
+  const char* first_body;           // Body of the first delivered row (nullptr: none expected)
+  std::vector<std::string> extras;  // further fragments the first row must contain
+};
+
+TEST(FailureSafetyNativeLogs, AcceptedShapesAndSourceFieldOrdering) {
+  const NativeShape shapes[] = {
+      {"single event", R"({"message":"a"})", 1, R"(return {message="a"})", 1, "a"},
+      {"root array", R"([{"message":"a"},{"message":"b"}])", 2,
+       R"(return {{message="a"},{message="b"}})", 2, "a"},
+      {"log wrapper object", R"({"log":{"message":"a"}})", 1, R"(return {log={message="a"}})", 1,
+       "a"},
+      {"log wrapper array", R"({"log":[{"message":"a"},{"message":"b"}]})", 2,
+       R"(return {log={{message="a"},{message="b"}}})", 2, "a"},
+      // Table mode only recognises entries that themselves carry log fields.
+      {"array of wrappers", R"([{"log":{"message":"a"}},{"message":"b"}])", 2,
+       R"(return {{log={message="a"}},{message="b"}})", 1, nullptr},
+      {"unrecognised wrapper falls back to the enclosing event",
+       R"({"log":{"zzz":1},"message":"a"})", 1, R"(return {log={zzz=1},message="a"})", 1, "a"},
+      {"message before body", R"({"message":"m","body":"b"})", 1,
+       R"(return {message="m",body="b"})", 1, "m"},
+      {"body before message", R"({"body":"b","message":"m"})", 1,
+       R"(return {body="b",message="m"})", 1, "m"},
+      {"unrecognised wrapper keeps the enclosing event's staged fields",
+       R"({"resources":{"service.name":"keep"},"log":{"zzz":1},"message":"a"})",
+       1,
+       R"(return {resources={["service.name"]="keep"},log={zzz=1},message="a"})",
+       1,
+       "a",
+       {R"("ServiceName":"keep")", R"("ResourceAttributes":{"service.name":"keep"})"}},
+      {"a matching wrapper replaces the enclosing event",
+       R"({"log":{"message":"inner"},"message":"outer"})", 1,
+       R"(return {log={message="inner"},message="outer"})", 1, "inner"},
+      {"absent maps default to empty tables",
+       R"({"message":"a"})",
+       1,
+       R"(return {message="a"})",
+       1,
+       "a",
+       {R"("LogAttributes":{})", R"("ResourceAttributes":{})", R"("ScopeAttributes":{})"}},
+      {"top-level service name",
+       R"({"service_name":"top","message":"a"})",
+       1,
+       R"(return {service_name="top",message="a"})",
+       1,
+       "a",
+       {R"("ServiceName":"top")"}},
+      {"resource service name wins",
+       R"({"service_name":"top","resources":{"service.name":"res"}})",
+       1,
+       R"(return {service_name="top",resources={["service.name"]="res"}})",
+       1,
+       "",
+       {R"("ServiceName":"res")"}},
+      {"body only", R"({"body":"b"})", 1, R"(return {body="b"})", 1, "b"},
+      {"structured body", R"({"message":{"stringValue":"s"}})", 1,
+       R"(return {message={stringValue="s"}})", 1, "s"},
+  };
+  for (const NativeShape& shape : shapes) {
+    for (bool table : {false, true}) {
+      SCOPED_TRACE(std::string(shape.name) + (table ? " (table)" : " (json)"));
+      RawState s;
+      ProcRecorder rec;
+      rec.dump = true;
+      const ProcResult r = CallProcess(
+          s, true, "logs", table ? TablePayload(shape.lua) : JsonPayload(shape.json), rec);
+      ASSERT_EQ(r.status, LUA_OK);
+      ASSERT_EQ(r.nresults, 2) << r.error;
+      const int expected = table ? shape.lua_count : shape.json_count;
+      EXPECT_EQ(r.count, expected);
+      EXPECT_EQ(rec.rows, expected);
+      if (shape.first_body != nullptr && !rec.events.empty()) {
+        EXPECT_NE(rec.events[0].find(std::string("\"Body\":\"") + shape.first_body + "\""),
+                  std::string::npos)
+            << rec.events[0];
+      }
+      for (const std::string& fragment : shape.extras) {
+        ASSERT_FALSE(rec.events.empty());
+        EXPECT_NE(rec.events[0].find(fragment), std::string::npos)
+            << fragment << " in " << rec.events[0];
+      }
+      for (int i = 0; i < kInvocationSlotCount; ++i) {
+        EXPECT_EQ(AnchorSlotType(s.L(), ModuleKind::Native, static_cast<AnchorSlot>(i)),
+                  LUA_TBOOLEAN);
+      }
+    }
+  }
+}
+
+TEST(FailureSafetyNativeLogs, MalformedJsonEntryFailsAfterDeliveredRows) {
+  RawState s;
+  ProcRecorder rec;
+  const ProcResult r = CallProcess(s, true, "logs", JsonPayload(R"([{"message":"a"},5])"), rec);
+  ASSERT_EQ(r.status, LUA_OK);
+  ASSERT_EQ(r.nresults, 3);
+  EXPECT_TRUE(r.first_nil);
+  EXPECT_FALSE(r.error.empty());
+  EXPECT_EQ(r.count, rec.rows) << "count must equal rows in completed callbacks";
+  EXPECT_EQ(r.count, (1 / kN) * kN) << "rows still queued for a batch are discarded";
+
+  ProcRecorder scalar;
+  const ProcResult rs = CallProcess(s, true, "logs", JsonPayload("5"), scalar);
+  ASSERT_EQ(rs.nresults, 3);
+  EXPECT_TRUE(rs.first_nil);
+  EXPECT_EQ(rs.error, "root JSON value must be an object or array");
+  EXPECT_EQ(rs.count, 0);
+  EXPECT_EQ(scalar.calls, 0);
+}
+
+TEST(FailureSafetyNativeLogs, NonTableEntriesInATableArrayAreSkipped) {
+  RawState s;
+  ProcRecorder rec;
+  const ProcResult r =
+      CallProcess(s, true, "logs",
+                  TablePayload(R"(return {{message="a"},5,"x",{unrelated=1},{message="b"}})"), rec);
+  ASSERT_EQ(r.status, LUA_OK);
+  ASSERT_EQ(r.nresults, 2) << r.error;
+  EXPECT_EQ(r.count, 2);
+  EXPECT_EQ(rec.rows, 2);
+}
+
+TEST(FailureSafetyNativeLogs, TimestampFallsBackToObservedThenProcessedAt) {
+  for (bool table : {false, true}) {
+    SCOPED_TRACE(table ? "table input" : "json input");
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    const Payload payload =
+        table ? TablePayload(R"(return {{message="a",observed_timestamp="2023-11-14T22:13:20Z"},
+                                         {message="b"}})")
+              : JsonPayload(R"([{"message":"a","observed_timestamp":"2023-11-14T22:13:20Z"},
+                                {"message":"b"}])");
+    const ProcResult r = CallProcess(s, true, "logs", payload, rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    ASSERT_EQ(r.count, 2);
+    std::string all;
+    for (const std::string& event : rec.events) all += event;
+    EXPECT_NE(all.find("\"Timestamp\":\"2023-11-14T22:13:20.000000000Z\""), std::string::npos)
+        << all;
+    // The second record has neither timestamp: it falls back to processed_at (now()).
+    const std::size_t second = all.rfind("\"Timestamp\":\"");
+    const std::size_t proc = all.rfind("\"processed_at\":\"");
+    ASSERT_NE(second, std::string::npos);
+    ASSERT_NE(proc, std::string::npos);
+    EXPECT_EQ(all.substr(second + 13, 30), all.substr(proc + 16, 30)) << all;
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
-                         testing::Values(&kLogsSig, &kTracesSig, &kMetricsSig, &kAnyMetricsSig),
+                         testing::Values(&kLogsSig, &kTracesSig, &kMetricsSig, &kAnyMetricsSig,
+                                         &kNativeLogsSig),
                          [](const testing::TestParamInfo<const Sig*>& info) {
                            // `name` is the process() signal; the all-types variant shares it.
-                           return info.param == &kAnyMetricsSig ? std::string("metrics_all_types")
-                                                                : std::string(info.param->name);
+                           if (info.param == &kAnyMetricsSig)
+                             return std::string("metrics_all_types");
+                           return std::string(info.param->native ? "native_" : "") +
+                                  info.param->name;
                          });
 
 }  // namespace
