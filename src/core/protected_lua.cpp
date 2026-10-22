@@ -42,8 +42,9 @@ int ReturnLeaf(lua_State* L) {
   return 3;
 }
 
-// Called with the failed call's error object on top of the stack; consumes it.
-void CaptureLuaError(OperationContext& ctx, int status) noexcept {
+}  // namespace
+
+void CaptureLuaError(OperationContext& ctx, int status, int anchor_index) noexcept {
   lua_State* L = ctx.L;
   if (status == LUA_ERRMEM) {
     ctx.error.Set(ErrorCode::Memory, kMemoryText);
@@ -55,10 +56,8 @@ void CaptureLuaError(OperationContext& ctx, int status) noexcept {
   } else {
     ctx.error.Set(ErrorCode::Lua, kLuaText);
   }
-  SetAnchor(L, ctx.anchor_index, AnchorSlot::kPendingError);  // roots the object, pops it
+  SetAnchor(L, anchor_index, AnchorSlot::kPendingError);  // roots the object, pops it
 }
-
-}  // namespace
 
 bool RunLuaLeaf(OperationContext& ctx, lua_CFunction leaf, void* payload) noexcept {
   lua_State* L = ctx.L;
@@ -75,7 +74,7 @@ bool RunLuaLeaf(OperationContext& ctx, lua_CFunction leaf, void* payload) noexce
   if (status == LUA_OK) [[likely]] {
     return true;
   }
-  CaptureLuaError(ctx, status);
+  CaptureLuaError(ctx, status, ctx.anchor_index);
   return false;
 }
 

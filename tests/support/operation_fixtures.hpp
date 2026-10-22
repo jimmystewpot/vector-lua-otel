@@ -69,6 +69,9 @@ struct Scenario {
   int pending_after_clear = -1;
   int row_type_at_failure = -1;
   int attrs_type_at_failure = -1;
+  // row-emission scenarios
+  int batch_size = 1;
+  int rows = 0;
 };
 
 inline int HarnessClosure(lua_State* L) {

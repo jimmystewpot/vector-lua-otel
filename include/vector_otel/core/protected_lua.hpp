@@ -33,6 +33,12 @@ inline void* LeafPayload(lua_State* L) noexcept { return LeafContext(L).leaf_pay
 // with ErrorCode::Stack without running the leaf. Never raises, never throws.
 bool RunLuaLeaf(OperationContext& ctx, lua_CFunction leaf, void* payload) noexcept;
 
+// Consumes the failed call's error object on top of the stack (status from lua_pcall): records the
+// diagnostic in ctx.error (memory errors as Memory, string errors copied, anything else generic
+// Lua) and roots the object in kPendingError of the anchor at `anchor_index`. Leaves that run their
+// own lua_pcall (the emit callback) pass kLeafAnchorIndex. Never raises: raw stores only.
+void CaptureLuaError(OperationContext& ctx, int status, int anchor_index) noexcept;
+
 // Drops every invocation root EXCEPT the pending error, restores the stack to ctx.base_top.
 // Raw stores only: no allocation, no metamethods.
 void ClearInvocationRoots(OperationContext& ctx) noexcept;
