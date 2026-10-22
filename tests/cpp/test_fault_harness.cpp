@@ -78,6 +78,9 @@ TEST(CppFaultHarness, PersistentDeniesEveryAttemptAfterTheSkippedOnes) {
 TEST(CppFaultHarness, AllocationRecoversAfterScopeExit) {
   {
     CppFaultScope scope(CppFaultMode::kPersistent, 0);
+    void* denied = ::operator new(16, std::nothrow);
+    Escape(denied);
+    EXPECT_EQ(denied, nullptr);
   }
   void* p = ::operator new(16, std::nothrow);
   Escape(p);

@@ -31,8 +31,30 @@ struct StringBufExposer {
 };
 template struct StringBufExposer<&simdjson::ondemand::parser::string_buf>;
 
+#if SIMDJSON_DEVELOPMENT_CHECKS
+// Non-optimised builds enable simdjson's development checks, which add a second unchecked
+// (nothrow) allocation: the per-depth start-position array. Guard it the same way.
+struct StartPositionsAccess {
+  using Type = std::unique_ptr<simdjson::ondemand::token_position[]> simdjson::ondemand::parser::*;
+  friend Type StartPositionsMember(StartPositionsAccess);
+};
+template <StartPositionsAccess::Type Member>
+struct StartPositionsExposer {
+  friend StartPositionsAccess::Type StartPositionsMember(StartPositionsAccess) { return Member; }
+};
+template struct StartPositionsExposer<&simdjson::ondemand::parser::start_positions>;
+#endif
+
 bool HasStringBuffer(const simdjson::ondemand::parser& parser) noexcept {
-  return (parser.*StringBufMember(StringBufAccess{})) != nullptr;
+  if ((parser.*StringBufMember(StringBufAccess{})) == nullptr) {
+    return false;
+  }
+#if SIMDJSON_DEVELOPMENT_CHECKS
+  if ((parser.*StartPositionsMember(StartPositionsAccess{})) == nullptr) {
+    return false;
+  }
+#endif
+  return true;
 }
 
 }  // namespace
