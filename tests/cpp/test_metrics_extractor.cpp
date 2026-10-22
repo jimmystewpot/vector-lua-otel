@@ -1450,6 +1450,489 @@ TEST_F(MetricsExtractorTest, BatchModeEmitFailureReportsOnlyDeliveredRows) {
   lua_pop(L_, 1);
 }
 
+TEST_F(MetricsExtractorTest, JsonModeExemplarIdsNormalizedToLowercaseHex) {
+  // Test JSON mode: uppercase hex IDs in exemplars for gauge, sum, and histogram
+  // are normalized to canonical lowercase hex, with full schema parity.
+  const std::string json = R"({
+    "resourceMetrics": [{
+      "resource": {
+        "attributes": [{"key": "service.name", "value": {"stringValue": "metrics-json-svc"}}]
+      },
+      "scopeMetrics": [{
+        "scope": {"name": "metrics-scope", "version": "1.0"},
+        "metrics": [
+          {
+            "name": "cpu_gauge",
+            "gauge": {
+              "dataPoints": [{
+                "timeUnixNano": "1700000000000000000",
+                "asDouble": 85.5,
+                "exemplars": [{
+                  "timeUnixNano": "1700000000123456789",
+                  "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+                  "spanId": "00F067AA0BA902B7",
+                  "asDouble": 85.5,
+                  "filteredAttributes": [{"key": "user", "value": {"stringValue": "alice"}}]
+                }]
+              }]
+            }
+          },
+          {
+            "name": "request_sum",
+            "sum": {
+              "dataPoints": [{
+                "timeUnixNano": "1700000000000000000",
+                "asInt": "100",
+                "exemplars": [{
+                  "timeUnixNano": "1700000000987654321",
+                  "traceId": "0123456789ABCDEF0123456789ABCDEF",
+                  "spanId": "0123456789ABCDEF",
+                  "asInt": "42",
+                  "filteredAttributes": [{"key": "tenant", "value": {"stringValue": "acme"}}]
+                }]
+              }]
+            }
+          },
+          {
+            "name": "latency_hist",
+            "histogram": {
+              "dataPoints": [{
+                "timeUnixNano": "1700000000000000000",
+                "count": "1",
+                "sum": 0.5,
+                "bucketCounts": ["1"],
+                "explicitBounds": [1.0],
+                "exemplars": [{
+                  "timeUnixNano": "1700000000555555555",
+                  "traceId": "AABBCCDDEEFF00112233445566778899",
+                  "spanId": "AABBCCDDEEFF0011",
+                  "value": 0.5
+                }]
+              }]
+            }
+          }
+        ]
+      }]
+    }]
+  })";
+
+  auto res = ProcessMetrics(L_, json, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 3);
+
+  const char* verify_script = R"(
+    assert(#emitted == 3, "expected 3 emitted metrics, got " .. #emitted)
+
+    -- Event 1: Gauge exemplar
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "cpu_gauge")
+    assert(e1.Exemplars ~= nil and #e1.Exemplars == 1)
+    local ex1 = e1.Exemplars[1]
+    assert(ex1.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "Gauge exemplar TraceId must be lowercase hex, got: " .. tostring(ex1.TraceId))
+    assert(ex1.SpanId == "00f067aa0ba902b7",
+           "Gauge exemplar SpanId must be lowercase hex, got: " .. tostring(ex1.SpanId))
+    assert(ex1.TimeUnix == "2023-11-14T22:13:20.123456789Z",
+           "Gauge exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex1.TimeUnix))
+    assert(math.abs(ex1.Value - 85.5) < 0.001, "Gauge exemplar Value mismatch")
+    assert(ex1.FilteredAttributes ~= nil and ex1.FilteredAttributes["user"] == "alice")
+
+    -- Event 2: Sum exemplar
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "request_sum")
+    assert(e2.Exemplars ~= nil and #e2.Exemplars == 1)
+    local ex2 = e2.Exemplars[1]
+    assert(ex2.TraceId == "0123456789abcdef0123456789abcdef",
+           "Sum exemplar TraceId must be lowercase hex, got: " .. tostring(ex2.TraceId))
+    assert(ex2.SpanId == "0123456789abcdef",
+           "Sum exemplar SpanId must be lowercase hex, got: " .. tostring(ex2.SpanId))
+    assert(ex2.TimeUnix == "2023-11-14T22:13:20.987654321Z",
+           "Sum exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex2.TimeUnix))
+    assert(ex2.Value == 42, "Sum exemplar Value mismatch: " .. tostring(ex2.Value))
+    assert(ex2.FilteredAttributes ~= nil and ex2.FilteredAttributes["tenant"] == "acme")
+
+    -- Event 3: Histogram exemplar
+    local e3 = emitted[3].log
+    assert(e3.MetricName == "latency_hist")
+    assert(e3.Exemplars ~= nil and #e3.Exemplars == 1)
+    local ex3 = e3.Exemplars[1]
+    assert(ex3.TraceId == "aabbccddeeff00112233445566778899",
+           "Hist exemplar TraceId must be lowercase hex, got: " .. tostring(ex3.TraceId))
+    assert(ex3.SpanId == "aabbccddeeff0011",
+           "Hist exemplar SpanId must be lowercase hex, got: " .. tostring(ex3.SpanId))
+    assert(ex3.TimeUnix == "2023-11-14T22:13:20.555555555Z",
+           "Hist exemplar TimeUnix mismatch: " .. tostring(ex3.TimeUnix))
+    assert(math.abs(ex3.Value - 0.5) < 0.001, "Hist exemplar Value mismatch")
+    assert(ex3.FilteredAttributes ~= nil, "Hist exemplar FilteredAttributes must be a table")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, TableModeExemplarIdsNormalizedFromBinaryAndSchemaParity) {
+  // Test Table mode: 16B/8B raw binary IDs and uppercase hex IDs in exemplars for
+  // gauge, sum, and histogram are normalized to lowercase hex with schema parity.
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* script = R"(
+    return {
+      resourceMetrics = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "metrics-table-svc" } }
+            }
+          },
+          scopeMetrics = {
+            {
+              scope = { name = "table-scope", version = "2.0" },
+              metrics = {
+                {
+                  name = "mem_gauge",
+                  gauge = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = 1700000000000000000,
+                        asDouble = 1024.0,
+                        exemplars = {
+                          {
+                            timeUnixNano = 1700000000123456789,
+                            traceId = "\x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36",
+                            spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+                            asDouble = 512.5,
+                            filteredAttributes = {
+                              { key = "pool", value = { stringValue = "heap" } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  name = "conn_sum",
+                  sum = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = 1700000000000000000,
+                        asInt = 200,
+                        exemplars = {
+                          {
+                            time_unix_nano = 1700000000987654321,
+                            trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+                            span_id = "00F067AA0BA902B7",
+                            as_int = 10,
+                            filtered_attributes = {
+                              { key = "protocol", value = { stringValue = "http" } }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  name = "dur_hist",
+                  histogram = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = 1700000000000000000,
+                        count = 1,
+                        sum = 1.5,
+                        bucketCounts = { 1 },
+                        explicitBounds = { 2.0 },
+                        exemplars = {
+                          {
+                            timeUnix = "2023-11-14T22:13:20.555555555Z",
+                            traceId = "\x01\x23\x45\x67\x89\xab\xcd\xef\x01\x23\x45\x67\x89\xab\xcd\xef",
+                            spanId = "\x01\x23\x45\x67\x89\xab\xcd\xef",
+                            value = 1.5
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessMetricsTable(L_, table_idx, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 3);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 3, "expected 3 emitted metrics, got " .. #emitted)
+
+    -- Event 1: Gauge exemplar with binary IDs
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "mem_gauge")
+    assert(type(e1.Exemplars) == "table" and #e1.Exemplars == 1)
+    local ex1 = e1.Exemplars[1]
+    assert(ex1.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "Gauge exemplar TraceId must be 32 lowercase hex chars, got: " .. tostring(ex1.TraceId))
+    assert(ex1.SpanId == "00f067aa0ba902b7",
+           "Gauge exemplar SpanId must be 16 lowercase hex chars, got: " .. tostring(ex1.SpanId))
+    assert(ex1.TimeUnix == "2023-11-14T22:13:20.123456789Z",
+           "Gauge exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex1.TimeUnix))
+    assert(math.abs(ex1.Value - 512.5) < 0.001, "Gauge exemplar Value mismatch")
+    assert(ex1.FilteredAttributes ~= nil and ex1.FilteredAttributes["pool"] == "heap")
+
+    -- Event 2: Sum exemplar with uppercase snake_case IDs
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "conn_sum")
+    assert(type(e2.Exemplars) == "table" and #e2.Exemplars == 1)
+    local ex2 = e2.Exemplars[1]
+    assert(ex2.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "Sum exemplar TraceId must be lowercase hex, got: " .. tostring(ex2.TraceId))
+    assert(ex2.SpanId == "00f067aa0ba902b7",
+           "Sum exemplar SpanId must be lowercase hex, got: " .. tostring(ex2.SpanId))
+    assert(ex2.TimeUnix == "2023-11-14T22:13:20.987654321Z",
+           "Sum exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex2.TimeUnix))
+    assert(ex2.Value == 10, "Sum exemplar Value mismatch: " .. tostring(ex2.Value))
+    assert(ex2.FilteredAttributes ~= nil and ex2.FilteredAttributes["protocol"] == "http")
+
+    -- Event 3: Histogram exemplar with binary IDs
+    local e3 = emitted[3].log
+    assert(e3.MetricName == "dur_hist")
+    assert(type(e3.Exemplars) == "table" and #e3.Exemplars == 1)
+    local ex3 = e3.Exemplars[1]
+    assert(ex3.TraceId == "0123456789abcdef0123456789abcdef",
+           "Hist exemplar TraceId must be 32 lowercase hex chars, got: " .. tostring(ex3.TraceId))
+    assert(ex3.SpanId == "0123456789abcdef",
+           "Hist exemplar SpanId must be 16 lowercase hex chars, got: " .. tostring(ex3.SpanId))
+    assert(ex3.TimeUnix == "2023-11-14T22:13:20.555555555Z",
+           "Hist exemplar TimeUnix mismatch: " .. tostring(ex3.TimeUnix))
+    assert(math.abs(ex3.Value - 1.5) < 0.001, "Hist exemplar Value mismatch")
+    assert(ex3.FilteredAttributes ~= nil, "Hist exemplar FilteredAttributes must be a table")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, TableModeAbsentExemplarsRetainsEmptyTableContract) {
+  // Test Table mode: absent exemplars field or empty exemplars array emits an empty table {}
+  // matching the existing contract.
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* script = R"(
+    return {
+      resourceMetrics = {
+        {
+          scopeMetrics = {
+            {
+              metrics = {
+                {
+                  name = "gauge_no_ex",
+                  gauge = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = 1700000000000000000,
+                        asDouble = 1.0
+                        -- exemplars field completely absent
+                      }
+                    }
+                  }
+                },
+                {
+                  name = "sum_empty_ex",
+                  sum = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = 1700000000000000000,
+                        asInt = 2,
+                        exemplars = {}  -- empty array
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessMetricsTable(L_, table_idx, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2)
+    local e1 = emitted[1].log
+    assert(e1.MetricName == "gauge_no_ex")
+    assert(e1.Exemplars ~= nil, "Exemplars table must not be nil when absent")
+    assert(type(e1.Exemplars) == "table", "Exemplars must be a table")
+    assert(#e1.Exemplars == 0, "Exemplars must be empty array")
+
+    local e2 = emitted[2].log
+    assert(e2.MetricName == "sum_empty_ex")
+    assert(e2.Exemplars ~= nil, "Exemplars table must not be nil when empty")
+    assert(type(e2.Exemplars) == "table", "Exemplars must be a table")
+    assert(#e2.Exemplars == 0, "Exemplars must be empty array")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, ExemplarMissingTraceIdAndSpanIdEmitEmptyString) {
+  // Missing traceId or spanId in exemplars must default to empty string "" in both modes.
+  // 1. JSON mode
+  const std::string json = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "g1",
+          "gauge": {
+            "dataPoints": [{
+              "timeUnixNano": "1700000000000000000",
+              "asDouble": 1.0,
+              "exemplars": [{
+                "timeUnixNano": "1700000000111111111",
+                "asDouble": 1.0
+                -- traceId and spanId omitted
+              }]
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessMetrics(L_, json, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  const char* verify_json = R"(
+    assert(#emitted == 1)
+    local ex = emitted[1].log.Exemplars[1]
+    assert(ex.TraceId == "", "Missing TraceId must be empty string in JSON mode, got: " .. tostring(ex.TraceId))
+    assert(ex.SpanId == "", "Missing SpanId must be empty string in JSON mode, got: " .. tostring(ex.SpanId))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_json), LUA_OK) << lua_tostring(L_, -1);
+
+  // 2. Table mode
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* table_script = R"(
+    return {
+      resourceMetrics = {
+        {
+          scopeMetrics = {
+            {
+              metrics = {
+                {
+                  name = "g2",
+                  gauge = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = 1700000000000000000,
+                        asDouble = 2.0,
+                        exemplars = {
+                          {
+                            timeUnixNano = 1700000000222222222,
+                            asDouble = 2.0
+                            -- traceId and spanId omitted
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessMetricsTable(L_, table_idx, 1);
+  EXPECT_TRUE(table_res.success) << table_res.error;
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_table = R"(
+    assert(#emitted == 1)
+    local ex = emitted[1].log.Exemplars[1]
+    assert(ex.TraceId == "", "Missing TraceId must be empty string in Table mode, got: " .. tostring(ex.TraceId))
+    assert(ex.SpanId == "", "Missing SpanId must be empty string in Table mode, got: " .. tostring(ex.SpanId))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(MetricsExtractorTest, MetricAttributesNotAlteredByIdNormalization) {
+  // Verify that attributes in ResourceAttributes, ScopeAttributes, and metric
+  // data point Attributes containing uppercase hex or 16-byte strings are NOT altered.
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* script = R"(
+    return {
+      resourceMetrics = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "attr-svc" } },
+              { key = "res.hex", value = { stringValue = "4BF92F3577B34DA6A3CE929D0E0E4736" } }
+            }
+          },
+          scopeMetrics = {
+            {
+              scope = {
+                name = "scope-test",
+                attributes = {
+                  { key = "scope.exact_16", value = { stringValue = "1234567812345678" } }
+                }
+              },
+              metrics = {
+                {
+                  name = "g_attrs",
+                  gauge = {
+                    dataPoints = {
+                      {
+                        timeUnixNano = 1700000000000000000,
+                        asDouble = 1.0,
+                        attributes = {
+                          { key = "dp.raw_upper", value = { stringValue = "UPPERCASE_AND_HEX_4BF9" } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessMetricsTable(L_, table_idx, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
+           "ResourceAttributes string must not be altered")
+    assert(r.ScopeAttributes["scope.exact_16"] == "1234567812345678",
+           "ScopeAttributes string must not be altered")
+    assert(r.Attributes["dp.raw_upper"] == "UPPERCASE_AND_HEX_4BF9",
+           "DataPoint Attributes string must not be altered")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 
 }  // namespace extractors
