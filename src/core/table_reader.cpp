@@ -13,7 +13,6 @@
 #include <string_view>
 
 #include "vector_otel/core/fast_json_writer.hpp"
-#include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/row_emitter.hpp"
 #include "vector_otel/core/scratch.hpp"
@@ -275,21 +274,6 @@ std::string_view NormalizeIdOnStack(lua_State* L, int idx, size_t expected_binar
     return "";
   }
   return NormalizeOtelId(std::string_view(s, len), expected_binary_len, id_buf);
-}
-
-void CopyTableIdFieldToTable(lua_State* L, int src_idx, ReadKey name1, ReadKey name2, ReadKey name3,
-                             size_t expected_binary_len, int dst_idx, const char* dst_field) {
-  IdHexBuffer id_buf{};
-  std::string_view norm;
-  if (GetTableField(L, src_idx, name1, name2, name3)) {
-    norm = NormalizeIdOnStack(L, -1, expected_binary_len, id_buf);
-    lua_pushlstring(L, norm.data(), norm.size());
-    lua_setfield(L, dst_idx, dst_field);
-    lua_pop(L, 1);
-    return;
-  }
-  lua_pushliteral(L, "");
-  lua_setfield(L, dst_idx, dst_field);
 }
 
 void StageTableIdField(StagedRow& row, Key dst_key, lua_State* L, int src_idx, ReadKey name1,
@@ -912,196 +896,6 @@ std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::str
   return service_name;
 }
 
-// Returns true if the attribute was a plain string or OTLP stringValue.
-static bool PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& writer) {
-  int abs_idx = lua_absindex(L, val_idx);
-  int type = lua_type(L, abs_idx);
-
-  if (type == LUA_TSTRING) {
-    lua_pushvalue(L, abs_idx);
-    return true;
-  } else if (type == LUA_TNUMBER) {
-    lua_pushvalue(L, abs_idx);
-    return false;
-  } else if (type == LUA_TBOOLEAN) {
-    lua_pushvalue(L, abs_idx);
-    return false;
-  } else if (type == LUA_TTABLE) {
-    if (GetTableFieldRaw(L, abs_idx, "stringValue", "string_value")) {
-      if (lua_type(L, -1) == LUA_TSTRING) {
-        return true;  // value is already on stack
-      }
-      lua_pop(L, 1);
-      lua_pushliteral(L, "");
-      return true;
-    }
-    if (GetTableFieldRaw(L, abs_idx, "intValue", "int_value")) {
-      if (lua_isinteger(L, -1)) {
-        return false;
-      }
-      int64_t v = 0;
-      if (lua_type(L, -1) == LUA_TNUMBER) {
-        LuaFloatToInt64(lua_tonumber(L, -1), v);
-      } else if (lua_type(L, -1) == LUA_TSTRING) {
-        ParseLuaStringInt64(L, -1, v);
-      }
-      lua_pop(L, 1);
-      lua_pushinteger(L, v);
-      return false;
-    }
-    if (GetTableFieldRaw(L, abs_idx, "uintValue", "uint_value")) {
-      uint64_t u = 0;
-      TryParseTableUint64At(L, -1, u);
-      lua_pop(L, 1);
-      constexpr uint64_t kMaxLuaInt =
-          static_cast<uint64_t>(std::numeric_limits<lua_Integer>::max());
-      lua_pushinteger(L, static_cast<lua_Integer>(std::min(u, kMaxLuaInt)));
-      return false;
-    }
-    if (GetTableFieldRaw(L, abs_idx, "boolValue", "bool_value")) {
-      if (lua_type(L, -1) == LUA_TBOOLEAN) {
-        return false;
-      }
-      bool b = lua_toboolean(L, -1) != 0;
-      lua_pop(L, 1);
-      lua_pushboolean(L, b ? 1 : 0);
-      return false;
-    }
-    if (GetTableFieldRaw(L, abs_idx, "doubleValue", "double_value")) {
-      double d = 0.0;
-      if (lua_type(L, -1) == LUA_TNUMBER) {
-        double num = lua_tonumber(L, -1);
-        if (std::isfinite(num)) {
-          d = num;
-        }
-      } else if (lua_type(L, -1) == LUA_TSTRING) {
-        ParseLuaStringDouble(L, -1, d);
-      }
-      lua_pop(L, 1);
-      lua_pushnumber(L, d);
-      return false;
-    }
-    // Complex value -> serialise to JSON string
-    writer.Reset();
-    SerializeLuaValueToJson(L, abs_idx, writer);
-    lua_pushlstring(L, writer.Str().data(), writer.Str().size());
-    return false;
-  } else {
-    lua_pushnil(L);
-    return false;
-  }
-}
-
-void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer,
-                         std::string_view* out_service_name) {
-  static thread_local std::string tls_attr_service_scratch;
-  if (out_service_name != nullptr) {
-    ResetScratchString(tls_attr_service_scratch);
-    ReserveScratchString(tls_attr_service_scratch, 128);
-  }
-  if (!lua_checkstack(L, 10)) {
-    throw std::runtime_error("Lua stack overflow in PushTableAttributes");
-  }
-  int abs_idx = lua_absindex(L, attrs_idx);
-  lua_newtable(L);
-  int out_table_idx = lua_absindex(L, -1);
-
-  if (!lua_istable(L, abs_idx)) {
-    return;
-  }
-
-  bool is_kv_array = false;
-  const size_t len = lua_rawlen(L, abs_idx);
-  if (len > 0) {
-    lua_rawgeti(L, abs_idx, 1);
-    if (lua_istable(L, -1)) {
-      if (GetTableFieldRaw(L, -1, "key")) {
-        if (lua_type(L, -1) == LUA_TSTRING) {
-          is_kv_array = true;
-        }
-        lua_pop(L, 1);  // pop key field
-      }
-    }
-    lua_pop(L, 1);  // pop item 1
-  }
-
-  if (is_kv_array) {
-    // Array of { key = "...", value = ... }
-    for (size_t i = 1; i <= len; ++i) {
-      lua_rawgeti(L, abs_idx, static_cast<lua_Integer>(i));
-      if (lua_istable(L, -1)) {
-        int item_idx = lua_absindex(L, -1);
-        if (GetTableFieldRaw(L, item_idx, "key")) {
-          if (lua_type(L, -1) == LUA_TSTRING && lua_rawlen(L, -1) > 0) {
-            size_t klen = 0;
-            const char* ks = LuaStringOrNull(L, -1, &klen);
-            std::string_view key_sv(ks, klen);
-            if (GetTableFieldRaw(L, item_idx, "value")) {
-              bool is_str_attr = PushSingleAttributeValue(L, -1, writer);
-              lua_remove(L,
-                         -2);  // remove raw value, leaving [key, converted_val]
-              if (out_service_name != nullptr &&
-                  (out_service_name->empty() || *out_service_name == "unknown_service") &&
-                  is_str_attr && (key_sv == "service.name" || key_sv == "service_name")) {
-                size_t vlen = 0;
-                const char* vs = LuaStringOrNull(L, -1, &vlen);
-                if (vs != nullptr && vlen > 0) {
-                  tls_attr_service_scratch.assign(vs, vlen);
-                  *out_service_name = std::string_view(tls_attr_service_scratch);
-                }
-              }
-              lua_rawset(L, out_table_idx);
-            } else {
-              lua_pop(L, 1);  // pop key
-            }
-          } else {
-            lua_pop(L, 1);  // pop key
-          }
-        }
-      }
-      lua_pop(L, 1);  // pop item
-    }
-  } else {
-    // Direct key-value map
-    bool has_dot_svc = false;
-    lua_pushnil(L);
-    while (lua_next(L, abs_idx) != 0) {
-      if (lua_type(L, -2) == LUA_TSTRING) {
-        size_t klen = 0;
-        const char* ks = LuaStringOrNull(L, -2, &klen);
-        std::string_view key_sv(ks, klen);
-        lua_pushvalue(L, -2);
-        bool is_str_attr = PushSingleAttributeValue(L, -2, writer);
-        if (out_service_name != nullptr && is_str_attr) {
-          if (key_sv == "service.name" && !has_dot_svc) {
-            size_t vlen = 0;
-            const char* vs = LuaStringOrNull(L, -1, &vlen);
-            if (vs != nullptr && vlen > 0) {
-              tls_attr_service_scratch.assign(vs, vlen);
-              *out_service_name = std::string_view(tls_attr_service_scratch);
-              has_dot_svc = true;
-            }
-          } else if (key_sv == "service_name" && !has_dot_svc && tls_attr_service_scratch.empty()) {
-            size_t vlen = 0;
-            const char* vs = LuaStringOrNull(L, -1, &vlen);
-            if (vs != nullptr && vlen > 0) {
-              tls_attr_service_scratch.assign(vs, vlen);
-              *out_service_name = std::string_view(tls_attr_service_scratch);
-            }
-          }
-        }
-        lua_rawset(L, out_table_idx);
-      } else if (lua_type(L, -2) == LUA_TNUMBER) {
-        lua_pushvalue(L, -2);
-        lua_tolstring(L, -1, nullptr);  // legacy Push* path, removed once every signal is staged
-        PushSingleAttributeValue(L, -2, writer);
-        lua_rawset(L, out_table_idx);
-      }
-      lua_pop(L, 1);  // pop value, keep key for next iteration
-    }
-  }
-}
-
 namespace {
 
 // Stages one attribute value under `key`. Mirrors PushSingleAttributeValue(): plain scalars pass
@@ -1276,19 +1070,6 @@ void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
   row.BeginMap(key);
   StageTableAttributeFields(row, L, attrs_idx, writer, out_service_name);
   row.End();
-}
-
-static void CopyTableFieldToTable(lua_State* L, int src_idx, ReadKey name1, ReadKey name2,
-                                  int dst_idx, const char* dst_field, ReadKey name3 = nullptr) {
-  if (GetTableField(L, src_idx, name1, name2, name3)) {
-    if (lua_type(L, -1) == LUA_TSTRING) {
-      lua_setfield(L, dst_idx, dst_field);
-      return;
-    }
-    lua_pop(L, 1);
-  }
-  lua_pushliteral(L, "");
-  lua_setfield(L, dst_idx, dst_field);
 }
 
 void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
@@ -1586,100 +1367,13 @@ void StageTableExemplars(StagedRow& row, Key key, lua_State* L, int exemplars_id
   row.End();
 }
 
-void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
-  if (!lua_checkstack(L, 10)) {
-    throw std::runtime_error("Lua stack overflow in PushTableSpanEvents");
-  }
-  int abs_idx = lua_absindex(L, events_idx);
-  lua_newtable(L);
-  int out_arr_idx = lua_absindex(L, -1);
-
-  if (!lua_istable(L, abs_idx)) return;
-
-  lua_Integer len = static_cast<lua_Integer>(lua_rawlen(L, abs_idx));
-  lua_Integer out_idx = 1;
-  for (lua_Integer i = 1; i <= len; ++i) {
-    lua_rawgeti(L, abs_idx, i);
-    if (lua_istable(L, -1)) {
-      int item_idx = lua_absindex(L, -1);
-      lua_newtable(L);
-      int ev_obj_idx = lua_absindex(L, -1);
-
-      uint64_t t_ns = ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
-      std::array<char, 32> ts_buf;
-      FormatIso8601Nano(t_ns, ts_buf.data());
-      constexpr size_t kIsoLen = 30;
-      std::string_view ts_sv(ts_buf.data(), kIsoLen);
-      lua_pushlstring(L, ts_sv.data(), ts_sv.size());
-      lua_setfield(L, ev_obj_idx, "Timestamp");
-
-      CopyTableFieldToTable(L, item_idx, "name", "Name", ev_obj_idx, "Name");
-
-      if (GetTableField(L, item_idx, "attributes", "Attributes")) {
-        PushTableAttributes(L, -1, writer);
-        lua_setfield(L, ev_obj_idx, "Attributes");
-        lua_pop(L, 1);
-      } else {
-        lua_newtable(L);
-        lua_setfield(L, ev_obj_idx, "Attributes");
-      }
-
-      lua_rawseti(L, out_arr_idx, out_idx++);
-    }
-    lua_pop(L, 1);
-  }
-}
-
-void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer) {
-  if (!lua_checkstack(L, 10)) {
-    throw std::runtime_error("Lua stack overflow in PushTableSpanLinks");
-  }
-  int abs_idx = lua_absindex(L, links_idx);
-  lua_newtable(L);
-  int out_arr_idx = lua_absindex(L, -1);
-
-  if (!lua_istable(L, abs_idx)) return;
-
-  lua_Integer len = static_cast<lua_Integer>(lua_rawlen(L, abs_idx));
-  lua_Integer out_idx = 1;
-  for (lua_Integer i = 1; i <= len; ++i) {
-    lua_rawgeti(L, abs_idx, i);
-    if (lua_istable(L, -1)) {
-      int item_idx = lua_absindex(L, -1);
-      lua_newtable(L);
-      int link_obj_idx = lua_absindex(L, -1);
-
-      CopyTableIdFieldToTable(L, item_idx, "traceId", "trace_id", "TraceId", kTraceIdBinaryLen,
-                              link_obj_idx, "TraceId");
-      CopyTableIdFieldToTable(L, item_idx, "spanId", "span_id", "SpanId", kSpanIdBinaryLen,
-                              link_obj_idx, "SpanId");
-      CopyTableFieldToTable(L, item_idx, "traceState", "trace_state", link_obj_idx, "TraceState",
-                            "TraceState");
-
-      if (GetTableField(L, item_idx, "attributes", "Attributes")) {
-        PushTableAttributes(L, -1, writer);
-        lua_setfield(L, link_obj_idx, "Attributes");
-        lua_pop(L, 1);
-      } else {
-        lua_newtable(L);
-        lua_setfield(L, link_obj_idx, "Attributes");
-      }
-
-      lua_rawseti(L, out_arr_idx, out_idx++);
-    }
-    lua_pop(L, 1);
-  }
-}
-
-// The helpers above are shared by the legacy emitter (until every signal is migrated) and the
-// staged-row emitter.
+// Emitter-templated helpers, instantiated for the staged-row emitter.
 #define VECTOR_OTEL_INSTANTIATE_TABLE_HELPERS(E)                                                  \
   template void CopyStringField<E>(lua_State*, int, ReadKey, ReadKey, E&, Key, std::string_view); \
   template void CopyIdField<E>(lua_State*, int, ReadKey, ReadKey, size_t, E&, Key, ReadKey);      \
   template void CopyStringFieldAlways<E>(lua_State*, int, ReadKey, ReadKey, E&, Key,              \
                                          std::string_view);                                       \
   template void CopyTableBody<E>(lua_State*, int, FastJsonWriter&, E&);
-VECTOR_OTEL_INSTANTIATE_TABLE_HELPERS(LuaEmitter)
 VECTOR_OTEL_INSTANTIATE_TABLE_HELPERS(RowEmitter)
 #undef VECTOR_OTEL_INSTANTIATE_TABLE_HELPERS
 

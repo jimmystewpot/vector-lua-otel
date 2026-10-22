@@ -37,18 +37,15 @@ inline std::string_view NormalizeSpanId(std::string_view raw, IdHexBuffer& stack
 }
 
 std::string_view ExtractServiceName(simdjson::ondemand::object& resource_obj);
-void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
-                         FastJsonWriter& json_writer, std::string_view* out_service_name = nullptr);
-void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer);
 
-// Staged (Lua-free) counterparts of PushAnyValue / PushAttributesTable. They write into a
-// StagedRow and may throw std::bad_alloc / std::length_error; they never touch Lua.
+// Staged (Lua-free) attribute builders. They write into a StagedRow and may throw std::bad_alloc /
+// std::length_error; they never touch Lua.
 //  * StageAnyValue stages one value under `key` (nothing for unsupported values) and returns true
 //    when it was a scalar string, whose text is then reported through `scalar_text`.
 //  * StageAttributeFields stages the entries as fields of the currently open container (the row
 //    root when none is open), so a tape can be materialised as the attributes table itself.
 //  * StageAttributes wraps the fields in a map under `key` (an empty map for malformed input).
-// service.name capture matches PushAttributesTable(): the last matching key wins.
+// service.name capture: the last matching key wins.
 bool StageAnyValue(StagedRow& row, Key key, simdjson::ondemand::value& val,
                    FastJsonWriter& json_writer, std::string_view* scalar_text = nullptr);
 void StageAttributeFields(StagedRow& row, simdjson::ondemand::value& attrs_val,
@@ -69,7 +66,7 @@ std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string
 std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string_view key1,
                                     std::string_view key2, std::string_view default_val);
 
-// Reset the thread-local scratch buffer used by PushAttributesTable to store service.name.
+// Reset the thread-local scratch buffer used by StageAttributes to store service.name.
 // Must be called at the end of each batch to ensure the string_view is invalidated.
 void ResetServiceNameScratch() noexcept;
 

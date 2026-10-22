@@ -1,6 +1,8 @@
 #include "vector_otel/core/parser.hpp"
 
+#include <atomic>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <type_traits>
 
@@ -36,6 +38,19 @@ bool HasStringBuffer(const simdjson::ondemand::parser& parser) noexcept {
 }  // namespace
 
 OtelParser& OtelParser::Instance() {
+  // simdjson selects its CPU implementation lazily with unsynchronised first-use writes, which is
+  // a data race when several worker threads parse for the first time concurrently (ThreadSanitizer
+  // reports it). Force the selection once, behind an explicit acquire/release flag, before any
+  // thread's first parse.
+  static std::atomic<bool> implementation_selected{false};
+  if (!implementation_selected.load(std::memory_order_acquire)) [[unlikely]] {
+    static std::mutex select_mutex;
+    const std::lock_guard<std::mutex> lock(select_mutex);
+    if (!implementation_selected.load(std::memory_order_relaxed)) {
+      (void)simdjson::get_active_implementation();
+      implementation_selected.store(true, std::memory_order_release);
+    }
+  }
   static thread_local OtelParser instance;
   return instance;
 }

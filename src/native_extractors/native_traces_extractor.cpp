@@ -648,11 +648,13 @@ void SerializeTableAttributesToJson(lua_State* L, int attrs_idx, core::FastJsonW
         writer.Key(std::string_view(ks, klen));
         core::SerializeLuaValueToJson(L, -1, writer);
       } else if (lua_type(L, -2) == LUA_TNUMBER) {
-        lua_pushvalue(L, -2);
-        size_t klen = 0;
-        const char* ks = lua_tolstring(L, -1, &klen);
-        writer.Key(std::string_view(ks, klen));
-        lua_pop(L, 1);
+        // Formatted into a stack buffer: lua_tolstring() would allocate a Lua string (which can
+        // raise) and the key must stay untouched for lua_next.
+        char num[core::kScalarTextBuffer];
+        std::string_view text;
+        if (core::ScalarText(L, -2, num, text)) {
+          writer.Key(text);
+        }
         core::SerializeLuaValueToJson(L, -1, writer);
       }
       lua_pop(L, 1);
@@ -1254,10 +1256,10 @@ bool ExtractSingleNativeTraceTable(OperationContext& ctx, NativeTracesScratch& s
   core::CopyStringFieldAlways(L, abs_rec_idx, "trace_state", "traceState", emitter, "TraceState");
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "name", "span_name")) {
-    if (lua_isstring(L, -1)) {
-      size_t len = 0;
-      const char* s = lua_tolstring(L, -1, &len);
-      emitter.SetString("SpanName", std::string_view(s, len));
+    char num[core::kScalarTextBuffer];
+    std::string_view text;
+    if (core::ScalarText(L, -1, num, text)) {
+      emitter.SetString("SpanName", text);
     } else {
       emitter.SetString("SpanName", "");
     }

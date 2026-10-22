@@ -9,8 +9,8 @@ extern "C" {
 #include <lualib.h>
 }
 
+#include "legacy_reference.hpp"
 #include "vector_otel/core/fast_json_writer.hpp"
-#include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/staged_row.hpp"
 #include "vector_otel/core/table_reader.hpp"
@@ -2271,72 +2271,46 @@ TEST_F(TableModeTest, GetTableFieldThreeKeys) {
   EXPECT_EQ(lua_gettop(L_), top_before);
 }
 
-TEST_F(TableModeTest, CopyIdFieldNormalizationAndMissingDefaults) {
+TEST_F(TableModeTest, TraceIdNormalizationAndMissingDefaults) {
   ASSERT_EQ(luaL_dostring(L_, R"(
     emitted = {}
     function capture_emit(ev)
       emitted[#emitted + 1] = ev
     end
-    t_bin = {
-      trace_bin = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
-      span_bin = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
-      trace_upper = "4BF92F3577B34DA6A3CE929D0E0E4736",
-      span_upper = "00F067AA0BA902B7",
-      bad_number = 12345,
-      bad_table = {},
-      bad_bool = true
-    }
+    payload = { resourceSpans = { { scopeSpans = { { spans = {
+      { -- binary ids and an upper-case parent
+        traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+        spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+        parentSpanId = "00F067AA0BA902B7" },
+      { traceId = "4BF92F3577B34DA6A3CE929D0E0E4736" }, -- upper-case trace id, other ids absent
+      { traceId = 12345, spanId = {}, parentSpanId = true }, -- non-strings become ""
+    } } } } } }
   )"),
             LUA_OK);
 
   lua_getglobal(L_, "capture_emit");
-  int emit_cb = lua_gettop(L_);
+  const int emit_cb = lua_gettop(L_);
+  lua_getglobal(L_, "payload");
+  const int t_idx = lua_gettop(L_);
+  const int top_before = lua_gettop(L_);
 
-  lua_getglobal(L_, "t_bin");
-  int t_idx = lua_gettop(L_);
-
-  core::LuaEmitter emitter(L_, emit_cb, 1, "log");
-  emitter.StartRecord();
-
-  // 16-byte binary traceId -> 32 lowercase hex chars
-  core::CopyIdField(L_, t_idx, "trace_bin", nullptr, core::kTraceIdBinaryLen, emitter, "TraceId");
-
-  // 8-byte binary spanId -> 16 lowercase hex chars
-  core::CopyIdField(L_, t_idx, "span_bin", nullptr, core::kSpanIdBinaryLen, emitter, "SpanId");
-
-  // 32-char uppercase traceId -> 32 lowercase hex chars
-  core::CopyIdField(L_, t_idx, "trace_upper", nullptr, core::kTraceIdBinaryLen, emitter,
-                    "TraceUpper");
-
-  // 16-char uppercase spanId -> 16 lowercase hex chars
-  core::CopyIdField(L_, t_idx, "span_upper", nullptr, core::kSpanIdBinaryLen, emitter, "SpanUpper");
-
-  // Absent field -> empty string ""
-  core::CopyIdField(L_, t_idx, "absent_key", "also_absent", core::kTraceIdBinaryLen, emitter,
-                    "AbsentId");
-
-  // Non-string fields (number, table, bool) -> empty string ""
-  core::CopyIdField(L_, t_idx, "bad_number", nullptr, core::kTraceIdBinaryLen, emitter,
-                    "BadNumber");
-  core::CopyIdField(L_, t_idx, "bad_table", nullptr, core::kTraceIdBinaryLen, emitter, "BadTable");
-  core::CopyIdField(L_, t_idx, "bad_bool", nullptr, core::kTraceIdBinaryLen, emitter, "BadBool");
-
-  emitter.EndRecord();
-  lua_pop(L_, 2);  // pop t_bin, capture_emit
+  auto result = extractors::ProcessTracesTable(L_, t_idx, emit_cb);
+  ASSERT_TRUE(result.success) << result.error;
+  EXPECT_EQ(result.emitted_count, 3);
+  EXPECT_EQ(lua_gettop(L_), top_before);
+  lua_pop(L_, 2);  // pop payload, capture_emit
 
   ASSERT_EQ(luaL_dostring(L_, R"(
-    assert(#emitted == 1, "expected 1 event")
-    local r = emitted[1].log
-    assert(r.TraceId == "000102030405060708090a0b0c0d0e0f",
-           "TraceId mismatch: " .. tostring(r.TraceId))
-    assert(r.SpanId == "00f067aa0ba902b7", "SpanId mismatch: " .. tostring(r.SpanId))
-    assert(r.TraceUpper == "4bf92f3577b34da6a3ce929d0e0e4736",
-           "TraceUpper mismatch: " .. tostring(r.TraceUpper))
-    assert(r.SpanUpper == "00f067aa0ba902b7", "SpanUpper mismatch: " .. tostring(r.SpanUpper))
-    assert(r.AbsentId == "", "AbsentId mismatch: " .. tostring(r.AbsentId))
-    assert(r.BadNumber == "", "BadNumber mismatch: " .. tostring(r.BadNumber))
-    assert(r.BadTable == "", "BadTable mismatch: " .. tostring(r.BadTable))
-    assert(r.BadBool == "", "BadBool mismatch: " .. tostring(r.BadBool))
+    assert(#emitted == 3, "expected 3 events, got " .. #emitted)
+    local function row(ev) return ev.trace or ev.log or ev end
+    local a, b, c = row(emitted[1]), row(emitted[2]), row(emitted[3])
+    assert(a.TraceId == "000102030405060708090a0b0c0d0e0f", "TraceId: " .. tostring(a.TraceId))
+    assert(a.SpanId == "00f067aa0ba902b7", "SpanId: " .. tostring(a.SpanId))
+    assert(a.ParentSpanId == "00f067aa0ba902b7", "ParentSpanId: " .. tostring(a.ParentSpanId))
+    assert(b.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "TraceId: " .. tostring(b.TraceId))
+    assert(b.SpanId == "" and b.ParentSpanId == "", "absent ids must be empty strings")
+    assert(c.TraceId == "" and c.SpanId == "" and c.ParentSpanId == "",
+           "non-string ids must be empty strings")
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
@@ -2536,8 +2510,6 @@ TEST_F(TableModeTest, StackSafetyCheck) {
   )"),
             LUA_OK);
 
-  lua_getglobal(L_, "dummy_emit");
-  int emit_cb = lua_gettop(L_);
   lua_getglobal(L_, "table_sample");
   int t_idx = lua_gettop(L_);
 
@@ -2549,15 +2521,6 @@ TEST_F(TableModeTest, StackSafetyCheck) {
   lua_pop(L_, 1);
 
   EXPECT_FALSE(core::GetTableField(L_, t_idx, "nonexistent", "not_here", "nope"));
-  EXPECT_EQ(lua_gettop(L_), initial_top);
-
-  // CopyIdField: stack top balanced
-  core::LuaEmitter emitter(L_, emit_cb, 1, "log");
-  emitter.StartRecord();
-  int before_copy = lua_gettop(L_);
-  core::CopyIdField(L_, t_idx, "traceId", "trace_id", core::kTraceIdBinaryLen, emitter, "TraceId");
-  EXPECT_EQ(lua_gettop(L_), before_copy);
-  emitter.EndRecord();
   EXPECT_EQ(lua_gettop(L_), initial_top);
 
   // WriteTableAttributesJson: stack top balanced
@@ -2595,7 +2558,7 @@ TEST_F(TableModeTest, StackSafetyCheck) {
     EXPECT_EQ(lua_gettop(L_), before_ex);
   }
 
-  lua_pop(L_, 2);  // pop table_sample and dummy_emit
+  lua_pop(L_, 1);  // pop table_sample
 }
 
 TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {

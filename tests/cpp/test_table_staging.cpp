@@ -15,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "legacy_reference.hpp"
 #include "operation_fixtures.hpp"
 #include "vector_otel/core/fast_json_writer.hpp"
 #include "vector_otel/core/read_keys.hpp"

@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 
+#include "legacy_reference.hpp"
 #include "simdjson.h"
 #include "vector_otel/core/fast_json_writer.hpp"
 #include "vector_otel/core/otlp_common.hpp"

@@ -13,7 +13,7 @@
 // array slot - it cannot allocate and cannot raise. That is what lets cleanup and the truthful
 // error return run after Lua memory is exhausted.
 //
-// Inventory of simultaneous owners (derived from the six extractors, lua_bridge, table_reader,
+// Inventory of simultaneous owners (derived from the six extractors, table_reader,
 // otlp_common and the dispatcher; see the Task 4 report). Adding a slot later requires extending
 // this enum BEFORE the anchor is published, never growing the table at run time.
 

@@ -8,6 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(ENABLE_NATIVE_TUNING "Enable -march=native" OFF)
 option(ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
 option(ENABLE_SANITIZERS "Enable ASAN and UBSAN instrumentation" OFF)
+option(ENABLE_TSAN "Enable ThreadSanitizer instrumentation (exclusive with ENABLE_SANITIZERS)" OFF)
 set(VECTOR_OTEL_EMIT_BATCH_SIZE 1 CACHE STRING "Compile-time emit batch size (default: 1)")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -32,6 +33,16 @@ if(ENABLE_SANITIZERS)
   endif()
 endif()
 
+if(ENABLE_TSAN)
+  if(ENABLE_SANITIZERS)
+    message(FATAL_ERROR "ENABLE_TSAN cannot be combined with ENABLE_SANITIZERS")
+  endif()
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+  endif()
+endif()
+
 find_package(Lua 5.4 REQUIRED)
 
 # All dependencies are vendored under third_party/ and built with
@@ -50,7 +61,6 @@ add_library(vector_otel_core STATIC
   src/core/parser.cpp
   src/core/fast_json_writer.cpp
   src/core/timestamp.cpp
-  src/core/lua_bridge.cpp
   src/core/otlp_common.cpp
   src/core/table_reader.cpp
   src/core/module_state.cpp
@@ -103,7 +113,6 @@ add_executable(vector_otel_tests
   tests/cpp/test_fast_json_writer.cpp
   tests/cpp/test_timestamp.cpp
   tests/cpp/test_parser.cpp
-  tests/cpp/test_lua_bridge.cpp
   tests/cpp/test_otlp_common.cpp
   tests/cpp/test_logs_extractor.cpp
   tests/cpp/test_traces_extractor.cpp
@@ -113,7 +122,9 @@ add_executable(vector_otel_tests
   tests/cpp/test_scratch.cpp
   tests/cpp/test_native_extractors.cpp
   tests/cpp/test_extraction_limits.cpp
+  tests/support/legacy_reference.cpp
 )
+target_include_directories(vector_otel_tests PRIVATE tests/support)
 target_link_libraries(vector_otel_tests PRIVATE
   vector_otel_core
   ${LUA_LIBRARIES}
@@ -159,6 +170,7 @@ add_executable(vector_otel_fault_tests
   tests/support/fault_new.cpp
   tests/support/fault_allocator.cpp
   tests/support/contract_fixtures.cpp
+  tests/support/legacy_reference.cpp
 )
 target_include_directories(vector_otel_fault_tests PRIVATE tests/support)
 target_link_libraries(vector_otel_fault_tests PRIVATE
@@ -168,3 +180,23 @@ target_link_libraries(vector_otel_fault_tests PRIVATE
 )
 target_compile_definitions(vector_otel_fault_tests PRIVATE VECTOR_OTEL_UNCHECKED_READ_KEYS)
 add_test(NAME vector_otel_fault_tests COMMAND vector_otel_fault_tests)
+
+# Worker-isolation tests: one Lua state per thread, no replaced global operator new, so this
+# target is also the one built and run under ThreadSanitizer (-DENABLE_TSAN=ON).
+find_package(Threads REQUIRED)
+add_executable(vector_otel_worker_tests
+  tests/cpp/test_main.cpp
+  tests/cpp/test_worker_isolation.cpp
+  src/module.cpp
+  src/native_module.cpp
+  tests/support/fault_allocator.cpp
+)
+target_include_directories(vector_otel_worker_tests PRIVATE tests/support)
+target_link_libraries(vector_otel_worker_tests PRIVATE
+  vector_otel_core
+  ${LUA_LIBRARIES}
+  GTest::gtest
+  Threads::Threads
+)
+target_compile_definitions(vector_otel_worker_tests PRIVATE VECTOR_OTEL_UNCHECKED_READ_KEYS)
+add_test(NAME vector_otel_worker_tests COMMAND vector_otel_worker_tests)

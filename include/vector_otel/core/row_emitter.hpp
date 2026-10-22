@@ -1,7 +1,7 @@
 #pragma once
 
-// RowEmitter: the extractors' view of the output. It has the same record API as the legacy
-// LuaEmitter (StartRecord / Set* / EndRecord / Flush), but a record is staged into a StagedRow and
+// RowEmitter: the extractors' view of the output. It offers a record API
+// (StartRecord / Set* / EndRecord / Flush); a record is staged into a StagedRow and
 // delivered by the protected emission leaves. It never touches Lua itself.
 //
 // Builder calls may throw (std::bad_alloc, std::length_error); they run in the extractor's outer

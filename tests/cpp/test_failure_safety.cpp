@@ -857,6 +857,57 @@ TEST_P(FailureSafetyOtelTest, CallbackFailureReportsRowsFromCompletedCallbacks) 
   }
 }
 
+// A failed delivery - including one in the final partial batch and one raising a non-string
+// value - reports exactly the rows of completed callbacks, and the same state then serves empty,
+// over-limit and ordinary calls correctly.
+TEST_P(FailureSafetyOtelTest, StateRecoversAfterDeliveryFailures) {
+  for (bool table : {false, true}) {
+    for (bool non_string : {false, true}) {
+      SCOPED_TRACE(std::string(table ? "table" : "json") +
+                   (non_string ? " non-string error" : " string error"));
+      RawState s;
+      ProcRecorder bad;
+      bad.fail_at_call = 1;  // with N > 1 this is the final partial batch
+      bad.fail_with_table = non_string;
+      const ProcResult r =
+          CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 1, kN + 1), bad);
+      ASSERT_EQ(r.status, LUA_OK);
+      ASSERT_EQ(r.nresults, 3);
+      EXPECT_TRUE(r.first_nil);
+      EXPECT_FALSE(r.error.empty());
+      EXPECT_EQ(r.count, kN);
+      EXPECT_EQ(bad.rows, kN);
+      ExpectAnchorsReleased(s.L());
+
+      ProcRecorder empty;
+      const std::vector<const char*>& empties = table ? g_sig->empty_lua : g_sig->empty_json;
+      const ProcResult re =
+          CallProcess(s, g_sig->native, g_sig->name,
+                      table ? TablePayload(empties.front()) : JsonPayload(empties.front()), empty);
+      ASSERT_EQ(re.nresults, 2) << re.error;
+      EXPECT_EQ(re.count, 0);
+      EXPECT_EQ(empty.calls, 0);
+
+      ProcRecorder over;
+      const ProcResult ro =
+          CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 1, 2049), over);
+      ASSERT_EQ(ro.nresults, 3);
+      EXPECT_EQ(ro.error, "event exceeds 2048-record limit");
+      EXPECT_EQ(ro.count, 0);
+      EXPECT_EQ(over.calls, 0);
+
+      ProcRecorder good;
+      const ProcResult rg =
+          CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 2, 3), good);
+      ASSERT_EQ(rg.nresults, 2) << rg.error;
+      EXPECT_EQ(rg.count, 6);
+      EXPECT_EQ(good.rows, 6);
+      lua_gc(s.L(), LUA_GCCOLLECT);
+      ExpectAnchorsReleased(s.L());
+    }
+  }
+}
+
 TEST_P(FailureSafetyOtelTest, ReentrantProcessIsRejectedWithoutDisturbingTheOuterCall) {
   RawState s;
   ProcRecorder rec;
@@ -1605,6 +1656,24 @@ TEST(FailureSafetyNativeTraces, MalformedEntriesAndRoots) {
                   TablePayload(R"(return {{name="a"},5,"x",{unrelated=1},{name="b"}})"), skipped);
   ASSERT_EQ(rt.nresults, 2) << rt.error;
   EXPECT_EQ(rt.count, 2);
+}
+
+// Numbers are read as text without converting the Lua value (lua_tolstring would allocate a Lua
+// string, which can raise in the extractor's outer frame, and would rewrite a lua_next key).
+TEST(FailureSafetyNativeTraces, NumericSpanNamesAndAttributeKeysAreFormattedWithoutConversion) {
+  RawState s;
+  ProcRecorder rec;
+  rec.dump = true;
+  const ProcResult r = CallProcess(s, true, "traces", TablePayload(R"(return {name=42,span_id="ab",
+        events={{name="e",time_unix_nano=1,attributes={[1]="a",[2.5]="b",k="c"}}}})"),
+                                   rec);
+  ASSERT_EQ(r.nresults, 2) << r.error;
+  ASSERT_EQ(rec.rows, 1);
+  EXPECT_NE(rec.events[0].find(R"("SpanName":"42")"), std::string::npos) << rec.events[0];
+  EXPECT_NE(rec.events[0].find(R"("1":"a")"), std::string::npos) << rec.events[0];
+  EXPECT_NE(rec.events[0].find(R"("2.5":"b")"), std::string::npos) << rec.events[0];
+  EXPECT_NE(rec.events[0].find(R"("k":"c")"), std::string::npos) << rec.events[0];
+  EXPECT_EQ(lua_gettop(s.L()), 0);
 }
 
 // ---- native metrics: accepted shapes, mappings, unsupported variants, limits ------------------

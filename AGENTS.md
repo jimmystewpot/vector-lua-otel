@@ -29,7 +29,7 @@ Every modification to this repository **must** strictly adhere to the following 
 
 3. **Non-Throwing C API / FFI Boundary Contract**:
    - **Never allow C++ exceptions or Lua panics to escape** across the C API boundary.
-   - All `lua_CFunction` entry points (`ProcessDispatcher` in `include/vector_otel/core/module_runner.hpp`) must wrap processing in `try ... catch` blocks.
+   - All `lua_CFunction` entry points go through `DispatchProcess` (`include/vector_otel/core/process_runner.hpp`), which runs the whole extraction inside one protected region (C++ `try ... catch` plus `lua_pcall`-protected Lua operations) and converts every failure — allocation failure, Lua error, callback error, oversized input — into the error return below. No raising Lua API call may run outside a protected frame.
    - **Success return**: `(integer count, nil)` (pushes count, then `nil`).
    - **Failure return**: `(nil, string error_message, integer partial_count)` (pushes `nil`, error string, then partial count).
    - **Why `nil` first?** In Lua, `0` is truthy (`not 0 == false`). A return of `0` on error would bypass `if not count then` guards. Returning `nil` ensures Lua error checks work correctly.
@@ -120,12 +120,20 @@ Every modification to this repository **must** strictly adhere to the following 
 ├── .gitattributes                      # Binary/text attributes for vendored trees
 ├── include/vector_otel/
 │   ├── core/
+│   │   ├── admission.hpp               # Input admission (2048-record / byte limits, preflight)
 │   │   ├── fast_json_writer.hpp        # Allocation-free JSON serialiser
-│   │   ├── lua_bridge.hpp              # Lua stack management & batch emitter
-│   │   ├── module_runner.hpp           # Shared ProcessDispatcher & package.loaded helper
+│   │   ├── module_runner.hpp           # Active-extraction guard & package.loaded helper
+│   │   ├── module_state.hpp            # Per-Lua-state module anchor (registry slots)
+│   │   ├── operation_context.hpp       # Per-call context: state, limits, error code
 │   │   ├── otlp_common.hpp             # Shared AnyValue decoding & attributes
 │   │   ├── parser.hpp                  # simdjson ondemand & padding manager
-│   │   ├── table_reader.hpp            # Lua table traversal & native timestamp parser
+│   │   ├── process_runner.hpp          # DispatchProcess: the single protected entry path
+│   │   ├── protected_lua.hpp           # lua_pcall-wrapped (non-raising) Lua operations
+│   │   ├── read_keys.hpp               # Compile-time table-read keys
+│   │   ├── row_emitter.hpp             # Row delivery to the emit callback (N=1 / N>1)
+│   │   ├── scratch.hpp                 # Reusable thread_local scratch strings
+│   │   ├── staged_row.hpp              # Allocation-free staged row -> Lua table materialiser
+│   │   ├── table_reader.hpp            # Non-raising Lua table reads & native timestamp parser
 │   │   └── timestamp.hpp               # ISO-8601 nanosecond UTC formatter & RFC-3339 parser
 │   ├── extractors/
 │   │   ├── logs_extractor.hpp          # OTLP logs -> ClickHouse columns
@@ -142,7 +150,8 @@ Every modification to this repository **must** strictly adhere to the following 
 │   ├── module.cpp                      # luaopen_vector_otel & submodule bindings
 │   └── native_module.cpp               # luaopen_vector_native & submodule bindings
 ├── tests/
-│   ├── cpp/                            # GoogleTest C++ test suite
+│   ├── cpp/                            # GoogleTest C++ test suites (unit, fault, worker isolation)
+│   ├── support/                        # Fault allocators, process fixtures, legacy reference oracle
 │   ├── lua/                            # Standalone Lua 5.4 test suite & GC checks
 │   │   ├── run_tests.sh                # Test runner script
 │   │   ├── test_vector_otel.lua        # OTLP functional & 50k-loop leak tests

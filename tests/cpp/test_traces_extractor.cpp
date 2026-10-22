@@ -7,7 +7,7 @@
 #include <string>
 #include <string_view>
 
-#include "vector_otel/core/lua_bridge.hpp"
+#include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/core/timestamp.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
 
@@ -1626,7 +1626,7 @@ TEST_F(TracesExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResourceA
 // Batch mode only: a parse error fails the whole call. Rows still queued (not yet passed to
 // emit) are discarded and must not be counted as emitted.
 TEST_F(TracesExtractorTest, BatchModeParseErrorDiscardsQueuedRows) {
-  if (::vector_otel::core::kCompileTimeBatchSize <= 1) {
+  if (::vector_otel::core::kEmitBatchSize <= 1) {
     GTEST_SKIP() << "requires VECTOR_OTEL_EMIT_BATCH_SIZE > 1";
   }
   ASSERT_EQ(luaL_dostring(L_, R"(

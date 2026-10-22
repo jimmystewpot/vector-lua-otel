@@ -28,7 +28,8 @@ struct ProcRecorder {
   bool dump = false;  // record event text and shared-table identity (allocates)
   int calls = 0;
   int rows = 0;
-  int fail_at_call = -1;    // zero-based call that raises
+  int fail_at_call = -1;         // zero-based call that raises
+  bool fail_with_table = false;  // the raised error value is a table, not a string
   int reenter_result = -1;  // reentrancy probe: 0 = no probe, 1 = inner call returned (nil,msg)
   bool reenter = false;     // the first call re-invokes process() from inside the callback
   std::string reenter_message;
@@ -110,7 +111,11 @@ inline int ProcRecordEmit(lua_State* L) {
   auto* rec = static_cast<ProcRecorder*>(lua_touserdata(L, lua_upvalueindex(1)));
   const int call = rec->calls++;
   if (call == rec->fail_at_call) {
-    lua_pushliteral(L, "boom");
+    if (rec->fail_with_table) {
+      lua_newtable(L);
+    } else {
+      lua_pushliteral(L, "boom");
+    }
     return lua_error(L);
   }
   int rows = 1;

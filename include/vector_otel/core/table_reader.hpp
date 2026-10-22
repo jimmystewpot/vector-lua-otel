@@ -16,8 +16,6 @@ extern "C" {
 
 namespace vector_otel::core {
 
-class LuaEmitter;
-
 // Pushes table[name1] (or table[name2] if name1 is nil, or table[name3] if name2 is nil).
 // Returns true if field was found and is not nil.
 // If nil or not found, pops the nil and returns false.
@@ -139,21 +137,13 @@ std::string ExtractTableServiceName(lua_State* L, int res_idx);
 // is reused; never borrows Lua memory.
 std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::string& scratch);
 
-// Pushes a new flattened key-value table of attributes onto the Lua stack.
-// Handles both OTLP array-of-KeyValue and direct key-value maps.
-// If out_service_name is non-null, captures string "service.name" (or
-// "service_name") in-pass without a second hash lookup.
-void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer,
-                         std::string_view* out_service_name = nullptr);
-
-// Stages the same flattened attributes as PushTableAttributes() into `row`. Reads are raw and
-// allocation-free; the Lua stack is restored on return. Service-name capture matches
-// PushTableAttributes().
+// Stages the flattened attributes (OTLP array-of-KeyValue or a direct key-value map) into `row`.
+// Reads are raw and allocation-free; the Lua stack is restored on return. Service-name capture: the
+// first service.name / service_name string wins.
 //  * StageTableAttributeFields stages the entries as fields of the currently open container (the
 //    row root when none is open) so a tape can be materialised as the attributes table itself;
 //    a non-table stages no fields.
-//  * StageTableAttributes wraps them in a map under `key` (an empty map for a non-table), exactly
-//    the table PushTableAttributes() would have left on the stack.
+//  * StageTableAttributes wraps them in a map under `key` (an empty map for a non-table), .
 void StageTableAttributeFields(StagedRow& row, lua_State* L, int attrs_idx, FastJsonWriter& writer,
                                std::string_view* out_service_name = nullptr);
 void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
@@ -181,11 +171,5 @@ void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& 
 // array). Reads are raw and allocation-free; the Lua stack is restored on return.
 void StageTableExemplars(StagedRow& row, Key key, lua_State* L, int exemplars_idx,
                          FastJsonWriter& writer);
-
-// Pushes an array of Events table for traces onto the Lua stack.
-void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer);
-
-// Pushes an array of Links table for traces onto the Lua stack.
-void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer);
 
 }  // namespace vector_otel::core
