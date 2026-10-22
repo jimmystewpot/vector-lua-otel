@@ -173,6 +173,9 @@ void SerializeSpanEventsValue(simdjson::ondemand::value& events_val, core::FastJ
         // Timestamp
         uint64_t time_nanos = 0;
         auto time_res = ev_obj.find_field_unordered("timeUnixNano");
+        if (time_res.error() != simdjson::SUCCESS) {
+          time_res = ev_obj.find_field_unordered("time_unix_nano");
+        }
         if (time_res.error() == simdjson::SUCCESS) {
           auto tval = time_res.value();
           time_nanos = core::ParseUint64(tval);
@@ -232,15 +235,21 @@ void SerializeSpanLinksValue(simdjson::ondemand::value& links_val, core::FastJso
 
         writer.StartObject();
 
-        std::string_view trace_id = core::ExtractStringField(link_obj, "traceId", "");
+        core::IdHexBuffer link_trace_id_buf;
+        std::string_view raw_trace_id =
+            core::ExtractStringField(link_obj, "traceId", "trace_id", "");
+        std::string_view trace_id = core::NormalizeTraceId(raw_trace_id, link_trace_id_buf);
         writer.Key("TraceId");
         writer.String(trace_id);
 
-        std::string_view span_id = core::ExtractStringField(link_obj, "spanId", "");
+        core::IdHexBuffer link_span_id_buf;
+        std::string_view raw_span_id = core::ExtractStringField(link_obj, "spanId", "span_id", "");
+        std::string_view span_id = core::NormalizeSpanId(raw_span_id, link_span_id_buf);
         writer.Key("SpanId");
         writer.String(span_id);
 
-        std::string_view trace_state = core::ExtractStringField(link_obj, "traceState", "");
+        std::string_view trace_state =
+            core::ExtractStringField(link_obj, "traceState", "trace_state", "");
         writer.Key("TraceState");
         writer.String(trace_state);
 
@@ -544,6 +553,10 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           bool has_span_attrs = false;
           core::ScopedLuaRef span_attrs_scoped(L, LUA_NOREF);
 
+          core::IdHexBuffer trace_id_buf;
+          core::IdHexBuffer span_id_buf;
+          core::IdHexBuffer parent_span_id_buf;
+
           events_writer.Reset();
           links_writer.Reset();
 
@@ -559,17 +572,17 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
             if (k == "traceId" || k == "trace_id") {
               auto s_res = fv.get_string();
               if (s_res.error() == simdjson::SUCCESS) {
-                trace_id = s_res.value();
+                trace_id = core::NormalizeTraceId(s_res.value(), trace_id_buf);
               }
             } else if (k == "spanId" || k == "span_id") {
               auto s_res = fv.get_string();
               if (s_res.error() == simdjson::SUCCESS) {
-                span_id = s_res.value();
+                span_id = core::NormalizeSpanId(s_res.value(), span_id_buf);
               }
             } else if (k == "parentSpanId" || k == "parent_span_id") {
               auto s_res = fv.get_string();
               if (s_res.error() == simdjson::SUCCESS) {
-                parent_span_id = s_res.value();
+                parent_span_id = core::NormalizeSpanId(s_res.value(), parent_span_id_buf);
               }
             } else if (k == "traceState" || k == "trace_state") {
               auto s_res = fv.get_string();
@@ -916,10 +929,12 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
 
             emitter.StartRecord();
             emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
-            core::CopyStringField(L, span_obj_idx, "traceId", "trace_id", emitter, "TraceId");
-            core::CopyStringField(L, span_obj_idx, "spanId", "span_id", emitter, "SpanId");
-            core::CopyStringField(L, span_obj_idx, "parentSpanId", "parent_span_id", emitter,
-                                  "ParentSpanId");
+            core::CopyIdField(L, span_obj_idx, "traceId", "trace_id", core::kTraceIdBinaryLen,
+                              emitter, "TraceId", "TraceId");
+            core::CopyIdField(L, span_obj_idx, "spanId", "span_id", core::kSpanIdBinaryLen, emitter,
+                              "SpanId", "SpanId");
+            core::CopyIdField(L, span_obj_idx, "parentSpanId", "parent_span_id",
+                              core::kSpanIdBinaryLen, emitter, "ParentSpanId", "ParentSpanId");
             core::CopyStringField(L, span_obj_idx, "traceState", "trace_state", emitter,
                                   "TraceState");
             core::CopyStringField(L, span_obj_idx, "name", nullptr, emitter, "SpanName");
@@ -949,7 +964,7 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
             // extractor output)
             writer.Reset();
             if (core::GetTableField(L, span_obj_idx, "events")) {
-              core::SerializeLuaValueToJson(L, -1, writer);
+              core::SerializeTableSpanEventsToJson(L, -1, writer);
               lua_pop(L, 1);
             } else {
               writer.StartArray();
@@ -959,7 +974,7 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
 
             writer.Reset();
             if (core::GetTableField(L, span_obj_idx, "links")) {
-              core::SerializeLuaValueToJson(L, -1, writer);
+              core::SerializeTableSpanLinksToJson(L, -1, writer);
               lua_pop(L, 1);
             } else {
               writer.StartArray();
