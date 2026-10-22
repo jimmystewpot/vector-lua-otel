@@ -164,11 +164,64 @@ bool ParseIso8601ToUnixNano(std::string_view sv, uint64_t& out_ns) noexcept {
     }
 
     const std::string_view tz = sv.substr(pos);
-    if (tz != "Z" && tz != "z" && tz != "+00:00" && tz != "-00:00" && tz != "+0000" &&
-        tz != "-0000") {
+    int64_t offset_secs = 0;
+    if (tz == "Z" || tz == "z") {
+      offset_secs = 0;
+    } else if (!tz.empty() && (tz[0] == '+' || tz[0] == '-')) {
+      const int64_t sign = (tz[0] == '+') ? 1 : -1;
+      int64_t tz_hh = 0;
+      int64_t tz_mm = 0;
+      if (tz.size() == 6 && tz[3] == ':') {
+        if (!parse_fixed_digits(tz.substr(1, 2), tz_hh) ||
+            !parse_fixed_digits(tz.substr(4, 2), tz_mm)) {
+          return false;
+        }
+      } else if (tz.size() == 5) {
+        if (!parse_fixed_digits(tz.substr(1, 2), tz_hh) ||
+            !parse_fixed_digits(tz.substr(3, 2), tz_mm)) {
+          return false;
+        }
+      } else {
+        return false;
+      }
+      if (tz_hh < 0 || tz_hh > 23 || tz_mm < 0 || tz_mm > 59) {
+        return false;
+      }
+      offset_secs = sign * (tz_hh * 3600LL + tz_mm * 60LL);
+    } else {
       return false;
     }
-    return CivilToUnixNano(year, month, day, hour, min, sec, nanosec, out_ns);
+
+    if (offset_secs == 0) {
+      return CivilToUnixNano(year, month, day, hour, min, sec, nanosec, out_ns);
+    }
+
+    if (year < 1969 || year > 2263 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 ||
+        hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 60 || nanosec < 0 ||
+        nanosec > 999'999'999LL) {
+      return false;
+    }
+
+    using namespace std::chrono;
+    const year_month_day ymd{std::chrono::year{static_cast<int>(year)},
+                             std::chrono::month{static_cast<unsigned>(month)},
+                             std::chrono::day{static_cast<unsigned>(day)}};
+    if (!ymd.ok()) {
+      return false;
+    }
+
+    const int64_t days_since_epoch = sys_days{ymd}.time_since_epoch().count();
+    const int64_t local_secs = days_since_epoch * 86400LL + hour * 3600LL + min * 60LL + sec;
+    const int64_t utc_secs = local_secs - offset_secs;
+    constexpr int64_t kMaxUnixSecs =
+        sys_days{std::chrono::year{2262} / 12 / 31}.time_since_epoch().count() * 86400LL +
+        23 * 3600LL + 59 * 60LL + 60LL;
+    if (utc_secs < 0 || utc_secs > kMaxUnixSecs) {
+      return false;
+    }
+
+    out_ns = static_cast<uint64_t>(utc_secs) * 1'000'000'000ULL + static_cast<uint64_t>(nanosec);
+    return true;
   }
 
   uint64_t uval = 0;

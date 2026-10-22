@@ -659,7 +659,7 @@ bool ExtractNativeMetricObjectJson(
     }
     auto fv = fv_res.value();
 
-    if ((k == "metric" || k == "log") && depth == 0 && !has_recognized_field) {
+    if ((k == "metric" || k == "log") && depth == 0) {
       auto t_res = fv.type();
       if (t_res.error() != simdjson::SUCCESS) {
         err_out = std::string(simdjson::error_message(t_res.error()));
@@ -1029,7 +1029,6 @@ bool ExtractNativeMetricObjectJson(
   std::string_view metric_name = raw_name;
   if (!metric_ns.empty() && !raw_name.empty()) {
     tls_metric_name_scratch.clear();
-    tls_metric_name_scratch.reserve(metric_ns.size() + 1 + raw_name.size());
     tls_metric_name_scratch.append(metric_ns);
     tls_metric_name_scratch.push_back('.');
     tls_metric_name_scratch.append(raw_name);
@@ -1583,7 +1582,6 @@ bool ExtractSingleNativeMetricTable(
   if (!metric_ns.empty() && !raw_name.empty()) {
     if (metric_ns.data() != tls_metric_name_scratch.data()) {
       tls_metric_name_scratch.clear();
-      tls_metric_name_scratch.reserve(metric_ns.size() + 1 + raw_name.size());
       tls_metric_name_scratch.append(metric_ns);
     }
     tls_metric_name_scratch.push_back('.');
@@ -1954,6 +1952,15 @@ extractors::ExtractionResult ProcessNativeMetrics(lua_State* L, std::string_view
     static thread_local std::vector<SummaryQuantile> tls_summary_quantiles;
 
     writer.Reset();
+    core::ReserveScratchString(tls_metric_name_scratch);
+    core::ReserveScratchString(tls_service_scratch);
+    core::ReserveScratchString(tls_scope_name_scratch);
+    core::ReserveScratchString(tls_scope_ver_scratch);
+    core::ReserveScratchString(tls_metric_desc_scratch);
+    core::ReserveScratchString(tls_metric_unit_scratch);
+    core::ReserveScratchVector(tls_bucket_counts);
+    core::ReserveScratchVector(tls_explicit_bounds);
+    core::ReserveScratchVector(tls_summary_quantiles);
     struct WriterTrimGuard {
       explicit WriterTrimGuard(core::FastJsonWriter& w_in, std::vector<int64_t>& bc_in,
                                std::vector<double>& eb_in, std::vector<SummaryQuantile>& sq_in)
@@ -2074,6 +2081,15 @@ extractors::ExtractionResult ProcessNativeMetricsTable(lua_State* L, int table_i
   static thread_local std::vector<double> tls_explicit_bounds;
   static thread_local std::vector<SummaryQuantile> tls_summary_quantiles;
   writer.Reset();
+  core::ReserveScratchString(tls_metric_name_scratch);
+  core::ReserveScratchString(tls_service_scratch);
+  core::ReserveScratchString(tls_scope_name_scratch);
+  core::ReserveScratchString(tls_scope_ver_scratch);
+  core::ReserveScratchString(tls_metric_desc_scratch);
+  core::ReserveScratchString(tls_metric_unit_scratch);
+  core::ReserveScratchVector(tls_bucket_counts);
+  core::ReserveScratchVector(tls_explicit_bounds);
+  core::ReserveScratchVector(tls_summary_quantiles);
   struct TableScopeGuard {
     TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w, std::vector<int64_t>& bc_in,
                     std::vector<double>& eb_in, std::vector<SummaryQuantile>& sq_in)

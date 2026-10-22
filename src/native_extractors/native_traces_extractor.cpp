@@ -510,7 +510,7 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
     }
     auto fv = fv_res.value();
 
-    if ((k == "log" || k == "trace") && depth == 0 && !has_recognized_field) {
+    if ((k == "log" || k == "trace") && depth == 0) {
       auto t_res = fv.type();
       if (t_res.error() != simdjson::SUCCESS) {
         err_out = std::string(simdjson::error_message(t_res.error()));
@@ -1422,6 +1422,11 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
   static thread_local std::string tls_status_msg_scratch;
   static thread_local std::string tls_item_scratch;
   writer.Reset();
+  core::ReserveScratchString(tls_service_scratch);
+  core::ReserveScratchString(tls_scope_name_scratch);
+  core::ReserveScratchString(tls_scope_ver_scratch);
+  core::ReserveScratchString(tls_status_msg_scratch);
+  core::ReserveScratchString(tls_item_scratch);
   struct TableScopeGuard {
     TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
     TableScopeGuard(const TableScopeGuard&) = delete;
