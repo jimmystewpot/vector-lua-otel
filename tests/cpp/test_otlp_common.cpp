@@ -2092,5 +2092,57 @@ TEST_F(OtlpCommonTest, PushAttributesTableServiceNameSnakeCase) {
   ResetServiceNameScratch();
 }
 
+TEST_F(OtlpCommonTest, WriteAttributesJson_RetainsSnakeCaseFallbackWhenDotServiceInvalidatedLater) {
+  auto json = R"({
+    "attrs_fallback": [
+      { "key": "service.name", "value": { "stringValue": "first-dot-svc" } },
+      { "key": "service_name", "value": { "stringValue": "fallback-snake-svc" } },
+      { "key": "service.name", "value": { "stringValue": "" } }
+    ],
+    "attrs_both_invalid": [
+      { "key": "service.name", "value": { "stringValue": "first-dot-svc" } },
+      { "key": "service_name", "value": { "stringValue": "fallback-snake-svc" } },
+      { "key": "service_name", "value": { "intValue": 1 } },
+      { "key": "service.name", "value": { "intValue": 2 } }
+    ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  std::string_view svc1 = "unknown_service";
+  auto attrs1 = obj["attrs_fallback"].value();
+  writer_.Reset();
+  WriteAttributesJson(writer_, attrs1, &svc1);
+  EXPECT_EQ(svc1, "fallback-snake-svc");
+
+  std::string_view svc2 = "unknown_service";
+  auto attrs2 = obj["attrs_both_invalid"].value();
+  writer_.Reset();
+  WriteAttributesJson(writer_, attrs2, &svc2);
+  EXPECT_EQ(svc2, "unknown_service");
+
+  ResetServiceNameScratch();
+}
+
+TEST_F(OtlpCommonTest, SerializeExemplarsJson_PreservesInt64PrecisionOnGenericValueAlias) {
+  auto json = R"({
+    "exemplars": [
+      { "value": 9007199254740993 },
+      { "value": "9007199254740993" },
+      { "value": 12.5 },
+      { "value": "12.5" }
+    ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto ex_val = obj["exemplars"].value();
+
+  writer_.Reset();
+  SerializeExemplarsJson(ex_val, writer_);
+  EXPECT_EQ(
+      writer_.Str(),
+      R"([{"FilteredAttributes":{},"TimeUnix":"","Value":9007199254740993,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":9007199254740993,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":12.5,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":12.5,"SpanId":"","TraceId":""}])");
+}
+
 }  // namespace
 }  // namespace vector_otel::core
