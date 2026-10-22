@@ -40,6 +40,9 @@ find_package(Lua 5.4 REQUIRED)
 # rejected (CMP0170 NEW) and shows up as a missing target at link time.
 set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL "" FORCE)
 
+include(cmake/extraction_limits.cmake)
+vector_otel_configure_extraction_limits()
+
 include(cmake/simdjson.cmake)
 include(cmake/googletest.cmake)
 
@@ -60,6 +63,7 @@ add_library(vector_otel_core STATIC
 set_target_properties(vector_otel_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(vector_otel_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated
   ${LUA_INCLUDE_DIR}
 )
 target_link_libraries(vector_otel_core PUBLIC simdjson)
@@ -103,6 +107,7 @@ add_executable(vector_otel_tests
   tests/cpp/test_table_mode.cpp
   tests/cpp/test_scratch.cpp
   tests/cpp/test_native_extractors.cpp
+  tests/cpp/test_extraction_limits.cpp
 )
 target_link_libraries(vector_otel_tests PRIVATE
   vector_otel_core
@@ -110,6 +115,24 @@ target_link_libraries(vector_otel_tests PRIVATE
   GTest::gtest
 )
 add_test(NAME vector_otel_tests COMMAND vector_otel_tests)
+target_compile_definitions(vector_otel_tests PRIVATE
+  VECTOR_OTEL_TEST_EXPECTED_MAX_PAYLOAD_BYTES=${VECTOR_OTEL_MAX_PAYLOAD_BYTES}
+)
+
+# Configure-only tests for the VECTOR_OTEL_MAX_PAYLOAD_BYTES contract. The end-to-end cases
+# re-run configure with the parent build's toolchain/Lua settings ('|' separated pass-through).
+set(_pt "")
+foreach(_v CMAKE_CXX_COMPILER CMAKE_C_COMPILER CMAKE_CXX_FLAGS CMAKE_EXE_LINKER_FLAGS
+           CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS LUA_INCLUDE_DIR LUA_LIBRARY)
+  if(DEFINED ${_v} AND NOT "${${_v}}" STREQUAL "")
+    list(APPEND _pt "-D${_v}=${${_v}}")
+  endif()
+endforeach()
+string(REPLACE ";" "|" _pt "${_pt}")
+add_test(NAME payload_limits
+  COMMAND ${CMAKE_COMMAND} -DPROJECT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          -DTEST_BINARY_ROOT=${CMAKE_BINARY_DIR}/payload_limit_configure "-DPASS_THROUGH=${_pt}"
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_payload_limits.cmake)
 
 # Fault-injection tests. This executable REPLACES the global operator new/delete (see
 # tests/support/fault_new.cpp) so it must never be combined with sanitizers' allocator
