@@ -2929,5 +2929,104 @@ TEST_F(TableModeTest, OtlpTableWrappersLogAndTraceAndMetric) {
   EXPECT_EQ(res_m2.emitted_count, 1);
 }
 
+TEST_F(TableModeTest, WriteTableAttributesJson_CapturesServiceName) {
+  core::FastJsonWriter writer;
+
+  // 1. OTLP array-of-KeyValue: captures first valid string service.name
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { stringValue = "tbl-kv-svc" } },
+      { key = "env", value = { stringValue = "prod" } },
+      { key = "arr", value = { arrayValue = { values = { { stringValue = "x" }, { intValue = 2 } } } } }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc1 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc1);
+  EXPECT_EQ(svc1, "tbl-kv-svc");
+  EXPECT_EQ(writer.Str(), R"({"service.name":"tbl-kv-svc","env":"prod","arr":["x",2]})");
+  lua_pop(L_, 1);
+
+  // 2. Flat Lua map: captures service_name and prefers service.name when both exist
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      ["service.name"] = "dot-svc",
+      ["service_name"] = "snake-svc"
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc2 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc2);
+  EXPECT_EQ(svc2, "dot-svc");
+  lua_pop(L_, 1);
+
+  // 3. Non-string or empty service.name is ignored
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { intValue = 123 } },
+      { key = "service_name", value = "" }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc3 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc3);
+  EXPECT_EQ(svc3, "unknown_service");
+  EXPECT_EQ(writer.Str(), R"({"service.name":123,"service_name":""})");
+  lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest, SerializeTableExemplarsToJson_FullAndMalformed) {
+  core::FastJsonWriter writer;
+
+  // 1. Non-table and empty table serialize to "[]"
+  lua_pushstring(L_, "not_a_table");
+  writer.Reset();
+  core::SerializeTableExemplarsToJson(L_, -1, writer);
+  EXPECT_EQ(writer.Str(), "[]");
+  lua_pop(L_, 1);
+
+  lua_newtable(L_);
+  writer.Reset();
+  core::SerializeTableExemplarsToJson(L_, -1, writer);
+  EXPECT_EQ(writer.Str(), "[]");
+  lua_pop(L_, 1);
+
+  // 2. Full exemplars with binary IDs, asInt/asDouble/value, filteredAttributes, and non-table
+  // elements
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      "skip_non_table",
+      {
+        timeUnixNano = 1700000000123456789,
+        asInt = "99",
+        spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+        traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+        filteredAttributes = {
+          { key = "host", value = { stringValue = "n1" } }
+        }
+      },
+      {
+        TimeUnix = "2026-10-22T00:00:00.000000000Z",
+        asDouble = 2.5,
+        spanId = "00F067AA0BA902B7",
+        traceId = "4BF92F3577B34DA6A3CE929D0E0E4736"
+      },
+      {
+        value = "77",
+        asInt = "bad_int"
+      }
+    }
+  )"),
+            LUA_OK);
+  writer.Reset();
+  core::SerializeTableExemplarsToJson(L_, -1, writer);
+  EXPECT_EQ(
+      writer.Str(),
+      R"([{"FilteredAttributes":{"host":"n1"},"TimeUnix":"2023-11-14T22:13:20.123456789Z","Value":99,"SpanId":"00f067aa0ba902b7","TraceId":"000102030405060708090a0b0c0d0e0f"},{"FilteredAttributes":{},"TimeUnix":"2026-10-22T00:00:00.000000000Z","Value":2.5,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"},{"FilteredAttributes":{},"TimeUnix":"","Value":77,"SpanId":"","TraceId":""}])");
+  lua_pop(L_, 1);
+}
 }  // namespace
 }  // namespace vector_otel

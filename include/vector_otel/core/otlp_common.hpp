@@ -39,6 +39,17 @@ std::string_view ExtractServiceName(simdjson::ondemand::object& resource_obj);
 void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
                          FastJsonWriter& json_writer, std::string_view* out_service_name = nullptr);
 void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer);
+
+namespace otlp_json_adl_barrier {
+void WriteAnyValueJson(FastJsonWriter& writer, simdjson::ondemand::value& val, int depth = 0);
+void WriteAttributesEntriesJson(FastJsonWriter& writer, simdjson::ondemand::value& attrs_val,
+                                std::string_view* out_service_name = nullptr);
+void WriteAttributesJson(FastJsonWriter& writer, simdjson::ondemand::value& attrs_val,
+                         std::string_view* out_service_name = nullptr);
+void SerializeExemplarsJson(simdjson::ondemand::value& val, FastJsonWriter& writer);
+}  // namespace otlp_json_adl_barrier
+using namespace otlp_json_adl_barrier;
+
 int64_t ParseInt64(simdjson::ondemand::value& val);
 bool TryParseInt64(simdjson::ondemand::value& val, int64_t& out);
 int64_t ParseSeverityNumberString(std::string_view sv) noexcept;
