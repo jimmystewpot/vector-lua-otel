@@ -1198,23 +1198,25 @@ TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
 
   ASSERT_EQ(luaL_dostring(L_, R"(
     assert(#emitted_metrics == 4, "expected 4 events, got " .. #emitted_metrics)
+    local h1 = emitted_metrics[1].log
+    assert(h1.Histogram ==
+      '{"aggregationTemporality":2,"AggregationTemporality":2,"count":100,"Count":100,"bucketCounts":[10,30,40,15,5],"BucketCounts":[10,30,40,15,5],"explicitBounds":[5,25,50,100],"ExplicitBounds":[5,25,50,100],"sum":5250,"Sum":5250,"min":1.2,"Min":1.2,"max":250,"Max":250}',
+      "h1.Histogram mismatch: " .. tostring(h1.Histogram))
+    assert(h1.Attributes == '{"http.status_code":200}')
+    assert(h1.Exemplars ==
+      '[{"FilteredAttributes":{},"TimeUnix":"2023-11-14T22:13:20.100000000Z","Value":45.2,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]')
+
     local s = emitted_metrics[3].log.Summary
-    assert(s ~= nil, "Summary sub-table missing")
-    assert(s.count == 42 and s.Count == 42)
-    assert(math.abs(s.sum - 840.5) < 0.001 and math.abs(s.Sum - 840.5) < 0.001)
-    assert(#s.quantileValues == 2)
-    assert(math.abs(s.quantileValues[1].quantile - 0.5) < 0.001)
-    assert(math.abs(s.quantileValues[1].value - 10.0) < 0.001)
+    assert(s ==
+      '{"count":42,"Count":42,"sum":840.5,"Sum":840.5,"quantileValues":[{"quantile":0.5,"Quantile":0.5,"value":10,"Value":10},{"quantile":0.99,"Quantile":0.99,"value":120,"Value":120}],"QuantileValues":[{"quantile":0.5,"Quantile":0.5,"value":10,"Value":10},{"quantile":0.99,"Quantile":0.99,"value":120,"Value":120}]}',
+      "Summary mismatch: " .. tostring(s))
+    assert(emitted_metrics[3].log.Attributes == '{"rpc.method":"GetUser"}')
 
     local eh = emitted_metrics[4].log.ExponentialHistogram
-    assert(eh ~= nil, "ExponentialHistogram sub-table missing")
     assert(emitted_metrics[4].log.AggregationTemporality == 1)
-    assert(eh.aggregationTemporality == 1 and eh.AggregationTemporality == 1)
-    assert(eh.count == 15 and eh.Count == 15)
-    assert(eh.scale == -1 and eh.Scale == -1)
-    assert(eh.zeroCount == 2 and eh.ZeroCount == 2)
-    assert(eh.positive.offset == -2 and #eh.positive.bucketCounts == 3)
-    assert(eh.negative.offset == 0 and #eh.negative.bucketCounts == 0)
+    assert(eh ==
+      '{"aggregationTemporality":1,"AggregationTemporality":1,"count":15,"Count":15,"scale":-1,"Scale":-1,"zeroCount":2,"ZeroCount":2,"zeroThreshold":0,"ZeroThreshold":0,"positive":{"offset":-2,"Offset":-2,"bucketCounts":[3,5,5],"BucketCounts":[3,5,5]},"Positive":{"offset":-2,"Offset":-2,"bucketCounts":[3,5,5],"BucketCounts":[3,5,5]},"negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"sum":75.5,"Sum":75.5}',
+      "ExponentialHistogram mismatch: " .. tostring(eh))
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
@@ -2099,6 +2101,10 @@ TEST_F(TableModeTest, TableModeMetricStringsSurviveInputMutationInEmit) {
       assert(r.MetricName == string.rep("M", 80), "MetricName " .. i .. ": " .. tostring(r.MetricName))
       assert(r.MetricDescription == string.rep("D", 80), "MetricDescription " .. i)
       assert(r.MetricUnit == string.rep("U", 80), "MetricUnit " .. i)
+      assert(type(r.ResourceAttributes) == "string" and r.ResourceAttributes:find('"service.name":"' .. string.rep("S", 80) .. '"', 1, true) ~= nil)
+      assert(r.ScopeAttributes == "{}")
+      assert(r.Attributes == "{}")
+      assert(r.Exemplars == "[]")
     end
   )"),
             LUA_OK)
@@ -2723,7 +2729,8 @@ TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
 
     local m1 = collected_events[5].log
     assert(m1.Value == nil, "invalid asInt must omit Value")
-    assert(m1.Exemplars[1].Value == nil, "invalid exemplar asInt must omit Value")
+    assert(m1.Exemplars == '[{"FilteredAttributes":{},"TimeUnix":"","SpanId":"","TraceId":""}]',
+           "invalid exemplar asInt must omit Value: " .. tostring(m1.Exemplars))
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
