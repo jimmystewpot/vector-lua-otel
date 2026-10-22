@@ -858,8 +858,7 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
         std::string_view scope_version;
         if (core::GetTableField(L, ss_obj_idx, "scope")) {
           int s_idx = lua_absindex(L, -1);
-          scope_name =
-              core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
+          scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
           scope_version =
               core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
           lua_pop(L, 1);

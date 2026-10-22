@@ -627,8 +627,7 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
 
         if (core::GetTableField(L, sl_obj_idx, "scope")) {
           int s_idx = lua_absindex(L, -1);
-          scope_name =
-              core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
+          scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
           scope_version =
               core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
           if (core::GetTableField(L, s_idx, "attributes")) {
@@ -673,9 +672,8 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
                                 emitter, "SpanId", "SpanId");
 
               // 4. TraceFlags
-              emitter.SetInt64(
-                  "TraceFlags",
-                  core::ReadTableInt64(L, rec_obj_idx, "flags", "traceFlags", 0, "trace_flags"));
+              emitter.SetInt64("TraceFlags", core::ReadTableInt64(L, rec_obj_idx, "flags",
+                                                                  "traceFlags", 0, "trace_flags"));
 
               // 5. SeverityText
               core::CopyStringField(L, rec_obj_idx, "severityText", "severity_text", emitter,
