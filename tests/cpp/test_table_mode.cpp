@@ -1200,7 +1200,7 @@ TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
     assert(#emitted_metrics == 4, "expected 4 events, got " .. #emitted_metrics)
     local h1 = emitted_metrics[1].log
     assert(h1.Histogram ==
-      '{"aggregationTemporality":2,"AggregationTemporality":2,"count":100,"Count":100,"bucketCounts":[10,30,40,15,5],"BucketCounts":[10,30,40,15,5],"explicitBounds":[5,25,50,100],"ExplicitBounds":[5,25,50,100],"sum":5250,"Sum":5250,"min":1.2,"Min":1.2,"max":250,"Max":250}',
+      '{"aggregationTemporality":2,"count":100,"sum":5250,"min":1.2,"max":250,"bucketCounts":[10,30,40,15,5],"explicitBounds":[5,25,50,100]}',
       "h1.Histogram mismatch: " .. tostring(h1.Histogram))
     assert(h1.Attributes == '{"http.status_code":200}')
     assert(h1.Exemplars ==
@@ -1208,14 +1208,14 @@ TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
 
     local s = emitted_metrics[3].log.Summary
     assert(s ==
-      '{"count":42,"Count":42,"sum":840.5,"Sum":840.5,"quantileValues":[{"quantile":0.5,"Quantile":0.5,"value":10,"Value":10},{"quantile":0.99,"Quantile":0.99,"value":120,"Value":120}],"QuantileValues":[{"quantile":0.5,"Quantile":0.5,"value":10,"Value":10},{"quantile":0.99,"Quantile":0.99,"value":120,"Value":120}]}',
+      '{"count":42,"sum":840.5,"quantileValues":[{"quantile":0.5,"value":10},{"quantile":0.99,"value":120}]}',
       "Summary mismatch: " .. tostring(s))
     assert(emitted_metrics[3].log.Attributes == '{"rpc.method":"GetUser"}')
 
     local eh = emitted_metrics[4].log.ExponentialHistogram
     assert(emitted_metrics[4].log.AggregationTemporality == 1)
     assert(eh ==
-      '{"aggregationTemporality":1,"AggregationTemporality":1,"count":15,"Count":15,"scale":-1,"Scale":-1,"zeroCount":2,"ZeroCount":2,"zeroThreshold":0,"ZeroThreshold":0,"positive":{"offset":-2,"Offset":-2,"bucketCounts":[3,5,5],"BucketCounts":[3,5,5]},"Positive":{"offset":-2,"Offset":-2,"bucketCounts":[3,5,5],"BucketCounts":[3,5,5]},"negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"sum":75.5,"Sum":75.5}',
+      '{"aggregationTemporality":1,"count":15,"sum":75.5,"scale":-1,"zeroCount":2,"zeroThreshold":0,"positive":{"offset":-2,"bucketCounts":[3,5,5]},"negative":{"offset":0,"bucketCounts":[]}}',
       "ExponentialHistogram mismatch: " .. tostring(eh))
   )"),
             LUA_OK)
