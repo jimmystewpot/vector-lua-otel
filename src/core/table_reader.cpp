@@ -147,29 +147,7 @@ bool GetTableFieldRaw(lua_State* L, int table_idx, const char* name1, const char
 
 bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2,
                    const char* name3) {
-  int abs_idx = lua_absindex(L, table_idx);
-  if (name1 != nullptr) {
-    lua_getfield(L, abs_idx, name1);
-    if (!lua_isnil(L, -1)) {
-      return true;
-    }
-    lua_pop(L, 1);
-  }
-  if (name2 != nullptr) {
-    lua_getfield(L, abs_idx, name2);
-    if (!lua_isnil(L, -1)) {
-      return true;
-    }
-    lua_pop(L, 1);
-  }
-  if (name3 != nullptr) {
-    lua_getfield(L, abs_idx, name3);
-    if (!lua_isnil(L, -1)) {
-      return true;
-    }
-    lua_pop(L, 1);
-  }
-  return false;
+  return GetTableFieldRaw(L, table_idx, name1, name2, name3);
 }
 
 std::string ReadTableString(lua_State* L, int table_idx, const char* name1, const char* name2,
