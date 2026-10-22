@@ -54,6 +54,7 @@ add_library(vector_otel_core STATIC
   src/extractors/traces_extractor.cpp
   src/extractors/metrics_extractor.cpp
   src/native_extractors/native_logs_extractor.cpp
+  src/native_extractors/native_traces_extractor.cpp
 )
 set_target_properties(vector_otel_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(vector_otel_core PUBLIC
