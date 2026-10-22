@@ -1769,6 +1769,336 @@ TEST_F(NativeExtractorsTest, TracesArrayWrapperBatch) {
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(NativeExtractorsTest, MetricsSummaryQuantileObjectsAndFlatArrays) {
+  // 1. Table mode with object quantiles
+  const char* script1 = R"(
+    return {
+      metric = {
+        name = "http.latency.summary",
+        kind = "aggregated_summary",
+        timestamp = "2026-10-22T10:00:00.000000000Z",
+        aggregated_summary = {
+          count = 100,
+          sum = 5000.0,
+          quantiles = {
+            { quantile = 0.5, value = 40.0 },
+            { quantile = 0.99, value = 120.0 }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script1), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx1 = lua_gettop(L_);
+  auto res1 = ProcessNativeMetricsTable(L_, table_idx1, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 1);
+
+  // 2. Table mode with flat quantiles
+  const char* script2 = R"(
+    return {
+      metric = {
+        name = "flat.quantiles.summary",
+        kind = "aggregated_summary",
+        aggregated_summary = {
+          count = 10,
+          sum = 100.0,
+          quantiles = { 0.5, 0.9 },
+          values = { 5.0, 95.0 }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script2), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx2 = lua_gettop(L_);
+  auto res2 = ProcessNativeMetricsTable(L_, table_idx2, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  // 3. JSON mode with object quantiles
+  std::string json = R"({
+    "metric": {
+      "name": "json.summary",
+      "kind": "aggregated_summary",
+      "aggregated_summary": {
+        "count": 50,
+        "sum": 250.0,
+        "quantiles": [
+          {"quantile": 0.5, "value": 5.0},
+          {"quantile": 0.95, "value": 15.0}
+        ]
+      }
+    }
+  })";
+  auto res3 = ProcessNativeMetrics(L_, json, emit_idx_);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 3, "Expected 3 emitted events, got " .. #emitted)
+    local r1 = emitted[1].log
+    assert(r1.Summary ~= nil, "r1.Summary table missing")
+    assert(r1.Summary.Count == 100, "r1.Summary.Count mismatch: " .. tostring(r1.Summary.Count))
+    assert(r1.Summary.Sum == 5000.0, "r1.Summary.Sum mismatch")
+    assert(#r1.Summary.QuantileValues == 2, "r1.Summary.QuantileValues count mismatch: " .. #r1.Summary.QuantileValues)
+    assert(math.abs(r1.Summary.QuantileValues[1].Quantile - 0.5) < 1e-6, "Quantile[1] mismatch")
+    assert(math.abs(r1.Summary.QuantileValues[1].Value - 40.0) < 1e-6, "Value[1] mismatch")
+    assert(math.abs(r1.Summary.QuantileValues[2].Quantile - 0.99) < 1e-6, "Quantile[2] mismatch")
+    assert(math.abs(r1.Summary.QuantileValues[2].Value - 120.0) < 1e-6, "Value[2] mismatch")
+
+    local r2 = emitted[2].log
+    assert(r2.Summary.Count == 10, "r2.Summary.Count mismatch")
+    assert(#r2.Summary.QuantileValues == 2, "r2.Summary.QuantileValues count mismatch")
+    assert(math.abs(r2.Summary.QuantileValues[2].Value - 95.0) < 1e-6, "r2 Value[2] mismatch")
+
+    local r3 = emitted[3].log
+    assert(r3.Summary.Count == 50, "r3.Summary.Count mismatch")
+    assert(#r3.Summary.QuantileValues == 2, "r3.Summary.QuantileValues count mismatch")
+    assert(math.abs(r3.Summary.QuantileValues[2].Value - 15.0) < 1e-6, "r3 Value[2] mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsJsonScopeAndResourceAttributes) {
+  // Test JSON with resource, scope, and typed tags (int, double, bool, object)
+  std::string json = R"({
+    "metric": {
+      "name": "system.cpu.load",
+      "kind": "gauge",
+      "gauge": {"value": 1.75},
+      "resources": {
+        "service.name": "custom-srv",
+        "host.name": "host-42"
+      },
+      "scope": {
+        "name": "system.metrics",
+        "version": "1.0.1",
+        "attributes": {
+          "scope_lib": "cpu_watcher"
+        }
+      },
+      "tags": {
+        "cpu_core": 4,
+        "load_ratio": 0.875,
+        "is_idle": false,
+        "extra_info": {"model": "x86"}
+      }
+    }
+  })";
+  auto res = ProcessNativeMetrics(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 1, "Expected 1 emitted event")
+    local r = emitted[1].log
+    assert(r.MetricName == "system.cpu.load", "MetricName mismatch")
+    assert(r.ServiceName == "custom-srv", "ServiceName mismatch")
+    assert(r.ScopeName == "system.metrics", "ScopeName mismatch")
+    assert(r.ScopeVersion == "1.0.1", "ScopeVersion mismatch")
+    assert(r.ResourceAttributes["service.name"] == "custom-srv", "ResourceAttributes service.name mismatch")
+    assert(r.ResourceAttributes["host.name"] == "host-42", "ResourceAttributes host.name mismatch")
+    assert(r.Attributes.cpu_core == 4, "Attributes.cpu_core mismatch")
+    assert(math.abs(r.Attributes.load_ratio - 0.875) < 1e-6, "Attributes.load_ratio mismatch")
+    assert(r.Attributes.is_idle == false, "Attributes.is_idle mismatch")
+    assert(r.Attributes.extra_info:find('"model"') ~= nil and r.Attributes.extra_info:find('"x86"') ~= nil, "Attributes.extra_info mismatch: " .. tostring(r.Attributes.extra_info))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsSpecialFloatValuesAndHistogramBounds) {
+  // 1. Test string numbers in table mode
+  const char* script = R"(
+    return {
+      {
+        name = "int.string.gauge",
+        kind = "gauge",
+        gauge = { value = "42" }
+      },
+      {
+        name = "double.string.gauge",
+        kind = "gauge",
+        gauge = { value = "3.14159" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res1 = ProcessNativeMetricsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 2);
+
+  // 2. Test JSON histogram with string explicit bounds: NaN, Infinity, -Infinity (filtered out by TryParseJsonFiniteBound)
+  std::string json_hist = R"({
+    "name": "hist.with.special.bounds",
+    "kind": "aggregated_histogram",
+    "aggregated_histogram": {
+      "count": 10,
+      "sum": 55.0,
+      "bucket_counts": [2, 3, 5],
+      "explicit_bounds": [1.0, "Infinity", 5.0, "NaN", "+Infinity", 10.0]
+    }
+  })";
+  auto res2 = ProcessNativeMetrics(L_, json_hist, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 3, "Expected 3 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Value == 42, "emitted[1].log.Value mismatch")
+    assert(math.abs(emitted[2].log.Value - 3.14159) < 1e-5, "emitted[2].log.Value mismatch")
+
+    local h = emitted[3].log.Histogram
+    assert(h ~= nil, "Histogram table missing")
+    assert(h.Count == 10, "Histogram Count mismatch")
+    -- The finite bounds must only include 1.0, 5.0, 10.0 (Infinity, NaN, +Infinity filtered)
+    assert(#h.ExplicitBounds == 3, "ExplicitBounds count mismatch: " .. #h.ExplicitBounds)
+    assert(math.abs(h.ExplicitBounds[1] - 1.0) < 1e-6)
+    assert(math.abs(h.ExplicitBounds[2] - 5.0) < 1e-6)
+    assert(math.abs(h.ExplicitBounds[3] - 10.0) < 1e-6)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+
+  // 3. Table mode with resource, scope, and float counter
+  const char* script_scope = R"(
+    return {
+      name = "table.scoped.counter",
+      kind = "counter",
+      counter = { value = 15.5 },
+      resource = {
+        attributes = {
+          ["service.name"] = "table-metric-svc",
+          cluster = "eu-west-1"
+        }
+      },
+      scope = {
+        name = "meter.lib",
+        version = "3.2.1",
+        attributes = {
+          scope_tag = "prod"
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_scope), LUA_OK) << lua_tostring(L_, -1);
+  int scope_tbl_idx = lua_gettop(L_);
+  auto res3 = ProcessNativeMetricsTable(L_, scope_tbl_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 1);
+
+  // 4. JSON mode array wrapper with top-level attributes
+  std::string json_wrapped_metrics = R"({
+    "metric": [
+      {
+        "name": "arr.gauge.1",
+        "kind": "gauge",
+        "gauge": {"value": 10},
+        "attributes": {"attr_k": "attr_v"}
+      },
+      {
+        "name": "arr.gauge.2",
+        "kind": "gauge",
+        "gauge": {"value": 20}
+      }
+    ]
+  })";
+  auto res4 = ProcessNativeMetrics(L_, json_wrapped_metrics, emit_idx_);
+  EXPECT_TRUE(res4.success) << res4.error;
+  EXPECT_EQ(res4.emitted_count, 2);
+
+  // 5. JSON mode histogram with string and uint bucket counts
+  std::string json_hist_types = R"({
+    "name": "hist.types",
+    "kind": "aggregated_histogram",
+    "aggregated_histogram": {
+      "count": 3,
+      "sum": 12.0,
+      "bucket_counts": [1, "2"],
+      "explicit_bounds": ["2.5", 5.0]
+    }
+  })";
+  auto res5 = ProcessNativeMetrics(L_, json_hist_types, emit_idx_);
+  EXPECT_TRUE(res5.success) << res5.error;
+  EXPECT_EQ(res5.emitted_count, 1);
+
+  const char* verify_more = R"(
+    assert(#emitted == 7, "Expected 7 emitted events, got " .. #emitted)
+    local r4 = emitted[4].log
+    assert(r4.MetricName == "table.scoped.counter", "r4 MetricName mismatch")
+    assert(r4.ServiceName == "table-metric-svc", "r4 ServiceName mismatch")
+    assert(r4.ScopeName == "meter.lib", "r4 ScopeName mismatch")
+    assert(r4.ScopeVersion == "3.2.1", "r4 ScopeVersion mismatch")
+    assert(math.abs(r4.Value - 15.5) < 1e-6, "r4 Value mismatch")
+    assert(r4.ResourceAttributes["service.name"] == "table-metric-svc", "r4 ResourceAttributes mismatch")
+
+    local r5 = emitted[5].log
+    assert(r5.MetricName == "arr.gauge.1", "r5 MetricName mismatch")
+    assert(r5.Attributes.attr_k == "attr_v", "r5 Attributes mismatch")
+
+    local r6 = emitted[6].log
+    assert(r6.MetricName == "arr.gauge.2", "r6 MetricName mismatch")
+
+    local r7 = emitted[7].log
+    assert(r7.Histogram.Count == 3, "r7 Histogram Count mismatch")
+    assert(#r7.Histogram.BucketCounts == 2, "r7 BucketCounts length mismatch")
+    assert(r7.Histogram.BucketCounts[2] == 2, "r7 string bucket count parsed mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_more), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsZeroBucketCountsAndNonOtlpExclusions) {
+  // 1. Aggregated histogram with empty bucket counts
+  const char* script = R"(
+    return {
+      name = "hist.empty.buckets",
+      kind = "aggregated_histogram",
+      aggregated_histogram = {
+        count = 0,
+        sum = 0.0,
+        bucket_counts = {},
+        explicit_bounds = {}
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res1 = ProcessNativeMetricsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 1);
+
+  // 2. Non-OTLP metric variants (distribution, set, sketch) in table mode
+  const char* script_unsupported = R"(
+    return {
+      name = "dist.metric",
+      kind = "distribution",
+      distribution = {
+        samples = { 1.0, 2.0 }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_unsupported), LUA_OK) << lua_tostring(L_, -1);
+  int bad_tbl_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeMetricsTable(L_, bad_tbl_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_FALSE(res2.success);
+  EXPECT_NE(res2.error.find("Unsupported non-OTLP metric variant 'distribution'"), std::string::npos);
+
+  // 3. Non-OTLP metric variants in JSON mode
+  std::string json_sketch = R"({
+    "name": "sketch.metric",
+    "kind": "sketch",
+    "sketch": {"bins": []}
+  })";
+  auto res3 = ProcessNativeMetrics(L_, json_sketch, emit_idx_);
+  EXPECT_FALSE(res3.success);
+  EXPECT_NE(res3.error.find("Unsupported non-OTLP metric variant 'sketch'"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace native_extractors
 }  // namespace vector_otel
