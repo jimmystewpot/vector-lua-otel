@@ -227,6 +227,7 @@ TEST(StagedRowBuilderTest, CopiesStringsAndRetainsCapacityAcrossRows) {
   row.Str("name", scratch);
   row.Str(Key::Dynamic(scratch), "dyn");
   std::memset(scratch, 'Z', 9);
+  EXPECT_EQ(scratch[0], 'Z');  // caller buffer really was overwritten after staging
   ASSERT_EQ(row.node_count(), 2u);
   const auto* nodes = row.nodes();
   EXPECT_EQ(std::string(row.arena() + nodes[0].str_off, nodes[0].str_len), "service-a");
