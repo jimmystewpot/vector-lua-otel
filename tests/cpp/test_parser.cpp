@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <string_view>
@@ -10,6 +11,7 @@
 #include <sys/mman.h>
 #endif
 
+#include "vector_otel/core/config.hpp"
 #include "vector_otel/core/parser.hpp"
 
 namespace vector_otel::core {
@@ -115,8 +117,8 @@ TEST(OtelParserTest, MultiPassThreadLocalReuseNoRealloc) {
   ASSERT_EQ(doc1["counter"].get_int64().get(c1), simdjson::SUCCESS);
   EXPECT_EQ(c1, 1);
 
-  const char* initial_buf_ptr = OtelParser::ThreadLocalBufferData();
-  size_t initial_cap = OtelParser::ThreadLocalBufferCapacity();
+  const char* initial_buf_ptr = parser.InputData();
+  size_t initial_cap = parser.InputCapacity();
   ASSERT_NE(initial_buf_ptr, nullptr);
   ASSERT_GE(initial_cap, p1.size() + simdjson::SIMDJSON_PADDING);
 
@@ -131,8 +133,8 @@ TEST(OtelParserTest, MultiPassThreadLocalReuseNoRealloc) {
     EXPECT_EQ(counter, i);
 
     // Verify pointer and capacity did not change (0 reallocations)
-    EXPECT_EQ(OtelParser::ThreadLocalBufferData(), initial_buf_ptr);
-    EXPECT_EQ(OtelParser::ThreadLocalBufferCapacity(), initial_cap);
+    EXPECT_EQ(parser.InputData(), initial_buf_ptr);
+    EXPECT_EQ(parser.InputCapacity(), initial_cap);
   }
 }
 
@@ -156,7 +158,7 @@ TEST(OtelParserTest, MultiThreadIsolation) {
         ASSERT_EQ(doc["thread_id"].get_int64().get(thread_id), simdjson::SUCCESS);
         EXPECT_EQ(thread_id, t);
       }
-      thread_buffers[t] = OtelParser::ThreadLocalBufferData();
+      thread_buffers[t] = local_parser.InputData();
       ASSERT_NE(thread_buffers[t], nullptr);
 
       threads_ready.fetch_add(1, std::memory_order_release);
@@ -222,7 +224,7 @@ TEST_F(ParserTest, PaddedStringViewIterateDoesNotSlice) {
 }
 
 TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
-  EXPECT_EQ(core::OtelParser::kMaxPayloadSize, 512 * 1024 * 1024);
+  EXPECT_EQ(core::OtelParser::kMaxPayloadSize, core::kMaxPayloadBytes);
 
   core::OtelParser parser;
 
@@ -266,26 +268,24 @@ TEST_F(ParserTest, OversizedPayloadReturnsCapacityError) {
 #endif
 }
 
-TEST_F(ParserTest, TrimThreadLocalBufferReclaimsMemory) {
-  core::OtelParser parser;
-  std::string large_json(17 * 1024 * 1024, ' ');
-  large_json.front() = '[';
-  large_json.back() = ']';
-  auto res = parser.Iterate(large_json);
-  EXPECT_GE(core::OtelParser::ThreadLocalBufferCapacity(), 17 * 1024 * 1024);
-  core::OtelParser::TrimThreadLocalBuffer();
-  EXPECT_LT(core::OtelParser::ThreadLocalBufferCapacity(), 17 * 1024 * 1024);
-}
-
-TEST_F(ParserTest, SharedInstanceTrimsParserCapacityAboveThreshold) {
+TEST_F(ParserTest, TrimKeepsThePreparedWorkspaceAfterLargeInput) {
   auto& parser = core::OtelParser::Instance();
-  std::string large_json = R"({"key":")" + std::string(17 * 1024 * 1024, 'x') + R"("})";
-  auto doc_res = parser.Iterate(std::string_view(large_json));
-  ASSERT_EQ(doc_res.error(), simdjson::SUCCESS);
-  EXPECT_GT(parser.Capacity(), core::OtelParser::kMaxRetainedBufferCapacity);
+  const std::size_t n = std::min<std::size_t>(core::kMaxPayloadBytes, 17 * 1024 * 1024);
+  std::string large_json(n, ' ');
+  large_json.front() = (n == 1) ? '1' : '[';
+  large_json.back() = (n == 1) ? '1' : ']';
+  ASSERT_EQ(parser.Iterate(large_json).error(), simdjson::SUCCESS);
+  const char* input = parser.InputData();
+  const std::size_t input_capacity = parser.InputCapacity();
+  const std::size_t capacity = parser.Capacity();
+  ASSERT_NE(input, nullptr);
 
   core::OtelParser::TrimThreadLocalBuffer();
-  EXPECT_LE(parser.Capacity(), core::OtelParser::kMaxRetainedBufferCapacity);
+  parser.TrimCapacity();
+
+  EXPECT_EQ(parser.InputData(), input);
+  EXPECT_EQ(parser.InputCapacity(), input_capacity);
+  EXPECT_EQ(parser.Capacity(), capacity);
 }
 
 }  // namespace vector_otel::core

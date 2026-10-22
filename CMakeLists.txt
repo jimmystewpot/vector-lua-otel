@@ -142,6 +142,7 @@ add_executable(vector_otel_fault_tests
   tests/cpp/test_fault_harness.cpp
   tests/cpp/test_lua_fault_harness.cpp
   tests/cpp/test_contract_fixtures.cpp
+  tests/cpp/test_parser_workspace.cpp
   src/module.cpp
   src/native_module.cpp
   tests/support/fault_new.cpp
