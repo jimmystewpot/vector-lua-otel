@@ -26,6 +26,9 @@ struct alignas(64) OverAligned {
   char bytes[64];
 };
 
+// Named constant (rather than a braced temporary) so every clang-format version agrees on layout.
+constexpr std::align_val_t kAlign64 = static_cast<std::align_val_t>(64);
+
 TEST(CppFaultHarness, DisabledOutsideAnyScopeNeverFails) {
   void* p = ::operator new(16, std::nothrow);
   Escape(p);
@@ -135,15 +138,15 @@ TEST(CppFaultHarness, ArrayFormsAreInterceptedAndPairWithArrayDelete) {
 
 TEST(CppFaultHarness, AlignedFormsAreInterceptedAndHonourAlignment) {
   // Outside any scope: real aligned allocation, correct alignment, paired deletes.
-  void* ok = ::operator new(256, std::align_val_t{64}, std::nothrow);
+  void* ok = ::operator new(256, kAlign64, std::nothrow);
   Escape(ok);
   ASSERT_NE(ok, nullptr);
   EXPECT_EQ(reinterpret_cast<std::uintptr_t>(ok) % 64, 0u);
-  ::operator delete(ok, std::align_val_t{64});
-  void* ok_arr = ::operator new[](256, std::align_val_t{64}, std::nothrow);
+  ::operator delete(ok, kAlign64);
+  void* ok_arr = ::operator new[](256, kAlign64, std::nothrow);
   Escape(ok_arr);
   ASSERT_NE(ok_arr, nullptr);
-  ::operator delete[](ok_arr, 256, std::align_val_t{64});
+  ::operator delete[](ok_arr, kAlign64);
 
   // Over-aligned new-expression is routed through the aligned operator.
   auto* typed = new (std::nothrow) OverAligned;
@@ -159,11 +162,11 @@ TEST(CppFaultHarness, AlignedFormsAreInterceptedAndHonourAlignment) {
   CppFaultStats stats;
   {
     CppFaultScope scope(CppFaultMode::kPersistent, 0);
-    nothrow_single = ::operator new(256, std::align_val_t{64}, std::nothrow);
-    nothrow_array = ::operator new[](256, std::align_val_t{64}, std::nothrow);
+    nothrow_single = ::operator new(256, kAlign64, std::nothrow);
+    nothrow_array = ::operator new[](256, kAlign64, std::nothrow);
     typed_denied = new (std::nothrow) OverAligned;
     try {
-      Escape(::operator new(256, std::align_val_t{64}));
+      Escape(::operator new(256, kAlign64));
     } catch (const std::bad_alloc&) {
       threw = true;
     }
