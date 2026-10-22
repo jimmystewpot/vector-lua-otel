@@ -110,8 +110,10 @@ bool ParseLuaStringDouble(lua_State* L, int idx, double& out) {
   return false;
 }
 
-bool GetTableFieldRaw(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,
-                      const char* name3 = nullptr) {
+}  // namespace
+
+bool GetTableFieldRaw(lua_State* L, int table_idx, const char* name1, const char* name2,
+                      const char* name3) {
   int abs_idx = lua_absindex(L, table_idx);
   if (!lua_istable(L, abs_idx)) {
     return false;
@@ -142,8 +144,6 @@ bool GetTableFieldRaw(lua_State* L, int table_idx, const char* name1, const char
   }
   return false;
 }
-
-}  // namespace
 
 bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2,
                    const char* name3) {
@@ -434,6 +434,82 @@ uint64_t ReadTableTimestampNano(lua_State* L, int rec_idx) {
     t_ns = ReadTableUint64(L, rec_idx, "observedTimeUnixNano", "observed_time_unix_nano", 0);
   }
   return t_ns;
+}
+
+bool ReadLuaTimestampValue(lua_State* L, int val_idx, uint64_t& out_ns) noexcept {
+  if (L == nullptr) {
+    return false;
+  }
+  int abs_idx = lua_absindex(L, val_idx);
+  int t = lua_type(L, abs_idx);
+  if (t == LUA_TTABLE) {
+    auto read_int_field = [&](const char* key, int64_t& out_v, bool required) noexcept -> bool {
+      if (!GetTableFieldRaw(L, abs_idx, key)) {
+        return !required;
+      }
+      bool ok = false;
+      if (lua_isinteger(L, -1)) {
+        out_v = static_cast<int64_t>(lua_tointeger(L, -1));
+        ok = true;
+      } else if (lua_type(L, -1) == LUA_TNUMBER) {
+        ok = LuaFloatToInt64(lua_tonumber(L, -1), out_v);
+      } else if (lua_type(L, -1) == LUA_TSTRING) {
+        ok = ParseLuaStringInt64(L, -1, out_v);
+      }
+      lua_pop(L, 1);
+      return ok;
+    };
+    int64_t year = 0;
+    int64_t month = 0;
+    int64_t day = 0;
+    int64_t hour = 0;
+    int64_t min = 0;
+    int64_t sec = 0;
+    int64_t nanosec = 0;
+    if (!read_int_field("year", year, true) || !read_int_field("month", month, true) ||
+        !read_int_field("day", day, true)) {
+      return false;
+    }
+    if (!read_int_field("hour", hour, false) || !read_int_field("min", min, false) ||
+        !read_int_field("sec", sec, false) || !read_int_field("nanosec", nanosec, false)) {
+      return false;
+    }
+    return CivilToUnixNano(year, month, day, hour, min, sec, nanosec, out_ns);
+  }
+  if (t == LUA_TSTRING) {
+    size_t len = 0;
+    const char* s = lua_tolstring(L, abs_idx, &len);
+    if (s == nullptr) {
+      return false;
+    }
+    return ParseIso8601ToUnixNano(std::string_view(s, len), out_ns);
+  }
+  if (t == LUA_TNUMBER) {
+    if (lua_isinteger(L, abs_idx)) {
+      lua_Integer iv = lua_tointeger(L, abs_idx);
+      if (iv < 0) {
+        return false;
+      }
+      out_ns = static_cast<uint64_t>(iv);
+      return true;
+    }
+    double d = lua_tonumber(L, abs_idx);
+    return LuaFloatToUint64(d, out_ns);
+  }
+  return false;
+}
+
+bool ReadTableTimestampField(lua_State* L, int table_idx, const char* name1, const char* name2,
+                             uint64_t& out_ns) noexcept {
+  if (L == nullptr) {
+    return false;
+  }
+  if (!GetTableFieldRaw(L, table_idx, name1, name2)) {
+    return false;
+  }
+  const bool ok = ReadLuaTimestampValue(L, -1, out_ns);
+  lua_pop(L, 1);
+  return ok;
 }
 
 constexpr int kMaxLuaJsonDepth = 16;
