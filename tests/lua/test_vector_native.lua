@@ -1,7 +1,10 @@
 -- test_vector_native.lua
 -- Standalone Lua 5.4 Test Suite & GC Stability for vector_native
 
-if not package.cpath:find("build/%?%.so") then
+local build_dir = os.getenv("BUILD_DIR")
+if build_dir and #build_dir > 0 then
+  package.cpath = build_dir .. "/?.so;" .. package.cpath
+elseif not package.cpath:find("build/%?%.so") then
   package.cpath = "build/?.so;../build/?.so;../../build/?.so;" .. package.cpath
 end
 
