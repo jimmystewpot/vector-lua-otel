@@ -262,36 +262,22 @@ void SerializeHistogramJson(core::FastJsonWriter& w, int64_t agg_temporality, ui
   w.StartObject();
   w.Key("aggregationTemporality");
   w.Int64(agg_temporality);
-  w.Key("AggregationTemporality");
-  w.Int64(agg_temporality);
   w.Key("count");
   w.Uint64(count);
-  w.Key("Count");
-  w.Uint64(count);
-  w.Key("bucketCounts");
-  WriteUint64Array(w, bucket_counts);
-  w.Key("BucketCounts");
-  WriteUint64Array(w, bucket_counts);
-  w.Key("explicitBounds");
-  WriteDoubleArray(w, explicit_bounds);
-  w.Key("ExplicitBounds");
-  WriteDoubleArray(w, explicit_bounds);
   w.Key("sum");
-  w.Double(has_sum ? sum : 0.0);
-  w.Key("Sum");
   w.Double(has_sum ? sum : 0.0);
   if (has_min) {
     w.Key("min");
-    w.Double(min_val);
-    w.Key("Min");
     w.Double(min_val);
   }
   if (has_max) {
     w.Key("max");
     w.Double(max_val);
-    w.Key("Max");
-    w.Double(max_val);
   }
+  w.Key("bucketCounts");
+  WriteUint64Array(w, bucket_counts);
+  w.Key("explicitBounds");
+  WriteDoubleArray(w, explicit_bounds);
   w.EndObject();
 }
 
@@ -300,11 +286,7 @@ void SerializeExpBucketsSubObject(core::FastJsonWriter& w, int64_t offset,
   w.StartObject();
   w.Key("offset");
   w.Int64(offset);
-  w.Key("Offset");
-  w.Int64(offset);
   w.Key("bucketCounts");
-  WriteUint64Array(w, bucket_counts);
-  w.Key("BucketCounts");
   WriteUint64Array(w, bucket_counts);
   w.EndObject();
 }
@@ -320,50 +302,30 @@ void SerializeExponentialHistogramJson(core::FastJsonWriter& w, int64_t agg_temp
   w.StartObject();
   w.Key("aggregationTemporality");
   w.Int64(agg_temporality);
-  w.Key("AggregationTemporality");
-  w.Int64(agg_temporality);
   w.Key("count");
   w.Uint64(count);
-  w.Key("Count");
-  w.Uint64(count);
-  w.Key("scale");
-  w.Int64(scale);
-  w.Key("Scale");
-  w.Int64(scale);
-  w.Key("zeroCount");
-  w.Uint64(zero_count);
-  w.Key("ZeroCount");
-  w.Uint64(zero_count);
-  w.Key("zeroThreshold");
-  w.Double(zero_threshold);
-  w.Key("ZeroThreshold");
-  w.Double(zero_threshold);
-  w.Key("positive");
-  SerializeExpBucketsSubObject(w, pos_offset, pos_buckets);
-  w.Key("Positive");
-  SerializeExpBucketsSubObject(w, pos_offset, pos_buckets);
-  w.Key("negative");
-  SerializeExpBucketsSubObject(w, neg_offset, neg_buckets);
-  w.Key("Negative");
-  SerializeExpBucketsSubObject(w, neg_offset, neg_buckets);
   if (has_sum) {
     w.Key("sum");
-    w.Double(sum);
-    w.Key("Sum");
     w.Double(sum);
   }
   if (has_min) {
     w.Key("min");
     w.Double(min_val);
-    w.Key("Min");
-    w.Double(min_val);
   }
   if (has_max) {
     w.Key("max");
     w.Double(max_val);
-    w.Key("Max");
-    w.Double(max_val);
   }
+  w.Key("scale");
+  w.Int64(scale);
+  w.Key("zeroCount");
+  w.Uint64(zero_count);
+  w.Key("zeroThreshold");
+  w.Double(zero_threshold);
+  w.Key("positive");
+  SerializeExpBucketsSubObject(w, pos_offset, pos_buckets);
+  w.Key("negative");
+  SerializeExpBucketsSubObject(w, neg_offset, neg_buckets);
   w.EndObject();
 }
 
@@ -374,11 +336,7 @@ void WriteQuantilesArray(core::FastJsonWriter& w,
     w.StartObject();
     w.Key("quantile");
     w.Double(quantiles[i].first);
-    w.Key("Quantile");
-    w.Double(quantiles[i].first);
     w.Key("value");
-    w.Double(quantiles[i].second);
-    w.Key("Value");
     w.Double(quantiles[i].second);
     w.EndObject();
   }
@@ -391,15 +349,9 @@ void SerializeSummaryJson(core::FastJsonWriter& w, uint64_t count, bool has_sum,
   w.StartObject();
   w.Key("count");
   w.Uint64(count);
-  w.Key("Count");
-  w.Uint64(count);
   w.Key("sum");
   w.Double(has_sum ? sum : 0.0);
-  w.Key("Sum");
-  w.Double(has_sum ? sum : 0.0);
   w.Key("quantileValues");
-  WriteQuantilesArray(w, quantiles);
-  w.Key("QuantileValues");
   WriteQuantilesArray(w, quantiles);
   w.EndObject();
 }

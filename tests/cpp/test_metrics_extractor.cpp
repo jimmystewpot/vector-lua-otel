@@ -135,7 +135,7 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e4.Value == nil, "e4 Value must be nil for histogram")
     assert(e4.Attributes == '{"method":"POST"}', "e4 Attributes method mismatch: " .. tostring(e4.Attributes))
     assert(e4.Histogram ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":100,"Count":100,"bucketCounts":[10,40,30,15,5],"BucketCounts":[10,40,30,15,5],"explicitBounds":[0.1,0.5,1,2.5],"ExplicitBounds":[0.1,0.5,1,2.5],"sum":25.5,"Sum":25.5,"min":0.05,"Min":0.05,"max":5.2,"Max":5.2}',
+      '{"aggregationTemporality":0,"count":100,"sum":25.5,"min":0.05,"max":5.2,"bucketCounts":[10,40,30,15,5],"explicitBounds":[0.1,0.5,1,2.5]}',
       "e4 Histogram mismatch: " .. tostring(e4.Histogram))
     assert(e4.ExponentialHistogram == nil, "e4 ExponentialHistogram must be nil")
     assert(e4.Summary == nil, "e4 Summary must be nil")
@@ -152,7 +152,7 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e5.ExponentialHistogram == nil, "e5 ExponentialHistogram should be nil for summary")
     assert(e5.Attributes == '{"service":"auth"}', "e5 Attributes mismatch: " .. tostring(e5.Attributes))
     assert(e5.Summary ==
-      '{"count":50,"Count":50,"sum":1234.5,"Sum":1234.5,"quantileValues":[{"quantile":0.5,"Quantile":0.5,"value":12,"Value":12},{"quantile":0.99,"Quantile":0.99,"value":85,"Value":85}],"QuantileValues":[{"quantile":0.5,"Quantile":0.5,"value":12,"Value":12},{"quantile":0.99,"Quantile":0.99,"value":85,"Value":85}]}',
+      '{"count":50,"sum":1234.5,"quantileValues":[{"quantile":0.5,"value":12},{"quantile":0.99,"value":85}]}',
       "e5 Summary mismatch: " .. tostring(e5.Summary))
     assert(e5.Exemplars == "[]", "e5 Exemplars mismatch: " .. tostring(e5.Exemplars))
   )";
@@ -466,7 +466,7 @@ TEST_F(MetricsExtractorTest, InvalidDoubleStringDoesNotSetMetricValueKind) {
     local hist_event = emitted[#emitted].log
     assert(hist_event ~= nil)
     assert(hist_event.Histogram ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":1,"Count":1,"bucketCounts":[],"BucketCounts":[],"explicitBounds":[],"ExplicitBounds":[],"sum":0,"Sum":0}',
+      '{"aggregationTemporality":0,"count":1,"sum":0,"bucketCounts":[],"explicitBounds":[]}',
       "Histogram min/max should not be set when invalid: " .. tostring(hist_event.Histogram))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -545,13 +545,13 @@ TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsH
     assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
     local h1 = emitted[1].log.Histogram
     assert(h1 ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":18446744073709551615,"Count":18446744073709551615,"bucketCounts":[],"BucketCounts":[],"explicitBounds":[],"ExplicitBounds":[],"sum":10,"Sum":10}',
+      '{"aggregationTemporality":0,"count":18446744073709551615,"sum":10,"bucketCounts":[],"explicitBounds":[]}',
       "h1 mismatch: " .. tostring(h1))
 
     local e2 = emitted[2].log
     local h2 = e2.Histogram
     assert(h2 ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":18446744073709551615,"Count":18446744073709551615,"bucketCounts":[],"BucketCounts":[],"explicitBounds":[],"ExplicitBounds":[],"sum":20,"Sum":20}',
+      '{"aggregationTemporality":0,"count":18446744073709551615,"sum":20,"bucketCounts":[],"explicitBounds":[]}',
       "h2 mismatch: " .. tostring(h2))
     assert(e2.ResourceAttributes == '{"service.name":"tbl-svc"}', "e2.ResourceAttributes mismatch: " .. tostring(e2.ResourceAttributes))
     assert(e2.ScopeAttributes == "{}", "e2.ScopeAttributes mismatch")
@@ -682,7 +682,7 @@ TEST_F(MetricsExtractorTest, HistogramWithoutMinAndMax) {
     local e1 = emitted[1].log
     assert(e1.MetricName == "hist_no_min_max")
     assert(e1.Histogram ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":50,"Count":50,"bucketCounts":[10,40],"BucketCounts":[10,40],"explicitBounds":[1],"ExplicitBounds":[1],"sum":12.5,"Sum":12.5}',
+      '{"aggregationTemporality":0,"count":50,"sum":12.5,"bucketCounts":[10,40],"explicitBounds":[1]}',
       "e1 Histogram mismatch: " .. tostring(e1.Histogram))
     assert(e1.Exemplars == "[]", "e1 Exemplars mismatch: " .. tostring(e1.Exemplars))
 
@@ -690,7 +690,7 @@ TEST_F(MetricsExtractorTest, HistogramWithoutMinAndMax) {
     local e2 = emitted[2].log
     assert(e2.MetricName == "table_hist_no_min_max")
     assert(e2.Histogram ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":60,"Count":60,"bucketCounts":[20,40],"BucketCounts":[20,40],"explicitBounds":[2.5],"ExplicitBounds":[2.5],"sum":18,"Sum":18}',
+      '{"aggregationTemporality":0,"count":60,"sum":18,"bucketCounts":[20,40],"explicitBounds":[2.5]}',
       "e2 Histogram mismatch: " .. tostring(e2.Histogram))
     assert(e2.Exemplars == "[]", "e2 Exemplars mismatch: " .. tostring(e2.Exemplars))
   )";
@@ -807,13 +807,13 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
     assert(e1.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
     assert(e1.TimeUnix == "2021-08-26T17:46:42.000000000Z")
     assert(e1.Summary ==
-      '{"count":18446744073709551615,"Count":18446744073709551615,"sum":50000,"Sum":50000,"quantileValues":[{"quantile":0.5,"Quantile":0.5,"value":45,"Value":45},{"quantile":0.9,"Quantile":0.9,"value":90,"Value":90},{"quantile":0.99,"Quantile":0.99,"value":150,"Value":150}],"QuantileValues":[{"quantile":0.5,"Quantile":0.5,"value":45,"Value":45},{"quantile":0.9,"Quantile":0.9,"value":90,"Value":90},{"quantile":0.99,"Quantile":0.99,"value":150,"Value":150}]}',
+      '{"count":18446744073709551615,"sum":50000,"quantileValues":[{"quantile":0.5,"value":45},{"quantile":0.9,"value":90},{"quantile":0.99,"value":150}]}',
       "e1 Summary mismatch: " .. tostring(e1.Summary))
     assert(e1.Exemplars == "[]", "e1 Exemplars mismatch: " .. tostring(e1.Exemplars))
 
     -- Event 2: JSON Summary with empty quantileValues
     local e2 = emitted[2].log
-    assert(e2.Summary == '{"count":0,"Count":0,"sum":0,"Sum":0,"quantileValues":[],"QuantileValues":[]}', "e2 Summary mismatch: " .. tostring(e2.Summary))
+    assert(e2.Summary == '{"count":0,"sum":0,"quantileValues":[]}', "e2 Summary mismatch: " .. tostring(e2.Summary))
     assert(e2.Attributes == "{}", "e2 Attributes mismatch")
     assert(e2.Exemplars == "[]", "e2 Exemplars mismatch")
 
@@ -831,13 +831,13 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
     assert(e3.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
     assert(e3.TimeUnix == "2021-08-26T17:46:43.000000000Z")
     assert(e3.Summary ==
-      '{"count":18446744073709551615,"Count":18446744073709551615,"sum":600,"Sum":600,"quantileValues":[{"quantile":0.5,"Quantile":0.5,"value":2.5,"Value":2.5},{"quantile":0.95,"Quantile":0.95,"value":5,"Value":5}],"QuantileValues":[{"quantile":0.5,"Quantile":0.5,"value":2.5,"Value":2.5},{"quantile":0.95,"Quantile":0.95,"value":5,"Value":5}]}',
+      '{"count":18446744073709551615,"sum":600,"quantileValues":[{"quantile":0.5,"value":2.5},{"quantile":0.95,"value":5}]}',
       "e3 Summary mismatch: " .. tostring(e3.Summary))
     assert(e3.Exemplars == "[]", "e3 Exemplars mismatch")
 
     -- Event 4: Table Summary with omitted quantileValues
     local e4 = emitted[4].log
-    assert(e4.Summary == '{"count":0,"Count":0,"sum":0,"Sum":0,"quantileValues":[],"QuantileValues":[]}', "e4 Summary mismatch: " .. tostring(e4.Summary))
+    assert(e4.Summary == '{"count":0,"sum":0,"quantileValues":[]}', "e4 Summary mismatch: " .. tostring(e4.Summary))
     assert(e4.Attributes == "{}", "e4 Attributes mismatch")
     assert(e4.Exemplars == "[]", "e4 Exemplars mismatch")
   )";
@@ -1045,16 +1045,14 @@ TEST_F(MetricsExtractorTest, ExponentialHistogramFullFidelityAndEdgeCases) {
     assert(#emitted == 7, "expected 7 emitted events, got " .. #emitted)
 
     local expected_full_eh =
-      '{"aggregationTemporality":2,"AggregationTemporality":2,' ..
-      '"count":18446744073709551615,"Count":18446744073709551615,' ..
-      '"scale":-2,"Scale":-2,' ..
-      '"zeroCount":9007199254740993,"ZeroCount":9007199254740993,' ..
-      '"zeroThreshold":0.001,"ZeroThreshold":0.001,' ..
-      '"positive":{"offset":-3,"Offset":-3,"bucketCounts":[1,9007199254740993,18446744073709551615],"BucketCounts":[1,9007199254740993,18446744073709551615]},' ..
-      '"Positive":{"offset":-3,"Offset":-3,"bucketCounts":[1,9007199254740993,18446744073709551615],"BucketCounts":[1,9007199254740993,18446744073709551615]},' ..
-      '"negative":{"offset":2,"Offset":2,"bucketCounts":[4,5],"BucketCounts":[4,5]},' ..
-      '"Negative":{"offset":2,"Offset":2,"bucketCounts":[4,5],"BucketCounts":[4,5]},' ..
-      '"sum":25,"Sum":25,"min":0.1,"Min":0.1,"max":10.5,"Max":10.5}'
+      '{"aggregationTemporality":2,' ..
+      '"count":18446744073709551615,' ..
+      '"sum":25,"min":0.1,"max":10.5,' ..
+      '"scale":-2,' ..
+      '"zeroCount":9007199254740993,' ..
+      '"zeroThreshold":0.001,' ..
+      '"positive":{"offset":-3,"bucketCounts":[1,9007199254740993,18446744073709551615]},' ..
+      '"negative":{"offset":2,"bucketCounts":[4,5]}}'
 
     local function check_full_exp(e, expected_name, is_table_mode, is_reversed_json)
       assert(e.MetricName == expected_name)
@@ -1072,15 +1070,13 @@ TEST_F(MetricsExtractorTest, ExponentialHistogramFullFidelityAndEdgeCases) {
     end
 
     local expected_sparse_eh =
-      '{"aggregationTemporality":0,"AggregationTemporality":0,' ..
-      '"count":5,"Count":5,' ..
-      '"scale":3,"Scale":3,' ..
-      '"zeroCount":1,"ZeroCount":1,' ..
-      '"zeroThreshold":0,"ZeroThreshold":0,' ..
-      '"positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},' ..
-      '"Positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},' ..
-      '"negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},' ..
-      '"Negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]}}'
+      '{"aggregationTemporality":0,' ..
+      '"count":5,' ..
+      '"scale":3,' ..
+      '"zeroCount":1,' ..
+      '"zeroThreshold":0,' ..
+      '"positive":{"offset":0,"bucketCounts":[]},' ..
+      '"negative":{"offset":0,"bucketCounts":[]}}'
 
     local function check_sparse_exp(e, expected_name)
       assert(e.MetricName == expected_name)
@@ -1333,7 +1329,7 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
     assert(e3.MetricName == "cumulative_hist")
     assert(e3.AggregationTemporality == 2)
     assert(e3.Histogram ==
-      '{"aggregationTemporality":2,"AggregationTemporality":2,"count":25,"Count":25,"bucketCounts":[],"BucketCounts":[],"explicitBounds":[],"ExplicitBounds":[],"sum":100,"Sum":100}',
+      '{"aggregationTemporality":2,"count":25,"sum":100,"bucketCounts":[],"explicitBounds":[]}',
       "e3.Histogram mismatch: " .. tostring(e3.Histogram))
     assert(e3.Flags == 4)
 
@@ -1341,14 +1337,14 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
     assert(e4.MetricName == "delta_exp_hist")
     assert(e4.AggregationTemporality == 1)
     assert(e4.ExponentialHistogram ==
-      '{"aggregationTemporality":1,"AggregationTemporality":1,"count":10,"Count":10,"scale":1,"Scale":1,"zeroCount":0,"ZeroCount":0,"zeroThreshold":0,"ZeroThreshold":0,"positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]}}',
+      '{"aggregationTemporality":1,"count":10,"scale":1,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
       "e4.ExponentialHistogram mismatch: " .. tostring(e4.ExponentialHistogram))
 
     local e5 = emitted[5].log
     assert(e5.MetricName == "unspec_exp_hist")
     assert(e5.AggregationTemporality == 0)
     assert(e5.ExponentialHistogram ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":5,"Count":5,"scale":0,"Scale":0,"zeroCount":0,"ZeroCount":0,"zeroThreshold":0,"ZeroThreshold":0,"positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]}}',
+      '{"aggregationTemporality":0,"count":5,"scale":0,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
       "e5.ExponentialHistogram mismatch: " .. tostring(e5.ExponentialHistogram))
 
     local e6 = emitted[6].log
@@ -1366,14 +1362,14 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
     assert(e8.MetricName == "tbl_hist_cum")
     assert(e8.AggregationTemporality == 2)
     assert(e8.Histogram ==
-      '{"aggregationTemporality":2,"AggregationTemporality":2,"count":5,"Count":5,"bucketCounts":[],"BucketCounts":[],"explicitBounds":[],"ExplicitBounds":[],"sum":15,"Sum":15}',
+      '{"aggregationTemporality":2,"count":5,"sum":15,"bucketCounts":[],"explicitBounds":[]}',
       "e8.Histogram mismatch: " .. tostring(e8.Histogram))
 
     local e9 = emitted[9].log
     assert(e9.MetricName == "tbl_exp_delta")
     assert(e9.AggregationTemporality == 1)
     assert(e9.ExponentialHistogram ==
-      '{"aggregationTemporality":1,"AggregationTemporality":1,"count":7,"Count":7,"scale":2,"Scale":2,"zeroCount":0,"ZeroCount":0,"zeroThreshold":0,"ZeroThreshold":0,"positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]}}',
+      '{"aggregationTemporality":1,"count":7,"scale":2,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
       "e9.ExponentialHistogram mismatch: " .. tostring(e9.ExponentialHistogram))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -1843,12 +1839,12 @@ TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
     assert(e1.MetricName == "null_oneof")
     assert(e1.MetricType == "exponential_histogram")
     assert(e1.ExponentialHistogram ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":3,"Count":3,"scale":1,"Scale":1,"zeroCount":0,"ZeroCount":0,"zeroThreshold":0,"ZeroThreshold":0,"positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Positive":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]},"Negative":{"offset":0,"Offset":0,"bucketCounts":[],"BucketCounts":[]}}',
+      '{"aggregationTemporality":0,"count":3,"scale":1,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
       "e1.ExponentialHistogram mismatch: " .. tostring(e1.ExponentialHistogram))
 
     -- Event 2: json_bucket_edge_cases
     assert(emitted[2].log.Histogram ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":1,"Count":1,"bucketCounts":[0,0,0,0,0,18446744073709551615],"BucketCounts":[0,0,0,0,0,18446744073709551615],"explicitBounds":[],"ExplicitBounds":[],"sum":0,"Sum":0}',
+      '{"aggregationTemporality":0,"count":1,"sum":0,"bucketCounts":[0,0,0,0,0,18446744073709551615],"explicitBounds":[]}',
       "emitted[2].log.Histogram mismatch: " .. tostring(emitted[2].log.Histogram))
 
     -- Event 3: table value = "9007199254740993", flags = -1, exemplars
@@ -1875,13 +1871,13 @@ TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
     -- Event 9: table bucketCounts and explicitBounds = "not_a_table"
     local h9 = emitted[9].log.Histogram
     assert(h9 ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":1,"Count":1,"bucketCounts":[0,0,0,0,0,18446744073709551615],"BucketCounts":[0,0,0,0,0,18446744073709551615],"explicitBounds":[],"ExplicitBounds":[],"sum":0,"Sum":0}',
+      '{"aggregationTemporality":0,"count":1,"sum":0,"bucketCounts":[0,0,0,0,0,18446744073709551615],"explicitBounds":[]}',
       "h9 mismatch: " .. tostring(h9))
 
     -- Event 10: valid explicitBounds = {1.0, "2.5"} serialized to JSON
     local h10 = emitted[10].log.Histogram
     assert(h10 ==
-      '{"aggregationTemporality":0,"AggregationTemporality":0,"count":2,"Count":2,"bucketCounts":[],"BucketCounts":[],"explicitBounds":[1,2.5],"ExplicitBounds":[1,2.5],"sum":0,"Sum":0}',
+      '{"aggregationTemporality":0,"count":2,"sum":0,"bucketCounts":[],"explicitBounds":[1,2.5]}',
       "h10 mismatch: " .. tostring(h10))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
