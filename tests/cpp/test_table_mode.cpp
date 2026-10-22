@@ -1082,6 +1082,16 @@ TEST_F(TableModeTest, SpanLinksTableModeAttributesAndTraceState) {
 }
 
 TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    emitted_metrics = {}
+    function collect_metrics_emit(ev)
+      emitted_metrics[#emitted_metrics + 1] = ev
+    end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "collect_metrics_emit");
+  int collect_emit_idx = lua_gettop(L_);
+
   const char* script = R"(
     return {
       resourceMetrics = {
@@ -1098,6 +1108,7 @@ TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
                   description = "Duration of requests",
                   unit = "ms",
                   histogram = {
+                    aggregationTemporality = 2,
                     dataPoints = {
                       {
                         startTimeUnixNano = 1700000000000000000,
@@ -1141,8 +1152,31 @@ TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
                         timeUnixNano = 1700000000700000000,
                         count = 42,
                         sum = 840.5,
+                        quantileValues = {
+                          { quantile = 0.5, value = 10.0 },
+                          { quantile = 0.99, value = 120.0 }
+                        },
                         attributes = { { key = "rpc.method", value = { stringValue = "GetUser" } } },
                         flags = 1
+                      }
+                    }
+                  }
+                },
+                {
+                  name = "db.client.duration",
+                  description = "Exponential histogram duration",
+                  unit = "ms",
+                  exponential_histogram = {
+                    aggregation_temporality = "AGGREGATION_TEMPORALITY_DELTA",
+                    data_points = {
+                      {
+                        startTimeUnixNano = 1700000000000000000,
+                        timeUnixNano = 1700000000800000000,
+                        count = 15,
+                        sum = 75.5,
+                        scale = -1,
+                        zero_count = 2,
+                        positive = { offset = -2, bucket_counts = { 3, 5, 5 } }
                       }
                     }
                   }
@@ -1156,11 +1190,34 @@ TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
   )";
 
   ASSERT_EQ(luaL_dostring(L_, script), LUA_OK);
-  auto result = extractors::ProcessMetricsTable(L_, -1, emit_idx_);
+  auto result = extractors::ProcessMetricsTable(L_, -1, collect_emit_idx);
   EXPECT_TRUE(result.success);
-  EXPECT_EQ(result.emitted_count, 3);
+  EXPECT_EQ(result.emitted_count, 4);
   EXPECT_TRUE(result.error.empty());
-  lua_pop(L_, 1);
+  lua_pop(L_, 2);  // pop script table and collect_metrics_emit
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#emitted_metrics == 4, "expected 4 events, got " .. #emitted_metrics)
+    local s = emitted_metrics[3].log.Summary
+    assert(s ~= nil, "Summary sub-table missing")
+    assert(s.count == 42 and s.Count == 42)
+    assert(math.abs(s.sum - 840.5) < 0.001 and math.abs(s.Sum - 840.5) < 0.001)
+    assert(#s.quantileValues == 2)
+    assert(math.abs(s.quantileValues[1].quantile - 0.5) < 0.001)
+    assert(math.abs(s.quantileValues[1].value - 10.0) < 0.001)
+
+    local eh = emitted_metrics[4].log.ExponentialHistogram
+    assert(eh ~= nil, "ExponentialHistogram sub-table missing")
+    assert(emitted_metrics[4].log.AggregationTemporality == 1)
+    assert(eh.aggregationTemporality == 1 and eh.AggregationTemporality == 1)
+    assert(eh.count == 15 and eh.Count == 15)
+    assert(eh.scale == -1 and eh.Scale == -1)
+    assert(eh.zeroCount == 2 and eh.ZeroCount == 2)
+    assert(eh.positive.offset == -2 and #eh.positive.bucketCounts == 3)
+    assert(eh.negative.offset == 0 and #eh.negative.bucketCounts == 0)
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
 }
 
 TEST_F(TableModeTest, TableReaderPrimitivesAndSeverityNumberCoverage) {
@@ -2065,6 +2122,85 @@ TEST_F(TableModeTest, TableModeMetricStringsSurviveInputMutationInEmit) {
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
+}
+
+TEST_F(TableModeTest, TryReadAndTryParseTableNumericPrimitives) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      valid_int = 42,
+      big_int_str = "9007199254740993",
+      u64_max_str = "18446744073709551615",
+      plus_dbl = "+12.5",
+      plus_minus_dbl = "+-12.5",
+      neg_str = "-5",
+      overflow_u64 = "99999999999999999999",
+      overflow_garbage = "99999999999999999999abc",
+      inf_num = math.huge,
+      nan_num = 0/0,
+    }
+  )"),
+            LUA_OK);
+  int t_idx = lua_gettop(L_);
+
+  int64_t i_out = -999;
+  EXPECT_TRUE(core::TryReadTableInt64(L_, t_idx, "valid_int", nullptr, i_out));
+  EXPECT_EQ(i_out, 42);
+  EXPECT_TRUE(core::TryReadTableInt64(L_, t_idx, "big_int_str", nullptr, i_out));
+  EXPECT_EQ(i_out, 9007199254740993LL);
+  EXPECT_TRUE(core::TryReadTableInt64(L_, t_idx, "neg_str", nullptr, i_out));
+  EXPECT_EQ(i_out, -5);
+  EXPECT_FALSE(core::TryReadTableInt64(L_, t_idx, "u64_max_str", nullptr, i_out));
+  EXPECT_FALSE(core::TryReadTableInt64(L_, t_idx, "overflow_u64", nullptr, i_out));
+  EXPECT_FALSE(core::TryReadTableInt64(L_, t_idx, "overflow_garbage", nullptr, i_out));
+  EXPECT_FALSE(core::TryReadTableInt64(L_, t_idx, "inf_num", nullptr, i_out));
+  EXPECT_FALSE(core::TryReadTableInt64(L_, t_idx, "nan_num", nullptr, i_out));
+  EXPECT_FALSE(core::TryReadTableInt64(L_, t_idx, "missing_field", nullptr, i_out));
+
+  uint64_t u_out = 999;
+  EXPECT_TRUE(core::TryReadTableUint64(L_, t_idx, "valid_int", nullptr, u_out));
+  EXPECT_EQ(u_out, 42ULL);
+  EXPECT_TRUE(core::TryReadTableUint64(L_, t_idx, "big_int_str", nullptr, u_out));
+  EXPECT_EQ(u_out, 9007199254740993ULL);
+  EXPECT_TRUE(core::TryReadTableUint64(L_, t_idx, "u64_max_str", nullptr, u_out));
+  EXPECT_EQ(u_out, UINT64_MAX);
+  EXPECT_FALSE(core::TryReadTableUint64(L_, t_idx, "neg_str", nullptr, u_out));
+  EXPECT_FALSE(core::TryReadTableUint64(L_, t_idx, "overflow_u64", nullptr, u_out));
+  EXPECT_FALSE(core::TryReadTableUint64(L_, t_idx, "overflow_garbage", nullptr, u_out));
+  EXPECT_FALSE(core::TryReadTableUint64(L_, t_idx, "inf_num", nullptr, u_out));
+  EXPECT_FALSE(core::TryReadTableUint64(L_, t_idx, "nan_num", nullptr, u_out));
+  EXPECT_FALSE(core::TryReadTableUint64(L_, t_idx, "missing_field", nullptr, u_out));
+
+  double d_out = -999.0;
+  EXPECT_TRUE(core::TryReadTableDouble(L_, t_idx, "valid_int", nullptr, d_out));
+  EXPECT_DOUBLE_EQ(d_out, 42.0);
+  EXPECT_TRUE(core::TryReadTableDouble(L_, t_idx, "plus_dbl", nullptr, d_out));
+  EXPECT_DOUBLE_EQ(d_out, 12.5);
+  EXPECT_FALSE(core::TryReadTableDouble(L_, t_idx, "plus_minus_dbl", nullptr, d_out));
+  EXPECT_FALSE(core::TryReadTableDouble(L_, t_idx, "inf_num", nullptr, d_out));
+  EXPECT_FALSE(core::TryReadTableDouble(L_, t_idx, "nan_num", nullptr, d_out));
+  EXPECT_FALSE(core::TryReadTableDouble(L_, t_idx, "missing_field", nullptr, d_out));
+
+  // Direct stack index primitives: TryParseTable*At
+  lua_pushstring(L_, "9007199254740993");
+  EXPECT_TRUE(core::TryParseTableInt64At(L_, -1, i_out));
+  EXPECT_EQ(i_out, 9007199254740993LL);
+  lua_pop(L_, 1);
+
+  lua_pushstring(L_, "18446744073709551615");
+  EXPECT_TRUE(core::TryParseTableUint64At(L_, -1, u_out));
+  EXPECT_EQ(u_out, UINT64_MAX);
+  lua_pop(L_, 1);
+
+  lua_pushstring(L_, "+12.5");
+  EXPECT_TRUE(core::TryParseTableDoubleAt(L_, -1, d_out));
+  EXPECT_DOUBLE_EQ(d_out, 12.5);
+  lua_pop(L_, 1);
+
+  lua_pushstring(L_, "+-12.5");
+  EXPECT_FALSE(core::TryParseTableDoubleAt(L_, -1, d_out));
+  lua_pop(L_, 1);
+
+  lua_pop(L_, 1);
 }
 
 TEST_F(TableModeTest, GetTableFieldThreeKeys) {

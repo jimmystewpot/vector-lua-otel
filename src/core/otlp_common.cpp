@@ -191,6 +191,12 @@ int64_t ParseInt64(simdjson::ondemand::value& val) {
            (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
       sv.remove_suffix(1);
     }
+    if (!sv.empty() && sv.front() == '+') {
+      sv.remove_prefix(1);
+      if (!sv.empty() && sv.front() == '-') {
+        return 0;
+      }
+    }
     if (sv.empty()) {
       return 0;
     }
@@ -225,7 +231,7 @@ uint64_t ParseUint64(simdjson::ondemand::value& val) {
       return num.get_uint64();
     }
     if (num.is_int64()) {
-      return static_cast<uint64_t>(num.get_int64());
+      return num.get_int64() >= 0 ? static_cast<uint64_t>(num.get_int64()) : 0ULL;
     }
     if (num.is_double()) {
       const double d = num.get_double();
@@ -250,6 +256,12 @@ uint64_t ParseUint64(simdjson::ondemand::value& val) {
            (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
       sv.remove_suffix(1);
     }
+    if (!sv.empty() && sv.front() == '+') {
+      sv.remove_prefix(1);
+      if (!sv.empty() && sv.front() == '-') {
+        return 0;
+      }
+    }
     if (sv.empty()) {
       return 0;
     }
@@ -257,11 +269,6 @@ uint64_t ParseUint64(simdjson::ondemand::value& val) {
     auto [uptr, uec] = std::from_chars(sv.data(), sv.data() + sv.size(), uval);
     if (uec == std::errc() && uptr == sv.data() + sv.size()) {
       return uval;
-    }
-    int64_t sval = 0;
-    auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), sval);
-    if (ec == std::errc() && ptr == sv.data() + sv.size()) {
-      return static_cast<uint64_t>(sval);
     }
   }
   return 0;
@@ -381,7 +388,11 @@ bool TryParseDouble(simdjson::ondemand::value& val, double& out) {
     if (num_res.error() != simdjson::SUCCESS) {
       return false;
     }
-    out = num_res.value();
+    const double d = num_res.value();
+    if (!std::isfinite(d)) {
+      return false;
+    }
+    out = d;
     return true;
   }
 
@@ -399,12 +410,18 @@ bool TryParseDouble(simdjson::ondemand::value& val, double& out) {
            (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
       sv.remove_suffix(1);
     }
+    if (!sv.empty() && sv.front() == '+') {
+      sv.remove_prefix(1);
+      if (!sv.empty() && sv.front() == '-') {
+        return false;
+      }
+    }
     if (sv.empty()) {
       return false;
     }
     double d = 0.0;
     auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), d);
-    if (ec == std::errc() && ptr == sv.data() + sv.size()) {
+    if (ec == std::errc() && ptr == sv.data() + sv.size() && std::isfinite(d)) {
       out = d;
       return true;
     }

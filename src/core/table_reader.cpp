@@ -273,21 +273,93 @@ void CopyIdField(lua_State* L, int table_idx, const char* name1, const char* nam
   emitter.SetString(dst_key, norm);
 }
 
+bool TryParseTableInt64At(lua_State* L, int val_idx, int64_t& out) {
+  int abs_idx = lua_absindex(L, val_idx);
+  int t = lua_type(L, abs_idx);
+  if (t == LUA_TNUMBER) {
+    if (lua_isinteger(L, abs_idx)) {
+      out = lua_tointeger(L, abs_idx);
+      return true;
+    }
+    return LuaFloatToInt64(lua_tonumber(L, abs_idx), out);
+  }
+  if (t == LUA_TSTRING) {
+    return ParseLuaStringInt64(L, abs_idx, out);
+  }
+  return false;
+}
+
+bool TryParseTableUint64At(lua_State* L, int val_idx, uint64_t& out) {
+  int abs_idx = lua_absindex(L, val_idx);
+  int t = lua_type(L, abs_idx);
+  if (t == LUA_TNUMBER) {
+    if (lua_isinteger(L, abs_idx)) {
+      lua_Integer iv = lua_tointeger(L, abs_idx);
+      if (iv >= 0) {
+        out = static_cast<uint64_t>(iv);
+        return true;
+      }
+      return false;
+    }
+    return LuaFloatToUint64(lua_tonumber(L, abs_idx), out);
+  }
+  if (t == LUA_TSTRING) {
+    return ParseLuaStringUint64(L, abs_idx, out);
+  }
+  return false;
+}
+
+bool TryParseTableDoubleAt(lua_State* L, int val_idx, double& out) {
+  int abs_idx = lua_absindex(L, val_idx);
+  int t = lua_type(L, abs_idx);
+  if (t == LUA_TNUMBER) {
+    double d = lua_tonumber(L, abs_idx);
+    if (std::isfinite(d)) {
+      out = d;
+      return true;
+    }
+    return false;
+  }
+  if (t == LUA_TSTRING) {
+    return ParseLuaStringDouble(L, abs_idx, out);
+  }
+  return false;
+}
+
+bool TryReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2,
+                       int64_t& out) {
+  if (GetTableField(L, table_idx, name1, name2)) {
+    bool ok = TryParseTableInt64At(L, -1, out);
+    lua_pop(L, 1);
+    return ok;
+  }
+  return false;
+}
+
+bool TryReadTableUint64(lua_State* L, int table_idx, const char* name1, const char* name2,
+                        uint64_t& out) {
+  if (GetTableField(L, table_idx, name1, name2)) {
+    bool ok = TryParseTableUint64At(L, -1, out);
+    lua_pop(L, 1);
+    return ok;
+  }
+  return false;
+}
+
+bool TryReadTableDouble(lua_State* L, int table_idx, const char* name1, const char* name2,
+                        double& out) {
+  if (GetTableField(L, table_idx, name1, name2)) {
+    bool ok = TryParseTableDoubleAt(L, -1, out);
+    lua_pop(L, 1);
+    return ok;
+  }
+  return false;
+}
+
 int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2,
                        int64_t default_val) {
-  if (GetTableField(L, table_idx, name1, name2)) {
-    int t = lua_type(L, -1);
-    int64_t v = default_val;
-    if (t == LUA_TNUMBER) {
-      if (lua_isinteger(L, -1)) {
-        v = lua_tointeger(L, -1);
-      } else {
-        LuaFloatToInt64(lua_tonumber(L, -1), v);
-      }
-    } else if (t == LUA_TSTRING) {
-      ParseLuaStringInt64(L, -1, v);
-    }
-    lua_pop(L, 1);
+  int64_t v = default_val;
+  if (TryReadTableInt64(L, table_idx, name1, name2, v)) {
     return v;
   }
   return default_val;
@@ -295,22 +367,8 @@ int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1, const cha
 
 uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1, const char* name2,
                          uint64_t default_val) {
-  if (GetTableField(L, table_idx, name1, name2)) {
-    int t = lua_type(L, -1);
-    uint64_t v = default_val;
-    if (t == LUA_TNUMBER) {
-      if (lua_isinteger(L, -1)) {
-        lua_Integer iv = lua_tointeger(L, -1);
-        if (iv >= 0) {
-          v = static_cast<uint64_t>(iv);
-        }
-      } else {
-        LuaFloatToUint64(lua_tonumber(L, -1), v);
-      }
-    } else if (t == LUA_TSTRING) {
-      ParseLuaStringUint64(L, -1, v);
-    }
-    lua_pop(L, 1);
+  uint64_t v = default_val;
+  if (TryReadTableUint64(L, table_idx, name1, name2, v)) {
     return v;
   }
   return default_val;
@@ -318,18 +376,8 @@ uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1, const c
 
 double ReadTableDouble(lua_State* L, int table_idx, const char* name1, const char* name2,
                        double default_val) {
-  if (GetTableField(L, table_idx, name1, name2)) {
-    int t = lua_type(L, -1);
-    double v = default_val;
-    if (t == LUA_TNUMBER) {
-      double d = lua_tonumber(L, -1);
-      if (std::isfinite(d)) {
-        v = d;
-      }
-    } else if (t == LUA_TSTRING) {
-      ParseLuaStringDouble(L, -1, v);
-    }
-    lua_pop(L, 1);
+  double v = default_val;
+  if (TryReadTableDouble(L, table_idx, name1, name2, v)) {
     return v;
   }
   return default_val;
@@ -1233,8 +1281,13 @@ void PushTableExemplars(lua_State* L, int exemplars_idx, FastJsonWriter& writer)
             }
           }
         } else if (lua_type(L, -1) == LUA_TSTRING) {
+          int64_t iv = 0;
           double d = 0.0;
-          if (ParseLuaStringDouble(L, -1, d)) {
+          if (ParseLuaStringInt64(L, -1, iv)) {
+            lua_pushinteger(L, iv);
+            lua_setfield(L, ex_obj_idx, "Value");
+            value_set = true;
+          } else if (ParseLuaStringDouble(L, -1, d)) {
             lua_pushnumber(L, d);
             lua_setfield(L, ex_obj_idx, "Value");
             value_set = true;
