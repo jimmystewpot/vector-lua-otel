@@ -19,10 +19,21 @@ void FastJsonWriter::Reset() {
 
 void FastJsonWriter::Trim() noexcept {
   if (buffer_.capacity() > kMaxRetainedCapacity) {
-    std::string trimmed;
-    trimmed.reserve(4096);
-    buffer_ = std::move(trimmed);
-    stack_.clear();
+    std::string().swap(buffer_);
+    try {
+      buffer_.reserve(4096);
+    } catch (...) {
+    }
+  } else {
+    buffer_.clear();
+  }
+  stack_.clear();
+  if (stack_.capacity() > 256) {
+    std::vector<ContainerState>().swap(stack_);
+    try {
+      stack_.reserve(32);
+    } catch (...) {
+    }
   }
 }
 

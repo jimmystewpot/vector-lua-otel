@@ -40,6 +40,9 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
                          FastJsonWriter& json_writer, std::string_view* out_service_name = nullptr);
 void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer);
 int64_t ParseInt64(simdjson::ondemand::value& val);
+bool TryParseInt64(simdjson::ondemand::value& val, int64_t& out);
+int64_t ParseSeverityNumberString(std::string_view sv) noexcept;
+int64_t ParseSeverityNumber(simdjson::ondemand::value& val);
 uint64_t ParseUint64(simdjson::ondemand::value& val);
 double ParseDouble(simdjson::ondemand::value& val);
 bool TryParseDouble(simdjson::ondemand::value& val, double& out);

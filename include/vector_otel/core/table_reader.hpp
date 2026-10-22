@@ -72,25 +72,26 @@ bool TryParseTableDoubleAt(lua_State* L, int val_idx, double& out);
 // Reads int64/uint64/double field from table at table_idx into `out`, returning
 // true on valid parse and false if missing or invalid.
 bool TryReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2,
-                       int64_t& out);
+                       int64_t& out, const char* name3 = nullptr);
 bool TryReadTableUint64(lua_State* L, int table_idx, const char* name1, const char* name2,
-                        uint64_t& out);
+                        uint64_t& out, const char* name3 = nullptr);
 bool TryReadTableDouble(lua_State* L, int table_idx, const char* name1, const char* name2,
-                        double& out);
+                        double& out, const char* name3 = nullptr);
 
 // Reads int64 field from table at table_idx (handles integers and numeric
 // strings).
 int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,
-                       int64_t default_val = 0);
+                       int64_t default_val = 0, const char* name3 = nullptr);
 
 // Reads uint64 field from table at table_idx (handles integers and numeric
 // strings).
 uint64_t ReadTableUint64(lua_State* L, int table_idx, const char* name1,
-                         const char* name2 = nullptr, uint64_t default_val = 0);
+                         const char* name2 = nullptr, uint64_t default_val = 0,
+                         const char* name3 = nullptr);
 
 // Reads double field from table at table_idx.
 double ReadTableDouble(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,
-                       double default_val = 0.0);
+                       double default_val = 0.0, const char* name3 = nullptr);
 
 // Parses OTLP severityNumber (handles integers and string enum names like
 // "SEVERITY_NUMBER_INFO").
