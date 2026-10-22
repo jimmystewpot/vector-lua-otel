@@ -7,6 +7,7 @@
 #include "simdjson.h"
 #include "vector_otel/core/fast_json_writer.hpp"
 #include "vector_otel/core/otlp_common.hpp"
+#include "vector_otel/core/scratch.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
@@ -1658,6 +1659,218 @@ TEST_F(OtlpCommonTest, ParseSeverityNumberAndTryParseInt64Coverage) {
   EXPECT_EQ(out, 9007199254740993LL);
   auto vi_bad = obj["i_bad"].value();
   EXPECT_FALSE(TryParseInt64(vi_bad, out));
+}
+
+TEST_F(OtlpCommonTest, ScratchUtilitiesCoverage) {
+  std::vector<int> vec;
+  ReserveScratchVector(vec, 128);
+  EXPECT_GE(vec.capacity(), 128);
+  vec.resize(70000, 1);
+  EXPECT_GT(vec.capacity(), kMaxScratchVectorCapacity);
+  ResetScratchVector(vec);
+  EXPECT_EQ(vec.size(), 0);
+  EXPECT_EQ(vec.capacity(), 0);
+
+  std::string str;
+  ReserveScratchString(str, 128);
+  EXPECT_GE(str.capacity(), 128);
+  str.resize(70000, 'a');
+  EXPECT_GT(str.capacity(), kMaxScratchStringCapacity);
+  ResetScratchString(str);
+  EXPECT_EQ(str.size(), 0);
+  EXPECT_LT(str.capacity(), kMaxScratchStringCapacity);
+
+  str.resize(70000, 'b');
+  TrimScratchString(str);
+  EXPECT_EQ(str.size(), 0);
+  EXPECT_LT(str.capacity(), kMaxScratchStringCapacity);
+}
+
+TEST_F(OtlpCommonTest, TrimJsonWhitespaceAndEqualsIgnoreCaseAsciiCoverage) {
+  EXPECT_EQ(TrimJsonWhitespace("   \t\r\n hello world \n\t\r "), "hello world");
+  EXPECT_EQ(TrimJsonWhitespace(""), "");
+  EXPECT_EQ(TrimJsonWhitespace("   \t\r\n "), "");
+  EXPECT_EQ(TrimJsonWhitespace("word"), "word");
+
+  EXPECT_TRUE(EqualsIgnoreCaseAscii("ServiceName", "servicename"));
+  EXPECT_TRUE(EqualsIgnoreCaseAscii("SERVICE.NAME", "service.name"));
+  EXPECT_FALSE(EqualsIgnoreCaseAscii("abc", "abcd"));
+  EXPECT_FALSE(EqualsIgnoreCaseAscii("abc", "abx"));
+}
+
+TEST_F(OtlpCommonTest, ParseJsonTimestampCoverage) {
+  auto json = R"({
+    "iso_str": "2026-10-22T18:00:00.123456789Z",
+    "u64": 1700000000123456789,
+    "i64_pos": 1700000000987654321,
+    "i64_neg": -100,
+    "dbl_pos": 1700000000000000000.0,
+    "dbl_neg": -1.0,
+    "obj_full": {
+      "year": 2026, "month": 10, "day": 22,
+      "hour": 18, "min": 30, "sec": 15, "nanosec": 123456789
+    },
+    "obj_nanosecond": {
+      "year": 2026, "month": 10, "day": 22,
+      "nanosecond": 999
+    },
+    "obj_nsec": {
+      "year": 2026, "month": 10, "day": 22,
+      "nsec": 888
+    },
+    "obj_missing_day": {
+      "year": 2026, "month": 10
+    },
+    "bool_val": true,
+    "null_val": null
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  uint64_t out_ns = 0;
+  auto v_iso = obj["iso_str"].value();
+  EXPECT_TRUE(ParseJsonTimestamp(v_iso, out_ns));
+  EXPECT_GT(out_ns, 0);
+
+  auto v_u64 = obj["u64"].value();
+  EXPECT_TRUE(ParseJsonTimestamp(v_u64, out_ns));
+  EXPECT_EQ(out_ns, 1700000000123456789ULL);
+
+  auto v_i64 = obj["i64_pos"].value();
+  EXPECT_TRUE(ParseJsonTimestamp(v_i64, out_ns));
+  EXPECT_EQ(out_ns, 1700000000987654321ULL);
+
+  auto v_ineg = obj["i64_neg"].value();
+  EXPECT_FALSE(ParseJsonTimestamp(v_ineg, out_ns));
+
+  auto v_dbl = obj["dbl_pos"].value();
+  EXPECT_TRUE(ParseJsonTimestamp(v_dbl, out_ns));
+  EXPECT_EQ(out_ns, 1700000000000000000ULL);
+
+  auto v_dneg = obj["dbl_neg"].value();
+  EXPECT_FALSE(ParseJsonTimestamp(v_dneg, out_ns));
+
+  auto v_ofull = obj["obj_full"].value();
+  EXPECT_TRUE(ParseJsonTimestamp(v_ofull, out_ns));
+  EXPECT_GT(out_ns, 0);
+
+  auto v_ons = obj["obj_nanosecond"].value();
+  EXPECT_TRUE(ParseJsonTimestamp(v_ons, out_ns));
+  EXPECT_GT(out_ns, 0);
+
+  auto v_onsec = obj["obj_nsec"].value();
+  EXPECT_TRUE(ParseJsonTimestamp(v_onsec, out_ns));
+  EXPECT_GT(out_ns, 0);
+
+  auto v_omiss = obj["obj_missing_day"].value();
+  EXPECT_FALSE(ParseJsonTimestamp(v_omiss, out_ns));
+
+  auto v_bool = obj["bool_val"].value();
+  EXPECT_FALSE(ParseJsonTimestamp(v_bool, out_ns));
+
+  auto v_null = obj["null_val"].value();
+  EXPECT_FALSE(ParseJsonTimestamp(v_null, out_ns));
+}
+
+TEST_F(OtlpCommonTest, AnyValueSnakeCaseAndClampingCoverage) {
+  auto json = R"({
+    "u_small": { "uint_value": 42 },
+    "u_big": { "uint_value": "18446744073709551615" },
+    "d_val": { "double_value": 3.14159 },
+    "b_true": { "bool_value": true },
+    "b_false": { "bool_value": false },
+    "bytes_snake": { "bytes_value": "c25ha2U=" },
+    "kvlist_snake": { "kvlist_value": { "values": [] } },
+    "plain_arr": [1, "two", 3.0]
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  auto v_us = obj["u_small"].value();
+  PushAnyValue(L_, v_us, writer_);
+  EXPECT_TRUE(lua_isinteger(L_, -1));
+  EXPECT_EQ(lua_tointeger(L_, -1), 42);
+  lua_pop(L_, 1);
+
+  auto v_ub = obj["u_big"].value();
+  PushAnyValue(L_, v_ub, writer_);
+  EXPECT_TRUE(lua_isinteger(L_, -1));
+  EXPECT_EQ(lua_tointeger(L_, -1), INT64_MAX);
+  lua_pop(L_, 1);
+
+  auto v_d = obj["d_val"].value();
+  PushAnyValue(L_, v_d, writer_);
+  EXPECT_TRUE(lua_isnumber(L_, -1));
+  EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 3.14159);
+  lua_pop(L_, 1);
+
+  auto v_bt = obj["b_true"].value();
+  PushAnyValue(L_, v_bt, writer_);
+  EXPECT_TRUE(lua_isboolean(L_, -1));
+  EXPECT_TRUE(lua_toboolean(L_, -1));
+  lua_pop(L_, 1);
+
+  auto v_bf = obj["b_false"].value();
+  PushAnyValue(L_, v_bf, writer_);
+  EXPECT_TRUE(lua_isboolean(L_, -1));
+  EXPECT_FALSE(lua_toboolean(L_, -1));
+  lua_pop(L_, 1);
+
+  auto v_bs = obj["bytes_snake"].value();
+  PushAnyValue(L_, v_bs, writer_);
+  EXPECT_TRUE(lua_isstring(L_, -1));
+  EXPECT_NE(std::string(lua_tostring(L_, -1)).find("bytes_value"), std::string::npos);
+  lua_pop(L_, 1);
+
+  auto v_ks = obj["kvlist_snake"].value();
+  PushAnyValue(L_, v_ks, writer_);
+  EXPECT_TRUE(lua_isstring(L_, -1));
+  EXPECT_NE(std::string(lua_tostring(L_, -1)).find("kvlist_value"), std::string::npos);
+  lua_pop(L_, 1);
+
+  auto v_arr = obj["plain_arr"].value();
+  PushAnyValue(L_, v_arr, writer_);
+  ASSERT_TRUE(lua_isstring(L_, -1));
+  EXPECT_NE(std::string(lua_tostring(L_, -1)).find("[1,"), std::string::npos);
+  lua_pop(L_, 1);
+}
+
+TEST_F(OtlpCommonTest, PushAttributesTableServiceNameSnakeCase) {
+  auto json = R"({
+    "attrs_array": [
+      { "key": "service_name", "value": { "string_value": "backend-auth" } },
+      { "key": "env", "value": { "string_value": "production" } }
+    ],
+    "attrs_map": {
+      "service_name": { "string_value": "frontend-proxy" },
+      "region": { "string_value": "us-east-1" }
+    }
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  std::string_view svc;
+  auto v_arr = obj["attrs_array"].value();
+  PushAttributesTable(L_, v_arr, writer_, &svc);
+  EXPECT_EQ(svc, "backend-auth");
+  EXPECT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, -1, "service_name");
+  EXPECT_STREQ(lua_tostring(L_, -1), "backend-auth");
+  lua_pop(L_, 2);
+
+  svc = "";
+  auto v_map = obj["attrs_map"].value();
+  PushAttributesTable(L_, v_map, writer_, &svc);
+  EXPECT_EQ(svc, "frontend-proxy");
+  EXPECT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, -1, "service_name");
+  EXPECT_STREQ(lua_tostring(L_, -1), "frontend-proxy");
+  lua_pop(L_, 2);
+
+  ResetServiceNameScratch();
 }
 
 }  // namespace
