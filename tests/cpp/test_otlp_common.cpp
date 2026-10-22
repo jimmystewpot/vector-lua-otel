@@ -1318,5 +1318,159 @@ TEST_F(OtlpCommonTest, PushAttributesTableLongServiceNameSurvivesGc) {
   lua_pop(L_, 1);
 }
 
+TEST_F(OtlpCommonTest, NormalizeOtelIdExactBinary16Bytes) {
+  IdHexBuffer buf{};
+  std::string raw(16, '\xaa');
+  auto res = NormalizeTraceId(raw, buf);
+  EXPECT_EQ(res, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  EXPECT_EQ(res.size(), 32);
+
+  std::string raw2(16, '\x12');
+  auto res2 = NormalizeTraceId(raw2, buf);
+  EXPECT_EQ(res2, "12121212121212121212121212121212");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdExactBinary8Bytes) {
+  IdHexBuffer buf{};
+  std::string raw(8, '\xbb');
+  auto res = NormalizeSpanId(raw, buf);
+  EXPECT_EQ(res, "bbbbbbbbbbbbbbbb");
+  EXPECT_EQ(res.size(), 16);
+
+  std::string raw2(8, '\x34');
+  auto res2 = NormalizeSpanId(raw2, buf);
+  EXPECT_EQ(res2, "3434343434343434");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdBinaryWithEmbeddedNul) {
+  IdHexBuffer buf{};
+  // 8-byte binary with leading, embedded, and trailing \0 bytes
+  std::string_view raw_span("\x00\xf0\x67\xaa\x0b\xa9\x02\xb7", 8);
+  auto res_span = NormalizeSpanId(raw_span, buf);
+  EXPECT_EQ(res_span, "00f067aa0ba902b7");
+
+  // 16-byte binary with leading and trailing \0 bytes
+  std::string_view raw_trace(
+      "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x00", 16);
+  auto res_trace = NormalizeTraceId(raw_trace, buf);
+  EXPECT_EQ(res_trace, "000102030405060708090a0b0c0d0e00");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdAllZeroBinary) {
+  IdHexBuffer buf{};
+  // 16x 0x00 -> 32x '0'
+  std::string raw_16(16, '\0');
+  auto res_16 = NormalizeTraceId(raw_16, buf);
+  EXPECT_EQ(res_16, "00000000000000000000000000000000");
+
+  // 8x 0x00 -> 16x '0'
+  std::string raw_8(8, '\0');
+  auto res_8 = NormalizeSpanId(raw_8, buf);
+  EXPECT_EQ(res_8, "0000000000000000");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdExactLowercaseHexZeroCopy) {
+  IdHexBuffer buf{};
+  // 32-char lowercase hex
+  std::string_view hex32 = "4bf92f3577b34da6a3ce929d0e0e4736";
+  auto res32 = NormalizeTraceId(hex32, buf);
+  EXPECT_EQ(res32, hex32);
+  EXPECT_EQ(res32.data(), hex32.data());  // Zero-copy verification
+
+  // 16-char lowercase hex
+  std::string_view hex16 = "00f067aa0ba902b7";
+  auto res16 = NormalizeSpanId(hex16, buf);
+  EXPECT_EQ(res16, hex16);
+  EXPECT_EQ(res16.data(), hex16.data());  // Zero-copy verification
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdUppercaseAndMixedCaseHex) {
+  IdHexBuffer buf{};
+  // 32-char uppercase hex
+  std::string_view hex32_upper = "4BF92F3577B34DA6A3CE929D0E0E4736";
+  auto res32_upper = NormalizeTraceId(hex32_upper, buf);
+  EXPECT_EQ(res32_upper, "4bf92f3577b34da6a3ce929d0e0e4736");
+
+  // 32-char mixed-case hex
+  std::string_view hex32_mixed = "4bF92f3577b34Da6A3ce929D0e0E4736";
+  auto res32_mixed = NormalizeTraceId(hex32_mixed, buf);
+  EXPECT_EQ(res32_mixed, "4bf92f3577b34da6a3ce929d0e0e4736");
+
+  // 16-char uppercase hex
+  std::string_view hex16_upper = "00F067AA0BA902B7";
+  auto res16_upper = NormalizeSpanId(hex16_upper, buf);
+  EXPECT_EQ(res16_upper, "00f067aa0ba902b7");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdEmptyString) {
+  IdHexBuffer buf{};
+  EXPECT_EQ(NormalizeTraceId("", buf), "");
+  EXPECT_EQ(NormalizeSpanId("", buf), "");
+  EXPECT_EQ(NormalizeOtelId("", 16, buf), "");
+  EXPECT_EQ(NormalizeOtelId("", 8, buf), "");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdMalformedLengthNonPrintable) {
+  IdHexBuffer buf{};
+  // 4-byte binary with non-printable bytes -> 8-char hex
+  std::string_view raw_4("\x00\x01\x02\x03", 4);
+  auto res_4 = NormalizeOtelId(raw_4, 16, buf);
+  EXPECT_EQ(res_4, "00010203");
+
+  // > 32 bytes binary with non-printable bytes -> ""
+  std::string raw_33(33, '\xff');
+  auto res_33 = NormalizeOtelId(raw_33, 16, buf);
+  EXPECT_EQ(res_33, "");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdMalformedLengthPrintableAscii) {
+  IdHexBuffer buf{};
+  // Short non-hex printable ASCII strings preserved unchanged
+  EXPECT_EQ(NormalizeTraceId("t1", buf), "t1");
+  EXPECT_EQ(NormalizeSpanId("t1", buf), "t1");
+  EXPECT_EQ(NormalizeTraceId("1111", buf), "1111");
+  EXPECT_EQ(NormalizeTraceId("only_trace_id", buf), "only_trace_id");
+}
+
+TEST_F(OtlpCommonTest, NormalizeOtelIdExactBinaryAsciiCollision) {
+  IdHexBuffer buf{};
+  // 16-byte string that happens to be 16 ASCII hex characters
+  std::string_view raw_16 = "0123456789abcdef";
+  // For TraceId (expected 16 binary bytes), it MUST be hex-encoded to 32 characters
+  auto res_trace = NormalizeTraceId(raw_16, buf);
+  EXPECT_EQ(res_trace, "30313233343536373839616263646566");
+
+  // For SpanId (expected 8 binary bytes), raw_16 is 16 lowercase hex chars, so zero-copy
+  auto res_span = NormalizeSpanId(raw_16, buf);
+  EXPECT_EQ(res_span, "0123456789abcdef");
+  EXPECT_EQ(res_span.data(), raw_16.data());
+}
+
+TEST_F(OtlpCommonTest, ExtractStringFieldDualKey) {
+  auto json = R"({
+    "traceId": "canonical-trace-id",
+    "span_id": "snake-span-id",
+    "null_id": null,
+    "num_id": 9999
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  // Primary key found
+  EXPECT_EQ(ExtractStringField(obj, "traceId", "trace_id", ""), "canonical-trace-id");
+
+  // Secondary key found
+  EXPECT_EQ(ExtractStringField(obj, "spanId", "span_id", ""), "snake-span-id");
+
+  // Neither key found -> default value returned
+  EXPECT_EQ(ExtractStringField(obj, "missing1", "missing2", "fallback"), "fallback");
+  EXPECT_EQ(ExtractStringField(obj, "missing1", "missing2", ""), "");
+
+  // Primary key is null/number, secondary key missing -> default value returned
+  EXPECT_EQ(ExtractStringField(obj, "null_id", "null_id_alt", "def"), "def");
+  EXPECT_EQ(ExtractStringField(obj, "num_id", "num_id_alt", "def"), "def");
+}
+
 }  // namespace
 }  // namespace vector_otel::core
