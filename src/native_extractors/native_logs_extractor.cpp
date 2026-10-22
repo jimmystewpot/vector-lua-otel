@@ -271,10 +271,8 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
           auto inner_obj_res = fv.get_object();
           if (inner_obj_res.error() == simdjson::SUCCESS) {
             auto inner_obj = inner_obj_res.value();
-            if (!ExtractNativeLogObjectJson(L, inner_obj, processed_at, writer, body_writer,
-                                            emitter, err_out, depth + 1)) {
-              return false;
-            }
+            return ExtractNativeLogObjectJson(L, inner_obj, processed_at, writer, body_writer,
+                                              emitter, err_out, depth + 1);
           }
         } else if (t_res.value() == simdjson::ondemand::json_type::array) {
           auto inner_arr_res = fv.get_array();
@@ -293,6 +291,7 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
                 }
               }
             }
+            return true;
           }
         }
       }
@@ -351,6 +350,7 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
                k == "resource") {
       has_recognized_field = true;
       if (L != nullptr) {
+        res_service_name = "unknown_service";
         core::PushAttributesTable(L, fv, writer, &res_service_name);
         res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
       }
@@ -576,7 +576,7 @@ bool HasNativeLogFields(lua_State* L, int table_idx) {
       "source_type",
   };
   for (const char* k : kKeys) {
-    if (core::GetTableField(L, abs_idx, k)) {
+    if (core::GetTableFieldRaw(L, abs_idx, k)) {
       lua_pop(L, 1);
       return true;
     }
@@ -587,7 +587,7 @@ bool HasNativeLogFields(lua_State* L, int table_idx) {
 void CopyStringFieldAlways(lua_State* L, int table_idx, const char* name1, const char* name2,
                            core::LuaEmitter& emitter, std::string_view dst_key,
                            std::string_view default_val = "") {
-  if (core::GetTableField(L, table_idx, name1, name2)) {
+  if (core::GetTableFieldRaw(L, table_idx, name1, name2)) {
     if (lua_isstring(L, -1)) {
       size_t len = 0;
       const char* s = lua_tolstring(L, -1, &len);
@@ -602,7 +602,7 @@ void CopyStringFieldAlways(lua_State* L, int table_idx, const char* name1, const
 
 void CopyNativeTableBody(lua_State* L, int rec_idx, core::FastJsonWriter& writer,
                          core::LuaEmitter& emitter) {
-  if (core::GetTableField(L, rec_idx, "message", "body")) {
+  if (core::GetTableFieldRaw(L, rec_idx, "message", "body")) {
     int body_idx = lua_absindex(L, -1);
     int t = lua_type(L, body_idx);
     if (t == LUA_TSTRING) {
@@ -613,7 +613,7 @@ void CopyNativeTableBody(lua_State* L, int rec_idx, core::FastJsonWriter& writer
       return;
     }
     if (t == LUA_TTABLE) {
-      if (core::GetTableField(L, body_idx, "stringValue", "string_value")) {
+      if (core::GetTableFieldRaw(L, body_idx, "stringValue", "string_value")) {
         if (lua_type(L, -1) == LUA_TSTRING) {
           size_t len = 0;
           const char* s = lua_tolstring(L, -1, &len);
@@ -689,9 +689,9 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
   std::string_view service_name;
   ScopedLuaRef res_attrs_scoped(L, LUA_NOREF);
 
-  bool has_res = core::GetTableField(L, abs_rec_idx, "resources", "resource_attributes");
+  bool has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resources", "resource_attributes");
   if (!has_res) {
-    has_res = core::GetTableField(L, abs_rec_idx, "resourceAttributes", "resource");
+    has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resourceAttributes", "resource");
   }
   if (has_res) {
     int res_idx = lua_absindex(L, -1);
@@ -702,7 +702,7 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
       }
       int attrs_src_idx = res_idx;
       bool has_nested_attrs = false;
-      if (core::GetTableField(L, res_idx, "attributes")) {
+      if (core::GetTableFieldRaw(L, res_idx, "attributes")) {
         if (lua_istable(L, -1)) {
           attrs_src_idx = lua_absindex(L, -1);
           has_nested_attrs = true;
@@ -744,7 +744,7 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
                                                              "scopeVersion", tls_scope_ver_scratch);
   ScopedLuaRef scope_attrs_scoped(L, LUA_NOREF);
 
-  if (core::GetTableField(L, abs_rec_idx, "scope")) {
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "scope")) {
     int s_idx = lua_absindex(L, -1);
     if (lua_istable(L, s_idx)) {
       if (scope_name.empty()) {
@@ -758,7 +758,7 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
         scope_schema_url = core::ReadTableStringView(L, s_idx, "schema_url", "schemaUrl",
                                                      tls_scope_schema_scratch);
       }
-      if (core::GetTableField(L, s_idx, "attributes")) {
+      if (core::GetTableFieldRaw(L, s_idx, "attributes")) {
         core::PushTableAttributes(L, -1, writer);
         scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
         lua_pop(L, 1);
@@ -767,7 +767,7 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
     lua_pop(L, 1);
   }
   if (scope_attrs_scoped.get() == LUA_NOREF &&
-      core::GetTableField(L, abs_rec_idx, "scope_attributes", "scopeAttributes")) {
+      core::GetTableFieldRaw(L, abs_rec_idx, "scope_attributes", "scopeAttributes")) {
     core::PushTableAttributes(L, -1, writer);
     scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
     lua_pop(L, 1);
@@ -792,7 +792,7 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
   CopyStringFieldAlways(L, abs_rec_idx, "severity_text", "severityText", emitter, "SeverityText");
 
   int64_t sev_num = 0;
-  if (core::GetTableField(L, abs_rec_idx, "severity_number", "severityNumber")) {
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "severity_number", "severityNumber")) {
     sev_num = core::ParseTableSeverityNumber(L, -1);
     lua_pop(L, 1);
   }
@@ -818,9 +818,9 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
     emitter.SetTableFromStack("ScopeAttributes");
   }
 
-  bool has_log_attrs = core::GetTableField(L, abs_rec_idx, "attributes", "log_attributes");
+  bool has_log_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "attributes", "log_attributes");
   if (!has_log_attrs) {
-    has_log_attrs = core::GetTableField(L, abs_rec_idx, "logAttributes");
+    has_log_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "logAttributes");
   }
   if (has_log_attrs) {
     core::PushTableAttributes(L, -1, writer);
@@ -993,33 +993,40 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
     if (!extract_array(abs_idx, raw_len)) {
       return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
     }
-  } else if (HasNativeLogFields(L, abs_idx)) {
-    if (!ExtractSingleNativeLogTable(L, abs_idx, processed_at, writer, tls_res_schema_scratch,
-                                     tls_service_scratch, tls_scope_schema_scratch,
-                                     tls_scope_name_scratch, tls_scope_ver_scratch, emitter)) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-    }
-  } else if (core::GetTableField(L, abs_idx, "log")) {
-    int log_idx = lua_absindex(L, -1);
-    if (lua_istable(L, log_idx)) {
-      const size_t inner_len = lua_rawlen(L, log_idx);
-      if (inner_len > 0) {
-        if (!extract_array(log_idx, inner_len)) {
-          lua_pop(L, 1);
-          return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                  emitter.EmittedCount()};
-        }
-      } else if (HasNativeLogFields(L, log_idx)) {
-        if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, writer, tls_res_schema_scratch,
-                                         tls_service_scratch, tls_scope_schema_scratch,
-                                         tls_scope_name_scratch, tls_scope_ver_scratch, emitter)) {
-          lua_pop(L, 1);
-          return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                  emitter.EmittedCount()};
+  } else {
+    bool handled_log_wrapper = false;
+    if (core::GetTableFieldRaw(L, abs_idx, "log")) {
+      int log_idx = lua_absindex(L, -1);
+      if (lua_istable(L, log_idx)) {
+        const size_t inner_len = lua_rawlen(L, log_idx);
+        if (inner_len > 0) {
+          handled_log_wrapper = true;
+          if (!extract_array(log_idx, inner_len)) {
+            lua_pop(L, 1);
+            return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                                    emitter.EmittedCount()};
+          }
+        } else if (HasNativeLogFields(L, log_idx)) {
+          handled_log_wrapper = true;
+          if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, writer, tls_res_schema_scratch,
+                                           tls_service_scratch, tls_scope_schema_scratch,
+                                           tls_scope_name_scratch, tls_scope_ver_scratch,
+                                           emitter)) {
+            lua_pop(L, 1);
+            return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                                    emitter.EmittedCount()};
+          }
         }
       }
+      lua_pop(L, 1);
     }
-    lua_pop(L, 1);
+    if (!handled_log_wrapper && HasNativeLogFields(L, abs_idx)) {
+      if (!ExtractSingleNativeLogTable(L, abs_idx, processed_at, writer, tls_res_schema_scratch,
+                                       tls_service_scratch, tls_scope_schema_scratch,
+                                       tls_scope_name_scratch, tls_scope_ver_scratch, emitter)) {
+        return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+      }
+    }
   }
 
   emitter.Flush();

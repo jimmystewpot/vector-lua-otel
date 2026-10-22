@@ -161,14 +161,20 @@ TEST_F(NativeExtractorsTest, NativeLogsTable_OuterEventWrapperAndBatchArray) {
     EXPECT_EQ(res.emitted_count, 2);
   }
 
-  // 3. Outer { log = { { message = "m3", body = "ignored" } } }
+  // 3. Outer { log = { { message = "m3", body = "ignored" } }, source_type = "opentelemetry" }
+  // plus metatable __index that must not be invoked by GetTableFieldRaw
   {
     const char* script = R"(
-      return {
+      local outer = {
+        source_type = "opentelemetry",
         log = {
           { message = "m3", body = "ignored" }
         }
       }
+      setmetatable(outer.log[1], {
+        __index = function() error("metamethod should not be called") end
+      })
+      return outer
     )";
     ASSERT_EQ(luaL_dostring(L_, script), LUA_OK);
     int table_idx = lua_gettop(L_);
@@ -302,12 +308,18 @@ TEST_F(NativeExtractorsTest, NativeLogsJson_FullAndFallback) {
   EXPECT_TRUE(res4.success) << res4.error;
   EXPECT_EQ(res4.emitted_count, 2);
 
+  std::string json_wrapped_with_src =
+      R"({"log":{"message":"wrapped_json","resource":{"service.name":"old-svc"},"resources":{"host":"h1"}},"source_type":"opentelemetry"})";
+  auto res5 = ProcessNativeLogs(L_, json_wrapped_with_src, emit_idx_);
+  EXPECT_TRUE(res5.success) << res5.error;
+  EXPECT_EQ(res5.emitted_count, 1);
+
   auto res_bad = ProcessNativeLogs(L_, "{broken", emit_idx_);
   EXPECT_FALSE(res_bad.success);
   EXPECT_EQ(res_bad.emitted_count, 0);
 
   const char* verify = R"(
-    assert(#emitted == 4, "Expected 4 emitted events, got " .. #emitted)
+    assert(#emitted == 5, "Expected 5 emitted events, got " .. #emitted)
     local r1 = emitted[1].log
     assert(r1.Body == "json body", "r1.Body mismatch: " .. tostring(r1.Body))
     assert(r1.Timestamp == "2026-10-22T10:00:01.123456789Z", "r1.Timestamp mismatch: " .. tostring(r1.Timestamp))
@@ -329,6 +341,11 @@ TEST_F(NativeExtractorsTest, NativeLogsJson_FullAndFallback) {
     local r4 = emitted[4].log
     assert(r4.Body == '{"nested":true}', "r4.Body mismatch: " .. tostring(r4.Body))
     assert(r4.ServiceName == "arr-svc", "r4.ServiceName mismatch: " .. tostring(r4.ServiceName))
+
+    local r5 = emitted[5].log
+    assert(r5.Body == "wrapped_json", "r5.Body mismatch: " .. tostring(r5.Body))
+    assert(r5.ServiceName == "unknown_service", "r5.ServiceName mismatch: " .. tostring(r5.ServiceName))
+    assert(r5.ResourceAttributes.host == "h1", "r5.ResourceAttributes.host mismatch")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
