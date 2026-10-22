@@ -20,6 +20,7 @@
   - [Key Takeaways](#key-takeaways)
 - [Prerequisites and Toolchain](#prerequisites-and-toolchain)
 - [Build and Installation](#build-and-installation)
+  - [Signed Release Tarball](#signed-release-tarball-recommended-for-production)
   - [CMake Build](#cmake-build)
   - [LuaRocks Installation](#luarocks-installation)
   - [Build Options](#build-options)
@@ -153,6 +154,42 @@ sudo apt-get update && sudo apt-get install -y \
 ---
 
 ## Build and Installation
+
+### Signed Release Tarball (Recommended for Production)
+
+Each tagged release on `main` publishes a deterministic source archive (`vector-lua-otel-<version>.tar.gz`) with vendored dependencies included, `SHA256SUMS`, keyless [Sigstore Cosign](https://docs.sigstore.dev/) bundles (`.sigstore.json`), and GitHub SLSA Build Provenance Attestations.
+
+```bash
+VERSION="0.1.0"
+BASE_URL="https://github.com/jimmystewpot/vector-lua-otel/releases/download/v${VERSION}"
+
+# 1. Download release archive, checksums, and Sigstore bundles
+curl -sSLO "${BASE_URL}/vector-lua-otel-${VERSION}.tar.gz"
+curl -sSLO "${BASE_URL}/vector-lua-otel-${VERSION}.tar.gz.sigstore.json"
+curl -sSLO "${BASE_URL}/vector-otel-${VERSION}-1.rockspec"
+curl -sSLO "${BASE_URL}/SHA256SUMS"
+curl -sSLO "${BASE_URL}/SHA256SUMS.sigstore.json"
+
+# 2. Verify SHA-256 checksums
+sha256sum -c SHA256SUMS
+
+# 3. Verify keyless Sigstore Cosign signature (optional, requires cosign)
+cosign verify-blob \
+  --bundle "vector-lua-otel-${VERSION}.tar.gz.sigstore.json" \
+  --certificate-identity "https://github.com/jimmystewpot/vector-lua-otel/.github/workflows/release.yml@refs/tags/v${VERSION}" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "vector-lua-otel-${VERSION}.tar.gz"
+
+# 4. Verify GitHub SLSA build provenance (optional, requires gh CLI)
+gh attestation verify "vector-lua-otel-${VERSION}.tar.gz" --repo jimmystewpot/vector-lua-otel
+
+# 5. Extract and build (no network access required)
+tar -xzf "vector-lua-otel-${VERSION}.tar.gz"
+cd "vector-lua-otel-${VERSION}"
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
 
 ### CMake Build
 

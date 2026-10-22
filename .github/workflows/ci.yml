@@ -68,6 +68,9 @@ jobs:
       - name: Validate rockspec
         run: luarocks lint vector-otel-scm-1.rockspec
 
+      - name: Validate release packaging script
+        run: bash tests/scripts/test_package_release.sh --skip-tarball-build
+
   sanitizers:
     name: Sanitizers (ASAN/UBSAN)
     runs-on: ubuntu-latest
