@@ -24,7 +24,6 @@ namespace vector_otel::extractors {
 
 namespace {
 
-using core::AnchorSlot;
 using core::ErrorCode;
 using core::OperationContext;
 
@@ -88,11 +87,11 @@ std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
 // Reusable per-thread staging buffers: capacity is retained between invocations, so the steady
 // state performs no C++ allocation per record.
 struct LogsScratch {
-  core::FastJsonWriter writer;       // attribute / AnyValue serialisation
-  core::FastJsonWriter body_writer;  // structured body serialisation
-  core::StagedRow row;               // the record being built
-  core::StagedRow resource_tape;     // shared ResourceAttributes table, built once per resource
-  core::StagedRow scope_tape;        // shared ScopeAttributes table, built once per scope
+  core::FastJsonWriter res_attrs_writer;    // ResourceAttributes JSON, built once per resource
+  core::FastJsonWriter scope_attrs_writer;  // ScopeAttributes JSON, built once per scope
+  core::FastJsonWriter log_attrs_writer;    // LogAttributes JSON, rebuilt per record
+  core::FastJsonWriter body_writer;         // structured body serialisation
+  core::StagedRow row;                      // the record being built
 };
 
 LogsScratch& Scratch() {
@@ -110,14 +109,18 @@ bool FailJson(OperationContext& ctx, simdjson::error_code code) {
 bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
                      simdjson::padded_string_view admitted) {
   LogsScratch& s = Scratch();
-  s.writer.Reset();
+  s.res_attrs_writer.Reset();
+  s.scope_attrs_writer.Reset();
+  s.log_attrs_writer.Reset();
   s.body_writer.Reset();
   struct TrimGuard {
     explicit TrimGuard(LogsScratch& scratch) : s(scratch) {}
     TrimGuard(const TrimGuard&) = delete;
     TrimGuard& operator=(const TrimGuard&) = delete;
     ~TrimGuard() noexcept {
-      s.writer.Trim();
+      s.res_attrs_writer.Trim();
+      s.scope_attrs_writer.Trim();
+      s.log_attrs_writer.Trim();
       s.body_writer.Trim();
       core::ResetServiceNameScratch();
     }
@@ -178,10 +181,10 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
       }
     }
 
-    // 2. Resource service name and attributes (staged once, materialised lazily)
+    // 2. Resource service name and attributes (serialised once per resource)
     std::string_view service_name = "unknown_service";
-    s.resource_tape.Reset();
-    bool resource_ready = false;
+    s.res_attrs_writer.Reset();
+    bool has_res_attrs = false;
     auto res_res = rl_obj.find_field_unordered("resource");
     if (res_res.error() == simdjson::SUCCESS) {
       auto r_val = res_res.value();
@@ -191,10 +194,12 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
         auto attrs_res = r_obj.find_field_unordered("attributes");
         if (attrs_res.error() == simdjson::SUCCESS) {
           auto attrs_val = attrs_res.value();
-          core::StageAttributeFields(s.resource_tape, attrs_val, s.writer, &service_name);
+          core::WriteAttributesJson(s.res_attrs_writer, attrs_val, &service_name);
+          has_res_attrs = true;
         }
       }
     }
+    const std::string_view res_attrs_json = has_res_attrs ? s.res_attrs_writer.Str() : "{}";
 
     // 3. Iterate scopeLogs
     auto sl_res = rl_obj.find_field_unordered("scopeLogs");
@@ -237,8 +242,8 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
       // Scope metadata and attributes
       std::string_view scope_name;
       std::string_view scope_version;
-      s.scope_tape.Reset();
-      bool scope_ready = false;
+      s.scope_attrs_writer.Reset();
+      bool has_scope_attrs = false;
       auto scope_res = sl_obj.find_field_unordered("scope");
       if (scope_res.error() == simdjson::SUCCESS) {
         auto scope_val = scope_res.value();
@@ -250,10 +255,12 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
           auto s_attrs_res = s_obj.find_field_unordered("attributes");
           if (s_attrs_res.error() == simdjson::SUCCESS) {
             auto s_attrs_val = s_attrs_res.value();
-            core::StageAttributeFields(s.scope_tape, s_attrs_val, s.writer);
+            core::WriteAttributesJson(s.scope_attrs_writer, s_attrs_val);
+            has_scope_attrs = true;
           }
         }
       }
+      const std::string_view scope_attrs_json = has_scope_attrs ? s.scope_attrs_writer.Str() : "{}";
 
       // 4. Iterate logRecords
       auto recs_res = sl_obj.find_field_unordered("logRecords");
@@ -289,12 +296,12 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
         int64_t sev_num = 0;
         std::string_view body_sv;
         std::string_view event_name;
+        s.log_attrs_writer.Reset();
         bool has_log_attrs = false;
 
         core::IdHexBuffer trace_id_buf;
         core::IdHexBuffer span_id_buf;
 
-        // The row is started first: LogAttributes is staged straight into it when met.
         emitter.StartRecord();
 
         for (auto field_res : rec_obj) {
@@ -343,7 +350,8 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
               event_name = s_res.value();
             }
           } else if (k == "attributes") {
-            core::StageAttributes(s.row, "LogAttributes", fv, s.writer);
+            s.log_attrs_writer.Reset();
+            core::WriteAttributesJson(s.log_attrs_writer, fv);
             has_log_attrs = true;
           }
         }
@@ -354,11 +362,7 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
         std::array<char, 32> ts_buf;
         core::FormatIso8601Nano(t_ns, ts_buf.data());
 
-        if (!core::EnsureSharedAnchor(ctx, s.resource_tape, AnchorSlot::kResourceAttrs,
-                                      resource_ready) ||
-            !core::EnsureSharedAnchor(ctx, s.scope_tape, AnchorSlot::kScopeAttrs, scope_ready)) {
-          return false;
-        }
+        const std::string_view log_attrs_json = has_log_attrs ? s.log_attrs_writer.Str() : "{}";
 
         emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
         emitter.SetString("TraceId", trace_id);
@@ -369,15 +373,12 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
         emitter.SetString("ServiceName", service_name);
         emitter.SetString("Body", body_sv);
         emitter.SetString("ResourceSchemaUrl", resource_schema_url);
-        s.row.Anchor("ResourceAttributes", AnchorSlot::kResourceAttrs);
+        emitter.SetString("ResourceAttributes", res_attrs_json);
         emitter.SetString("ScopeSchemaUrl", scope_schema_url);
         emitter.SetString("ScopeName", scope_name);
         emitter.SetString("ScopeVersion", scope_version);
-        s.row.Anchor("ScopeAttributes", AnchorSlot::kScopeAttrs);
-        if (!has_log_attrs) {
-          s.row.BeginMap("LogAttributes");
-          s.row.End();
-        }
+        emitter.SetString("ScopeAttributes", scope_attrs_json);
+        emitter.SetString("LogAttributes", log_attrs_json);
         emitter.SetString("EventName", event_name);
         emitter.SetString("processed_at", processed_at);
 
@@ -448,18 +449,20 @@ bool ExtractLogsTableImpl(OperationContext& ctx, LogsScratch& s, TableScratch& t
     std::string_view resource_schema_url =
         core::ReadTableStringView(L, rl_obj_idx, "schemaUrl", "schema_url", t.res_schema);
 
-    // 2. Resource service name & attributes (single pass, staged once per resource)
+    // 2. Resource service name & attributes (single pass, serialised once per resource)
     std::string_view service_name = "unknown_service";
-    s.resource_tape.Reset();
-    bool resource_ready = false;
+    s.res_attrs_writer.Reset();
+    bool has_res_attrs = false;
     if (core::GetTableField(L, rl_obj_idx, "resource")) {
       const int res_idx = lua_absindex(L, -1);
       if (core::GetTableField(L, res_idx, "attributes")) {
-        core::StageTableAttributeFields(s.resource_tape, L, -1, s.writer, &service_name);
+        core::WriteTableAttributesJson(L, -1, s.res_attrs_writer, &service_name);
+        has_res_attrs = true;
         lua_pop(L, 1);  // pop attributes
       }
       lua_pop(L, 1);  // pop resource
     }
+    const std::string_view res_attrs_json = has_res_attrs ? s.res_attrs_writer.Str() : "{}";
 
     // 3. Iterate scopeLogs
     if (!core::GetTableField(L, rl_obj_idx, "scopeLogs", "scope_logs")) {
@@ -485,19 +488,21 @@ bool ExtractLogsTableImpl(OperationContext& ctx, LogsScratch& s, TableScratch& t
           core::ReadTableStringView(L, sl_obj_idx, "schemaUrl", "schema_url", t.scope_schema);
       std::string_view scope_name;
       std::string_view scope_version;
-      s.scope_tape.Reset();
-      bool scope_ready = false;
+      s.scope_attrs_writer.Reset();
+      bool has_scope_attrs = false;
 
       if (core::GetTableField(L, sl_obj_idx, "scope")) {
         const int s_idx = lua_absindex(L, -1);
         scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, t.scope_name);
         scope_version = core::ReadTableStringView(L, s_idx, "version", nullptr, t.scope_version);
         if (core::GetTableField(L, s_idx, "attributes")) {
-          core::StageTableAttributeFields(s.scope_tape, L, -1, s.writer);
+          core::WriteTableAttributesJson(L, -1, s.scope_attrs_writer);
+          has_scope_attrs = true;
           lua_pop(L, 1);  // pop attributes
         }
         lua_pop(L, 1);  // pop scope
       }
+      const std::string_view scope_attrs_json = has_scope_attrs ? s.scope_attrs_writer.Str() : "{}";
 
       // 4. Iterate logRecords
       if (core::GetTableField(L, sl_obj_idx, "logRecords", "log_records")) {
@@ -511,13 +516,6 @@ bool ExtractLogsTableImpl(OperationContext& ctx, LogsScratch& s, TableScratch& t
               continue;
             }
             const int rec_obj_idx = lua_absindex(L, -1);
-
-            if (!core::EnsureSharedAnchor(ctx, s.resource_tape, AnchorSlot::kResourceAttrs,
-                                          resource_ready) ||
-                !core::EnsureSharedAnchor(ctx, s.scope_tape, AnchorSlot::kScopeAttrs,
-                                          scope_ready)) {
-              return false;
-            }
 
             emitter.StartRecord();
 
@@ -551,24 +549,25 @@ bool ExtractLogsTableImpl(OperationContext& ctx, LogsScratch& s, TableScratch& t
 
             // 7. ServiceName, 8. Body, 9. ResourceSchemaUrl
             emitter.SetString("ServiceName", service_name);
-            core::CopyTableBody(L, rec_obj_idx, s.writer, emitter);
+            core::CopyTableBody(L, rec_obj_idx, s.body_writer, emitter);
             emitter.SetString("ResourceSchemaUrl", resource_schema_url);
 
-            // 10-14. shared resource / scope attributes and scope metadata
-            s.row.Anchor("ResourceAttributes", AnchorSlot::kResourceAttrs);
+            // 10-14. resource / scope attributes (JSON strings) and scope metadata
+            emitter.SetString("ResourceAttributes", res_attrs_json);
             emitter.SetString("ScopeSchemaUrl", scope_schema_url);
             emitter.SetString("ScopeName", scope_name);
             emitter.SetString("ScopeVersion", scope_version);
-            s.row.Anchor("ScopeAttributes", AnchorSlot::kScopeAttrs);
+            emitter.SetString("ScopeAttributes", scope_attrs_json);
 
-            // 15. LogAttributes (an empty table when absent)
+            // 15. LogAttributes (a JSON object string, "{}" when absent)
+            s.log_attrs_writer.Reset();
+            bool has_log_attrs = false;
             if (core::GetTableField(L, rec_obj_idx, "attributes")) {
-              core::StageTableAttributes(s.row, "LogAttributes", L, -1, s.writer);
+              core::WriteTableAttributesJson(L, -1, s.log_attrs_writer);
+              has_log_attrs = true;
               lua_pop(L, 1);  // pop attributes
-            } else {
-              s.row.BeginMap("LogAttributes");
-              s.row.End();
             }
+            emitter.SetString("LogAttributes", has_log_attrs ? s.log_attrs_writer.Str() : "{}");
 
             // 16. EventName, 17. processed_at
             core::CopyStringField(L, rec_obj_idx, "eventName", "event_name", emitter, "EventName");
@@ -598,7 +597,10 @@ bool ExtractLogsTableImpl(OperationContext& ctx, LogsScratch& s, TableScratch& t
 bool ExtractLogsTable(OperationContext& ctx) {
   LogsScratch& s = Scratch();
   TableScratch& t = TScratch();
-  s.writer.Reset();
+  s.res_attrs_writer.Reset();
+  s.scope_attrs_writer.Reset();
+  s.log_attrs_writer.Reset();
+  s.body_writer.Reset();
   core::ReserveScratchString(t.res_schema, 128);
   core::ReserveScratchString(t.scope_schema, 128);
   core::ReserveScratchString(t.scope_name, 128);
@@ -610,7 +612,11 @@ bool ExtractLogsTable(OperationContext& ctx) {
     Guard& operator=(const Guard&) = delete;
     ~Guard() noexcept {
       lua_settop(L, entry_top);
-      s.writer.Trim();
+      s.res_attrs_writer.Trim();
+      s.scope_attrs_writer.Trim();
+      s.log_attrs_writer.Trim();
+      s.body_writer.Trim();
+      core::ResetServiceNameScratch();
       core::ResetScratchString(t.res_schema);
       core::ResetScratchString(t.scope_schema);
       core::ResetScratchString(t.scope_name);

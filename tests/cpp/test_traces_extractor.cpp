@@ -102,16 +102,14 @@ TEST_F(TracesExtractorTest, SampleFixtureParentAndChildSpans) {
     assert(r1.Duration == 500000000, "r1.Duration mismatch: " .. tostring(r1.Duration))
 
     -- ResourceAttributes
-    assert(type(r1.ResourceAttributes) == "table", "r1.ResourceAttributes must be a table")
-    assert(r1.ResourceAttributes["service.name"] == "cart-service")
-    assert(r1.ResourceAttributes["deployment.environment"] == "production")
-    assert(r1.ResourceAttributes["host.id"] == 12345)
+    assert(type(r1.ResourceAttributes) == "string", "r1.ResourceAttributes must be a JSON string")
+    assert(r1.ResourceAttributes == '{"service.name":"cart-service","deployment.environment":"production","host.id":12345}',
+           "r1.ResourceAttributes mismatch: " .. tostring(r1.ResourceAttributes))
 
     -- SpanAttributes
-    assert(type(r1.SpanAttributes) == "table", "r1.SpanAttributes must be a table")
-    assert(r1.SpanAttributes["http.method"] == "GET")
-    assert(r1.SpanAttributes["http.status_code"] == 200)
-    assert(r1.SpanAttributes["http.route"] == "/checkout")
+    assert(type(r1.SpanAttributes) == "string", "r1.SpanAttributes must be a JSON string")
+    assert(r1.SpanAttributes == '{"http.method":"GET","http.status_code":200,"http.route":"/checkout"}',
+           "r1.SpanAttributes mismatch: " .. tostring(r1.SpanAttributes))
 
     -- Events (JSON-stringified array)
     assert(type(r1.Events) == "string", "r1.Events must be a JSON string")
@@ -146,7 +144,10 @@ TEST_F(TracesExtractorTest, SampleFixtureParentAndChildSpans) {
     assert(r2.StatusMessage == "Connection timeout", "r2.StatusMessage mismatch")
     -- Duration = 1710000000250000000 - 1710000000150000000 = 100000000 ns
     assert(r2.Duration == 100000000, "r2.Duration mismatch: " .. tostring(r2.Duration))
-    assert(r2.SpanAttributes["db.system"] == "postgresql")
+    assert(r2.ResourceAttributes == '{"service.name":"cart-service","deployment.environment":"production","host.id":12345}',
+           "r2.ResourceAttributes mismatch: " .. tostring(r2.ResourceAttributes))
+    assert(r2.SpanAttributes == '{"db.system":"postgresql","db.statement":"SELECT * FROM cart_items WHERE user_id = $1"}',
+           "r2.SpanAttributes mismatch: " .. tostring(r2.SpanAttributes))
     assert(r2.Events == "[]", "r2.Events empty array mismatch: " .. tostring(r2.Events))
     assert(r2.Links == "[]", "r2.Links empty array mismatch: " .. tostring(r2.Links))
   )";
@@ -212,7 +213,8 @@ TEST_F(TracesExtractorTest, UnorderedKeysHandling) {
     assert(r.StatusCode == "STATUS_CODE_OK", "StatusCode mismatch")
     assert(r.StatusMessage == "done", "StatusMessage mismatch")
     assert(r.Duration == 1000000000, "Duration mismatch")
-    assert(r.SpanAttributes["tag1"] == "val1", "SpanAttributes mismatch")
+    assert(r.ResourceAttributes == '{"service.name":"unordered-svc"}', "ResourceAttributes mismatch")
+    assert(r.SpanAttributes == '{"tag1":"val1"}', "SpanAttributes mismatch")
     assert(r.Events == "[]")
     assert(r.Links == "[]")
   )";
@@ -247,7 +249,8 @@ TEST_F(TracesExtractorTest, OutOfOrderFieldsExtractedCorrectly) {
     local r = emitted[#emitted].log
     assert(r ~= nil)
     assert(r.SpanName == "span_op")
-    assert(r.SpanAttributes.app == "demo")
+    assert(r.ResourceAttributes == "{}")
+    assert(r.SpanAttributes == '{"app":"demo"}')
     assert(r.StatusCode == "STATUS_CODE_OK")
     assert(r.StatusMessage == "ok")
     assert(r.Duration == 1000000000)
@@ -307,8 +310,8 @@ TEST_F(TracesExtractorTest, EmptyAndMissingBatches) {
     assert(r.Duration == 0)
     assert(r.Events == "[]")
     assert(r.Links == "[]")
-    assert(type(r.ResourceAttributes) == "table")
-    assert(type(r.SpanAttributes) == "table")
+    assert(r.ResourceAttributes == "{}")
+    assert(r.SpanAttributes == "{}")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -645,7 +648,7 @@ TEST_F(TracesExtractorTest, SpanLinksParsingComprehensive) {
     assert(r.Links:find('"bool_attr_f":false') ~= nil, "bool_attr_f missing")
     assert(r.Links:find('"raw_str":"direct_str"') ~= nil, "raw_str missing")
     assert(r.Links:find('"raw_num":99') ~= nil, "raw_num missing")
-    assert(r.Links:find('"null_attr":null') ~= nil, "null_attr missing")
+    assert(r.Links:find('"null_attr":{"unknownType":{}}') ~= nil, "null_attr missing")
 
     -- Check second link with object attributes
     assert(r.Links:find('"TraceId":"22223333444455556666777788889999"') ~= nil, "Link 2 TraceId missing")
@@ -1086,15 +1089,17 @@ TEST_F(TracesExtractorTest, AnyValueSnakeCaseAndComplexVariantsInAttributes) {
     assert(#emitted == 1)
     local r = emitted[1].log
     assert(r.ServiceName == "anyvalue-svc")
-    assert(r.ResourceAttributes.str_snake == "hello_snake")
-    assert(r.ResourceAttributes.int_snake == 42)
-    assert(r.ResourceAttributes.double_snake == 2.718)
-    assert(r.ResourceAttributes.bool_t_snake == true)
-    assert(r.ResourceAttributes.bool_f_snake == false)
-    assert(r.SpanAttributes.s_str == "span_str")
-    assert(r.SpanAttributes.s_int == 100)
-    assert(r.SpanAttributes.s_double == 1.414)
-    assert(r.SpanAttributes.s_bool == true)
+    assert(type(r.ResourceAttributes) == "string", "ResourceAttributes must be string")
+    assert(string.find(r.ResourceAttributes, '"str_snake":"hello_snake"', 1, true) ~= nil)
+    assert(string.find(r.ResourceAttributes, '"int_snake":42', 1, true) ~= nil)
+    assert(string.find(r.ResourceAttributes, '"double_snake":2.718', 1, true) ~= nil)
+    assert(string.find(r.ResourceAttributes, '"bool_t_snake":true', 1, true) ~= nil)
+    assert(string.find(r.ResourceAttributes, '"bool_f_snake":false', 1, true) ~= nil)
+    assert(type(r.SpanAttributes) == "string", "SpanAttributes must be string")
+    assert(string.find(r.SpanAttributes, '"s_str":"span_str"', 1, true) ~= nil)
+    assert(string.find(r.SpanAttributes, '"s_int":100', 1, true) ~= nil)
+    assert(string.find(r.SpanAttributes, '"s_double":1.414', 1, true) ~= nil)
+    assert(string.find(r.SpanAttributes, '"s_bool":true', 1, true) ~= nil)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1207,8 +1212,8 @@ TEST_F(TracesExtractorTest, SpanKindVariantsAndTableModeComprehensive) {
     assert(s1.StatusCode == "STATUS_CODE_OK")
     assert(s1.StatusMessage == "table ok")
     assert(s1.Duration == 500)
-    assert(s1.SpanAttributes.env == "stage")
-    assert(s1.SpanAttributes.port == 9000)
+    assert(s1.ResourceAttributes == '{"service.name":"tbl-svc"}')
+    assert(s1.SpanAttributes == '{"env":"stage","port":9000}')
     assert(s1.Events:find("ev_tbl") ~= nil)
     assert(s1.Links:find("linked_tr") ~= nil)
 
@@ -1218,6 +1223,8 @@ TEST_F(TracesExtractorTest, SpanKindVariantsAndTableModeComprehensive) {
     assert(s2.SpanKind == "SPAN_KIND_INTERNAL")
     assert(s2.StatusCode == "STATUS_CODE_ERROR")
     assert(s2.StatusMessage == "table err")
+    assert(s2.ResourceAttributes == '{"service.name":"tbl-svc"}')
+    assert(s2.SpanAttributes == "{}")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_table_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1532,8 +1539,9 @@ TEST_F(TracesExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
       local r = gc_emitted[i].log
       assert(r.ServiceName == "unknown_service",
              "Expected unknown_service on span " .. i .. ", got: " .. tostring(r.ServiceName))
-      assert(r.ResourceAttributes["service.name"] == 42,
-             "Expected ResourceAttributes['service.name'] == 42 on span " .. i)
+      assert(type(r.ResourceAttributes) == "string" and
+             string.find(r.ResourceAttributes, '"service.name":42', 1, true) ~= nil,
+             "Expected ResourceAttributes containing '\"service.name\":42' on span " .. i)
     end
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -1574,8 +1582,9 @@ TEST_F(TracesExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnde
       local r = uaf_emitted[i].log
       assert(r.ServiceName == "unknown_service",
              "Expected unknown_service on span " .. i .. ", got: " .. tostring(r.ServiceName))
-      assert(r.ResourceAttributes["service.name"] == 42,
-             "Expected ResourceAttributes['service.name'] == 42 on span " .. i)
+      assert(type(r.ResourceAttributes) == "string" and
+             string.find(r.ResourceAttributes, '"service.name":42', 1, true) ~= nil,
+             "Expected ResourceAttributes containing '\"service.name\":42' on span " .. i)
     end
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -1586,7 +1595,7 @@ TEST_F(TracesExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResourceA
     uaf_emitted = {}
     function uaf_cb(event)
       table.insert(uaf_emitted, event)
-      event.log.ResourceAttributes["service.name"] = nil
+      event.log.ResourceAttributes = nil
       collectgarbage("collect")
       collectgarbage("collect")
       for i = 1, 200 do
@@ -2016,12 +2025,10 @@ TEST_F(TracesExtractorTest, AttributesStringsAreNotAlteredByNormalization) {
   const char* verify_script = R"(
     assert(#emitted == 1)
     local r = emitted[1].log
-    assert(r.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
-           "ResourceAttributes string must not be altered")
-    assert(r.SpanAttributes["span.raw_id"] == "UPPERCASE_AND_HEX_4BF9",
-           "SpanAttributes string must not be altered")
-    assert(r.SpanAttributes["span.exact_16"] == "1234567812345678",
-           "SpanAttributes string must not be altered")
+    assert(r.ResourceAttributes == '{"service.name":"attr-svc","res.hex":"4BF92F3577B34DA6A3CE929D0E0E4736"}',
+           "ResourceAttributes string must not be altered: " .. tostring(r.ResourceAttributes))
+    assert(r.SpanAttributes == '{"span.raw_id":"UPPERCASE_AND_HEX_4BF9","span.exact_16":"1234567812345678"}',
+           "SpanAttributes string must not be altered: " .. tostring(r.SpanAttributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }

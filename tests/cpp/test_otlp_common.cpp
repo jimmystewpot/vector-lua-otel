@@ -1662,6 +1662,225 @@ TEST_F(OtlpCommonTest, ParseSeverityNumberAndTryParseInt64Coverage) {
   EXPECT_FALSE(TryParseInt64(vi_bad, out));
 }
 
+TEST_F(OtlpCommonTest, WriteAttributesJson_OtlpArrayAndFlatObject) {
+  // 1. OTLP KeyValue array with all AnyValue types and service.name capture
+  {
+    auto json = R"({
+      "attributes": [
+        { "key": "service.name", "value": { "stringValue": "json-attr-svc" } },
+        { "key": "i", "value": { "intValue": "-42" } },
+        { "key": "u", "value": { "uintValue": "18446744073709551615" } },
+        { "key": "d", "value": { "doubleValue": 3.5 } },
+        { "key": "b", "value": { "boolValue": true } },
+        { "key": "bytes", "value": { "bytesValue": "AQID" } },
+        { "key": "arr", "value": { "arrayValue": { "values": [
+          { "stringValue": "a" },
+          { "intValue": 2 }
+        ] } } },
+        { "key": "kv", "value": { "kvlistValue": { "values": [
+          { "key": "n", "value": { "intValue": 1 } }
+        ] } } }
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    std::string_view svc = "unknown_service";
+    writer_.Reset();
+    WriteAttributesJson(writer_, attrs, &svc);
+    EXPECT_EQ(svc, "json-attr-svc");
+    EXPECT_EQ(
+        writer_.Str(),
+        R"({"service.name":"json-attr-svc","i":-42,"u":18446744073709551615,"d":3.5,"b":true,"bytes":"AQID","arr":["a",2],"kv":{"n":1}})");
+  }
+
+  // 2. Flat object with service_name and nested plain object / direct array
+  {
+    auto json = R"({
+      "attributes": {
+        "service_name": "flat-svc",
+        "plain_obj": { "x": 10, "y": "z" },
+        "direct_arr": [1, "two", false]
+      }
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    std::string_view svc = "unknown_service";
+    writer_.Reset();
+    WriteAttributesJson(writer_, attrs, &svc);
+    EXPECT_EQ(svc, "flat-svc");
+    EXPECT_EQ(
+        writer_.Str(),
+        R"({"service_name":"flat-svc","plain_obj":{"x":10,"y":"z"},"direct_arr":[1,"two",false]})");
+  }
+
+  // 3. Non-string service.name (e.g. arrayValue) is ignored / falls back to unknown_service
+  {
+    auto json = R"({
+      "attributes": [
+        { "key": "service.name", "value": { "arrayValue": { "values": [{ "stringValue": "bad" }] } } }
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    std::string_view svc = "unknown_service";
+    writer_.Reset();
+    WriteAttributesJson(writer_, attrs, &svc);
+    EXPECT_EQ(svc, "unknown_service");
+    EXPECT_EQ(writer_.Str(), R"({"service.name":["bad"]})");
+  }
+
+  // 4. WriteAttributesEntriesJson and snake_case / direct arrayValue / kvlistValue / max depth
+  {
+    auto json = R"({
+      "attributes": [
+        { "key": "s", "value": { "string_value": "v" } },
+        { "key": "bad_s", "value": { "stringValue": 123 } },
+        { "key": "bad_bytes", "value": { "bytes_value": 456 } },
+        { "key": "arr_direct", "value": { "array_value": [true, "x"] } },
+        { "key": "kv_direct", "value": { "kvlist_value": { "a": { "int_value": 7 } } } },
+        { "key": "mixed_plain", "value": { "other": 1, "stringValue": "v" } }
+      ]
+    })"_padded;
+    auto doc = parser_.iterate(json);
+    auto obj = doc.get_object().value();
+    auto attrs = obj["attributes"].value();
+
+    writer_.Reset();
+    writer_.StartObject();
+    writer_.Key("prefix");
+    writer_.Int64(0);
+    WriteAttributesEntriesJson(writer_, attrs);
+    writer_.EndObject();
+    EXPECT_EQ(
+        writer_.Str(),
+        R"({"prefix":0,"s":"v","bad_s":"","bad_bytes":"","arr_direct":[true,"x"],"kv_direct":{"a":7},"mixed_plain":{"other":1,"stringValue":"v"}})");
+
+    writer_.Reset();
+    WriteAnyValueJson(writer_, attrs, 32);
+    EXPECT_EQ(writer_.Str(), R"("[max_depth_exceeded]")");
+  }
+}
+
+TEST_F(OtlpCommonTest, SerializeExemplarsJson_FullAndEdgeCases) {
+  auto json = R"({
+    "exemplars": [
+      {
+        "timeUnixNano": "1700000000123456789",
+        "asInt": "42",
+        "spanId": "00F067AA0BA902B7",
+        "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+        "filteredAttributes": [
+          { "key": "env", "value": { "stringValue": "prod" } }
+        ]
+      },
+      {
+        "time_unix_nano": 0,
+        "as_double": 1.5,
+        "span_id": "",
+        "trace_id": ""
+      },
+      {
+        "asInt": "not_an_int"
+      }
+    ],
+    "not_array": null
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto ex_val = obj["exemplars"].value();
+
+  writer_.Reset();
+  SerializeExemplarsJson(ex_val, writer_);
+  EXPECT_EQ(
+      writer_.Str(),
+      R"([{"FilteredAttributes":{"env":"prod"},"TimeUnix":"2023-11-14T22:13:20.123456789Z","Value":42,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"},{"FilteredAttributes":{},"TimeUnix":"","Value":1.5,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","SpanId":"","TraceId":""}])");
+
+  auto not_arr_val = obj["not_array"].value();
+  writer_.Reset();
+  SerializeExemplarsJson(not_arr_val, writer_);
+  EXPECT_EQ(writer_.Str(), "[]");
+}
+
+TEST_F(OtlpCommonTest, WriteAttributesJson_DeduplicatesKeysAndPreservesMultiKeyWrapperNames) {
+  // 1. Duplicate keys in OTLP KeyValue array and nested kvlistValue collapse (last-key-wins)
+  // 2. Multi-key object starting with "stringValue" or "intValue" is NOT unwrapped as OTLP AnyValue
+  // 3. Valid "service.name" is not clobbered by empty "service_name"
+  auto json = R"({
+    "attributes": [
+      { "key": "service.name", "value": { "stringValue": "canonical-svc" } },
+      { "key": "service_name", "value": { "stringValue": "" } },
+      { "key": "dup", "value": { "intValue": 1 } },
+      { "key": "keep", "value": { "stringValue": "mid" } },
+      { "key": "dup", "value": { "intValue": 2 } },
+      { "key": "multi_first", "value": { "stringValue": "v", "other": 1 } },
+      { "key": "kv_dup", "value": { "kvlistValue": { "values": [
+        { "key": "x", "value": { "intValue": 10 } },
+        { "key": "x", "value": { "intValue": 20 } }
+      ] } } }
+    ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto attrs = obj["attributes"].value();
+
+  std::string_view svc = "unknown_service";
+  writer_.Reset();
+  WriteAttributesJson(writer_, attrs, &svc);
+  EXPECT_EQ(svc, "canonical-svc");
+  EXPECT_EQ(
+      writer_.Str(),
+      R"({"service.name":"canonical-svc","service_name":"","keep":"mid","dup":2,"multi_first":{"stringValue":"v","other":1},"kv_dup":{"x":20}})");
+}
+
+TEST_F(OtlpCommonTest, ExtractServiceName_SupportsSnakeCaseAndRejectsEmptyString) {
+  auto json = R"({
+    "res_snake": {
+      "attributes": [
+        { "key": "service_name", "value": { "stringValue": "snake-attr-svc" } }
+      ]
+    },
+    "res_empty": {
+      "attributes": [
+        { "key": "service.name", "value": { "stringValue": "" } }
+      ]
+    },
+    "res_precedence": {
+      "attributes": [
+        { "key": "service.name", "value": { "stringValue": "dot-wins" } },
+        { "key": "service_name", "value": { "stringValue": "" } }
+      ]
+    }
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto root = doc.get_object().value();
+
+  auto r_snake = root["res_snake"].get_object().value();
+  EXPECT_EQ(ExtractServiceName(r_snake), "snake-attr-svc");
+
+  auto r_empty = root["res_empty"].get_object().value();
+  EXPECT_EQ(ExtractServiceName(r_empty), "unknown_service");
+
+  auto r_prec = root["res_precedence"].get_object().value();
+  EXPECT_EQ(ExtractServiceName(r_prec), "dot-wins");
+}
+
+TEST_F(OtlpCommonTest, MalformedAtomsThrowInNumericParsersAndExemplars) {
+  auto json = R"({
+    "bad_bool_u64": tru,
+    "bad_ex": [{ "asInt": "1", "filteredAttributes": [1, 2, } ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto v_u64 = obj["bad_bool_u64"].value();
+  EXPECT_THROW(ParseUint64(v_u64), std::runtime_error);
+}
+
 TEST_F(OtlpCommonTest, ScratchUtilitiesCoverage) {
   std::vector<int> vec;
   ReserveScratchVector(vec, 128);
@@ -1872,6 +2091,58 @@ TEST_F(OtlpCommonTest, PushAttributesTableServiceNameSnakeCase) {
   lua_pop(L_, 2);
 
   ResetServiceNameScratch();
+}
+
+TEST_F(OtlpCommonTest, WriteAttributesJson_RetainsSnakeCaseFallbackWhenDotServiceInvalidatedLater) {
+  auto json = R"({
+    "attrs_fallback": [
+      { "key": "service.name", "value": { "stringValue": "first-dot-svc" } },
+      { "key": "service_name", "value": { "stringValue": "fallback-snake-svc" } },
+      { "key": "service.name", "value": { "stringValue": "" } }
+    ],
+    "attrs_both_invalid": [
+      { "key": "service.name", "value": { "stringValue": "first-dot-svc" } },
+      { "key": "service_name", "value": { "stringValue": "fallback-snake-svc" } },
+      { "key": "service_name", "value": { "intValue": 1 } },
+      { "key": "service.name", "value": { "intValue": 2 } }
+    ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  std::string_view svc1 = "unknown_service";
+  auto attrs1 = obj["attrs_fallback"].value();
+  writer_.Reset();
+  WriteAttributesJson(writer_, attrs1, &svc1);
+  EXPECT_EQ(svc1, "fallback-snake-svc");
+
+  std::string_view svc2 = "unknown_service";
+  auto attrs2 = obj["attrs_both_invalid"].value();
+  writer_.Reset();
+  WriteAttributesJson(writer_, attrs2, &svc2);
+  EXPECT_EQ(svc2, "unknown_service");
+
+  ResetServiceNameScratch();
+}
+
+TEST_F(OtlpCommonTest, SerializeExemplarsJson_PreservesInt64PrecisionOnGenericValueAlias) {
+  auto json = R"({
+    "exemplars": [
+      { "value": 9007199254740993 },
+      { "value": "9007199254740993" },
+      { "value": 12.5 },
+      { "value": "12.5" }
+    ]
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto ex_val = obj["exemplars"].value();
+
+  writer_.Reset();
+  SerializeExemplarsJson(ex_val, writer_);
+  EXPECT_EQ(
+      writer_.Str(),
+      R"([{"FilteredAttributes":{},"TimeUnix":"","Value":9007199254740993,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":9007199254740993,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":12.5,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":12.5,"SpanId":"","TraceId":""}])");
 }
 
 }  // namespace

@@ -34,8 +34,10 @@ struct ProcRecorder {
   bool reenter = false;     // the first call re-invokes process() from inside the callback
   std::string reenter_message;
   std::vector<std::string> events;
-  std::vector<const void*> resource_ptrs;
-  std::vector<const void*> scope_ptrs;
+  // Per delivered row: the ResourceAttributes / ScopeAttributes JSON string ("" when the column is
+  // missing or not a string).
+  std::vector<std::string> resource_json;
+  std::vector<std::string> scope_json;
 };
 
 inline void DumpValue(lua_State* L, int idx, std::string& out) {
@@ -99,12 +101,19 @@ inline void DumpValue(lua_State* L, int idx, std::string& out) {
 // Notes the shared-table identity of one row table (index `row`).
 inline void NoteRowTables(lua_State* L, int row, ProcRecorder& rec) {
   row = lua_absindex(L, row);
-  lua_pushstring(L, "ResourceAttributes");
-  rec.resource_ptrs.push_back(lua_rawget(L, row) == LUA_TTABLE ? lua_topointer(L, -1) : nullptr);
-  lua_pop(L, 1);
-  lua_pushstring(L, "ScopeAttributes");
-  rec.scope_ptrs.push_back(lua_rawget(L, row) == LUA_TTABLE ? lua_topointer(L, -1) : nullptr);
-  lua_pop(L, 1);
+  auto note = [&](const char* key, std::vector<std::string>& out) {
+    lua_pushstring(L, key);
+    if (lua_rawget(L, row) == LUA_TSTRING) {
+      size_t len = 0;
+      const char* s = lua_tolstring(L, -1, &len);
+      out.emplace_back(s, len);
+    } else {
+      out.emplace_back();
+    }
+    lua_pop(L, 1);
+  };
+  note("ResourceAttributes", rec.resource_json);
+  note("ScopeAttributes", rec.scope_json);
 }
 
 inline int ProcRecordEmit(lua_State* L) {

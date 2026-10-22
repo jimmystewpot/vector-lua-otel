@@ -5,9 +5,9 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -32,11 +32,8 @@ namespace vector_otel::native_extractors {
 
 namespace {
 
-using core::AnchorSlot;
 using core::ErrorCode;
-using core::Key;
 using core::OperationContext;
-using core::StagedRow;
 using extractors::ExtractionResult;
 
 constexpr uint64_t kMaxLuaInt = static_cast<uint64_t>(std::numeric_limits<lua_Integer>::max());
@@ -48,9 +45,25 @@ bool IsInfinityString(std::string_view sv) noexcept {
          core::EqualsIgnoreCaseAscii(sv, "+infinity");
 }
 
-bool TryParseJsonFiniteBound(simdjson::ondemand::value& fv, double& out_bound) noexcept {
+std::string UnsupportedMetricVariantError(std::string_view variant) {
+  std::string msg = "Unsupported non-OTLP metric variant '";
+  msg.append(variant);
+  msg.append(
+      "': vector_native only supports OpenTelemetry metric types (counter, gauge, "
+      "aggregated_histogram, aggregated_summary)");
+  return msg;
+}
+
+void ThrowIfSimdjsonSyntaxError(simdjson::error_code err) {
+  if (err != simdjson::SUCCESS && err != simdjson::INCORRECT_TYPE) {
+    throw std::runtime_error(std::string(simdjson::error_message(err)));
+  }
+}
+
+bool TryParseJsonFiniteBound(simdjson::ondemand::value& fv, double& out_bound) {
   auto t_res = fv.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return false;
   }
   const auto t = t_res.value();
@@ -65,6 +78,7 @@ bool TryParseJsonFiniteBound(simdjson::ondemand::value& fv, double& out_bound) n
   if (t == simdjson::ondemand::json_type::string) {
     auto s_res = fv.get_string();
     if (s_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
       return false;
     }
     std::string_view sv = core::TrimJsonWhitespace(s_res.value());
@@ -112,18 +126,80 @@ bool TryParseLuaFiniteBound(lua_State* L, int idx, double& out_bound) noexcept {
   return false;
 }
 
+int64_t ParseKindToTemporality(std::string_view kind_sv) noexcept {
+  kind_sv = core::TrimJsonWhitespace(kind_sv);
+  if (core::EqualsIgnoreCaseAscii(kind_sv, "incremental") ||
+      core::EqualsIgnoreCaseAscii(kind_sv, "delta") ||
+      core::EqualsIgnoreCaseAscii(kind_sv, "AGGREGATION_TEMPORALITY_DELTA") || kind_sv == "1") {
+    return 1;
+  }
+  if (core::EqualsIgnoreCaseAscii(kind_sv, "absolute") ||
+      core::EqualsIgnoreCaseAscii(kind_sv, "cumulative") ||
+      core::EqualsIgnoreCaseAscii(kind_sv, "AGGREGATION_TEMPORALITY_CUMULATIVE") ||
+      kind_sv == "2") {
+    return 2;
+  }
+  return 0;
+}
+
+void ParseJsonAggregationTemporality(simdjson::ondemand::value& fv, int64_t& agg_temporality) {
+  auto t_res = fv.type();
+  if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
+    return;
+  }
+  if (t_res.value() == simdjson::ondemand::json_type::string) {
+    auto s_res = fv.get_string();
+    if (s_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
+      return;
+    }
+    agg_temporality = ParseKindToTemporality(s_res.value());
+  } else if (t_res.value() == simdjson::ondemand::json_type::number) {
+    int64_t iv = core::ParseInt64(fv);
+    agg_temporality = iv >= 0 ? iv : 0;
+  }
+}
+
+void ReadLuaAggregationTemporality(lua_State* L, int obj_idx, int64_t& agg_temporality) {
+  int abs_idx = lua_absindex(L, obj_idx);
+  bool found = core::GetTableFieldRaw(L, abs_idx, "kind", "aggregationTemporality",
+                                      "aggregation_temporality");
+  if (!found) {
+    found = core::GetTableFieldRaw(L, abs_idx, "AggregationTemporality");
+  }
+  if (!found) {
+    return;
+  }
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t klen = 0;
+    const char* ks = lua_tolstring(L, -1, &klen);
+    if (ks != nullptr) {
+      agg_temporality = ParseKindToTemporality(std::string_view(ks, klen));
+    }
+  } else if (lua_type(L, -1) == LUA_TNUMBER) {
+    int64_t parsed_temp = 0;
+    if (core::TryParseTableInt64At(L, -1, parsed_temp) && parsed_temp >= 0) {
+      agg_temporality = parsed_temp;
+    }
+  }
+  lua_pop(L, 1);
+}
+
 enum class MetricValueKind { kNone, kDouble, kInt64 };
 
 void ParseJsonMetricScalarValue(simdjson::ondemand::value& fv, MetricValueKind& val_kind,
-                                double& double_val, int64_t& int_val) noexcept {
+                                double& double_val, int64_t& int_val) {
   auto t_res = fv.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return;
   }
   const auto t = t_res.value();
   if (t == simdjson::ondemand::json_type::number) {
     auto num_res = fv.get_number();
     if (num_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(num_res.error());
       return;
     }
     const auto num = num_res.value();
@@ -155,6 +231,7 @@ void ParseJsonMetricScalarValue(simdjson::ondemand::value& fv, MetricValueKind& 
   if (t == simdjson::ondemand::json_type::string) {
     auto s_res = fv.get_string();
     if (s_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
       return;
     }
     std::string_view sv = core::TrimJsonWhitespace(s_res.value());
@@ -178,29 +255,48 @@ void ParseJsonMetricScalarValue(simdjson::ondemand::value& fv, MetricValueKind& 
 }
 
 void ParseJsonCounterOrGauge(simdjson::ondemand::value& fv, MetricValueKind& val_kind,
-                             double& double_val, int64_t& int_val) noexcept {
+                             double& double_val, int64_t& int_val, int64_t& agg_temporality,
+                             core::FastJsonWriter& exemplars_writer, bool& has_exemplars) {
   auto t_res = fv.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return;
   }
   if (t_res.value() == simdjson::ondemand::json_type::object) {
     auto obj_res = fv.get_object();
     if (obj_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(obj_res.error());
       return;
     }
     for (auto field_res : obj_res.value()) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
+      if (field_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(field_res.error());
+        continue;
+      }
       auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
+      if (k_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(k_res.error());
+        continue;
+      }
       std::string_view k = k_res.value();
       auto v_res = field_res.value();
-      if (v_res.error() != simdjson::SUCCESS) continue;
+      if (v_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(v_res.error());
+        continue;
+      }
       auto v = v_res.value();
       if (k == "value" || k == "asDouble" || k == "as_double") {
         ParseJsonMetricScalarValue(v, val_kind, double_val, int_val);
       } else if (k == "asInt" || k == "as_int") {
         int_val = core::ParseInt64(v);
         val_kind = MetricValueKind::kInt64;
+      } else if (k == "aggregationTemporality" || k == "aggregation_temporality" ||
+                 k == "AggregationTemporality") {
+        ParseJsonAggregationTemporality(v, agg_temporality);
+      } else if (k == "exemplars" || k == "Exemplars") {
+        exemplars_writer.Reset();
+        core::SerializeExemplarsJson(v, exemplars_writer);
+        has_exemplars = true;
       }
     }
   } else {
@@ -208,57 +304,111 @@ void ParseJsonCounterOrGauge(simdjson::ondemand::value& fv, MetricValueKind& val
   }
 }
 
-void ParseJsonHistogram(simdjson::ondemand::value& fv, uint64_t& hist_count, double& hist_sum,
-                        bool& has_min, double& hist_min, bool& has_max, double& hist_max,
-                        std::vector<int64_t>& bucket_counts, std::vector<double>& explicit_bounds) {
+void ParseJsonBucketCountsArray(simdjson::ondemand::value& v, std::vector<uint64_t>& out) {
+  out.clear();
+  auto arr_res = v.get_array();
+  if (arr_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(arr_res.error());
+    return;
+  }
+  for (auto elem_res : arr_res.value()) {
+    if (elem_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(elem_res.error());
+      continue;
+    }
+    auto elem_val = elem_res.value();
+    out.push_back(core::ParseUint64(elem_val));
+  }
+}
+
+void ParseJsonHistogram(simdjson::ondemand::value& fv, int64_t& agg_temporality,
+                        uint64_t& hist_count, bool& has_sum, double& hist_sum, bool& has_min,
+                        double& hist_min, bool& has_max, double& hist_max,
+                        std::vector<uint64_t>& bucket_counts, std::vector<double>& explicit_bounds,
+                        core::FastJsonWriter& exemplars_writer, bool& has_exemplars) {
   bucket_counts.clear();
   explicit_bounds.clear();
   auto obj_res = fv.get_object();
   if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
     return;
   }
   for (auto field_res : obj_res.value()) {
-    if (field_res.error() != simdjson::SUCCESS) continue;
+    if (field_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(field_res.error());
+      continue;
+    }
     auto k_res = field_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) continue;
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
     std::string_view k = k_res.value();
     auto v_res = field_res.value();
-    if (v_res.error() != simdjson::SUCCESS) continue;
+    if (v_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(v_res.error());
+      continue;
+    }
     auto v = v_res.value();
 
-    if (k == "count") {
+    if (k == "count" || k == "Count") {
       hist_count = core::ParseUint64(v);
-    } else if (k == "sum") {
-      hist_sum = core::ParseDouble(v);
-    } else if (k == "min") {
+    } else if (k == "sum" || k == "Sum") {
+      if (core::TryParseDouble(v, hist_sum)) {
+        has_sum = true;
+      }
+    } else if (k == "min" || k == "Min") {
       if (core::TryParseDouble(v, hist_min)) {
         has_min = true;
       }
-    } else if (k == "max") {
+    } else if (k == "max" || k == "Max") {
       if (core::TryParseDouble(v, hist_max)) {
         has_max = true;
       }
+    } else if (k == "aggregationTemporality" || k == "aggregation_temporality" ||
+               k == "AggregationTemporality") {
+      ParseJsonAggregationTemporality(v, agg_temporality);
     } else if (k == "buckets") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           auto et_res = elem_val.type();
-          if (et_res.error() != simdjson::SUCCESS) continue;
+          if (et_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(et_res.error());
+            continue;
+          }
           if (et_res.value() == simdjson::ondemand::json_type::object) {
             auto b_obj_res = elem_val.get_object();
-            if (b_obj_res.error() != simdjson::SUCCESS) continue;
+            if (b_obj_res.error() != simdjson::SUCCESS) {
+              ThrowIfSimdjsonSyntaxError(b_obj_res.error());
+              continue;
+            }
             uint64_t bc = 0;
             for (auto bf_res : b_obj_res.value()) {
-              if (bf_res.error() != simdjson::SUCCESS) continue;
+              if (bf_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(bf_res.error());
+                continue;
+              }
               auto bk_res = bf_res.unescaped_key();
-              if (bk_res.error() != simdjson::SUCCESS) continue;
+              if (bk_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(bk_res.error());
+                continue;
+              }
               std::string_view bk = bk_res.value();
               auto bfv_res = bf_res.value();
-              if (bfv_res.error() != simdjson::SUCCESS) continue;
+              if (bfv_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(bfv_res.error());
+                continue;
+              }
               auto bfv = bfv_res.value();
-              if (bk == "count") {
+              if (bk == "count" || bk == "Count") {
                 bc = core::ParseUint64(bfv);
               } else if (bk == "upper_limit" || bk == "upperLimit") {
                 double bound = 0.0;
@@ -267,7 +417,7 @@ void ParseJsonHistogram(simdjson::ondemand::value& fv, uint64_t& hist_count, dou
                 }
               }
             }
-            bucket_counts.push_back(static_cast<int64_t>(std::min(bc, kMaxLuaInt)));
+            bucket_counts.push_back(bc);
           } else {
             double bound = 0.0;
             if (TryParseJsonFiniteBound(elem_val, bound)) {
@@ -276,21 +426,19 @@ void ParseJsonHistogram(simdjson::ondemand::value& fv, uint64_t& hist_count, dou
           }
         }
       }
-    } else if (k == "counts" || k == "bucketCounts" || k == "bucket_counts") {
+    } else if (k == "counts" || k == "bucketCounts" || k == "bucket_counts" ||
+               k == "BucketCounts") {
+      ParseJsonBucketCountsArray(v, bucket_counts);
+    } else if (k == "explicitBounds" || k == "explicit_bounds" || k == "ExplicitBounds") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
-          auto elem_val = elem_res.value();
-          uint64_t bc = core::ParseUint64(elem_val);
-          bucket_counts.push_back(static_cast<int64_t>(std::min(bc, kMaxLuaInt)));
-        }
-      }
-    } else if (k == "explicitBounds" || k == "explicit_bounds") {
-      auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
-        for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           double bound = 0.0;
           if (TryParseJsonFiniteBound(elem_val, bound)) {
@@ -298,72 +446,197 @@ void ParseJsonHistogram(simdjson::ondemand::value& fv, uint64_t& hist_count, dou
           }
         }
       }
+    } else if (k == "exemplars" || k == "Exemplars") {
+      exemplars_writer.Reset();
+      core::SerializeExemplarsJson(v, exemplars_writer);
+      has_exemplars = true;
     }
   }
 }
 
-struct SummaryQuantile {
-  double quantile = 0.0;
-  double value = 0.0;
-};
-
-int64_t ParseKindToTemporality(std::string_view kind_sv) noexcept {
-  kind_sv = core::TrimJsonWhitespace(kind_sv);
-  if (core::EqualsIgnoreCaseAscii(kind_sv, "incremental") ||
-      core::EqualsIgnoreCaseAscii(kind_sv, "delta") ||
-      core::EqualsIgnoreCaseAscii(kind_sv, "AGGREGATION_TEMPORALITY_DELTA")) {
-    return 1;
+void ParseJsonExpBucketsSubObject(simdjson::ondemand::value& v, int64_t& out_offset,
+                                  std::vector<uint64_t>& out_buckets) {
+  out_offset = 0;
+  out_buckets.clear();
+  auto obj_res = v.get_object();
+  if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
+    return;
   }
-  if (core::EqualsIgnoreCaseAscii(kind_sv, "absolute") ||
-      core::EqualsIgnoreCaseAscii(kind_sv, "cumulative") ||
-      core::EqualsIgnoreCaseAscii(kind_sv, "AGGREGATION_TEMPORALITY_CUMULATIVE")) {
-    return 2;
+  for (auto f_res : obj_res.value()) {
+    if (f_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(f_res.error());
+      continue;
+    }
+    auto k_res = f_res.unescaped_key();
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
+    std::string_view k = k_res.value();
+    auto fv_res = f_res.value();
+    if (fv_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(fv_res.error());
+      continue;
+    }
+    auto fv = fv_res.value();
+    if (k == "offset" || k == "Offset") {
+      out_offset = core::ParseInt64(fv);
+    } else if (k == "counts" || k == "bucketCounts" || k == "bucket_counts" ||
+               k == "BucketCounts") {
+      ParseJsonBucketCountsArray(fv, out_buckets);
+    }
   }
-  return 0;
 }
 
-void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, double& sum_total,
-                      std::vector<SummaryQuantile>& quantiles,
-                      std::vector<double>& scratch_bounds) {
+void ParseJsonExponentialHistogram(simdjson::ondemand::value& fv, int64_t& agg_temporality,
+                                   uint64_t& exp_count, bool& has_sum, double& exp_sum,
+                                   bool& has_min, double& exp_min, bool& has_max, double& exp_max,
+                                   int64_t& exp_scale, uint64_t& exp_zero_count,
+                                   double& exp_zero_threshold, int64_t& pos_offset,
+                                   std::vector<uint64_t>& pos_buckets, int64_t& neg_offset,
+                                   std::vector<uint64_t>& neg_buckets,
+                                   core::FastJsonWriter& exemplars_writer, bool& has_exemplars) {
+  pos_offset = 0;
+  neg_offset = 0;
+  pos_buckets.clear();
+  neg_buckets.clear();
+  auto obj_res = fv.get_object();
+  if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
+    return;
+  }
+  for (auto field_res : obj_res.value()) {
+    if (field_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(field_res.error());
+      continue;
+    }
+    auto k_res = field_res.unescaped_key();
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
+    std::string_view k = k_res.value();
+    auto v_res = field_res.value();
+    if (v_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(v_res.error());
+      continue;
+    }
+    auto v = v_res.value();
+
+    if (k == "count" || k == "Count") {
+      exp_count = core::ParseUint64(v);
+    } else if (k == "sum" || k == "Sum") {
+      if (core::TryParseDouble(v, exp_sum)) {
+        has_sum = true;
+      }
+    } else if (k == "min" || k == "Min") {
+      if (core::TryParseDouble(v, exp_min)) {
+        has_min = true;
+      }
+    } else if (k == "max" || k == "Max") {
+      if (core::TryParseDouble(v, exp_max)) {
+        has_max = true;
+      }
+    } else if (k == "scale" || k == "Scale") {
+      exp_scale = core::ParseInt64(v);
+    } else if (k == "zeroCount" || k == "zero_count" || k == "ZeroCount") {
+      exp_zero_count = core::ParseUint64(v);
+    } else if (k == "zeroThreshold" || k == "zero_threshold" || k == "ZeroThreshold") {
+      (void)core::TryParseDouble(v, exp_zero_threshold);
+    } else if (k == "aggregationTemporality" || k == "aggregation_temporality" ||
+               k == "AggregationTemporality") {
+      ParseJsonAggregationTemporality(v, agg_temporality);
+    } else if (k == "positive" || k == "Positive") {
+      ParseJsonExpBucketsSubObject(v, pos_offset, pos_buckets);
+    } else if (k == "negative" || k == "Negative") {
+      ParseJsonExpBucketsSubObject(v, neg_offset, neg_buckets);
+    } else if (k == "exemplars" || k == "Exemplars") {
+      exemplars_writer.Reset();
+      core::SerializeExemplarsJson(v, exemplars_writer);
+      has_exemplars = true;
+    }
+  }
+}
+
+using core::SummaryQuantile;
+
+void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, bool& has_sum,
+                      double& sum_total, std::vector<SummaryQuantile>& quantiles,
+                      std::vector<double>& scratch_bounds, core::FastJsonWriter& exemplars_writer,
+                      bool& has_exemplars) {
   quantiles.clear();
   scratch_bounds.clear();
   auto obj_res = fv.get_object();
   if (obj_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(obj_res.error());
     return;
   }
   bool has_parallel_quantiles = false;
   for (auto field_res : obj_res.value()) {
-    if (field_res.error() != simdjson::SUCCESS) continue;
+    if (field_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(field_res.error());
+      continue;
+    }
     auto k_res = field_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) continue;
+    if (k_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(k_res.error());
+      continue;
+    }
     std::string_view k = k_res.value();
     auto v_res = field_res.value();
-    if (v_res.error() != simdjson::SUCCESS) continue;
+    if (v_res.error() != simdjson::SUCCESS) {
+      ThrowIfSimdjsonSyntaxError(v_res.error());
+      continue;
+    }
     auto v = v_res.value();
 
-    if (k == "count") {
+    if (k == "count" || k == "Count") {
       sum_count = core::ParseUint64(v);
-    } else if (k == "sum") {
-      sum_total = core::ParseDouble(v);
-    } else if (k == "quantiles" || k == "quantileValues" || k == "quantile_values") {
+    } else if (k == "sum" || k == "Sum") {
+      if (core::TryParseDouble(v, sum_total)) {
+        has_sum = true;
+      }
+    } else if (k == "quantiles" || k == "quantileValues" || k == "quantile_values" ||
+               k == "QuantileValues") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           auto et_res = elem_val.type();
-          if (et_res.error() != simdjson::SUCCESS) continue;
+          if (et_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(et_res.error());
+            continue;
+          }
           if (et_res.value() == simdjson::ondemand::json_type::object) {
             auto q_obj_res = elem_val.get_object();
-            if (q_obj_res.error() != simdjson::SUCCESS) continue;
+            if (q_obj_res.error() != simdjson::SUCCESS) {
+              ThrowIfSimdjsonSyntaxError(q_obj_res.error());
+              continue;
+            }
             SummaryQuantile sq{};
             for (auto qf_res : q_obj_res.value()) {
-              if (qf_res.error() != simdjson::SUCCESS) continue;
+              if (qf_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(qf_res.error());
+                continue;
+              }
               auto qk_res = qf_res.unescaped_key();
-              if (qk_res.error() != simdjson::SUCCESS) continue;
+              if (qk_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(qk_res.error());
+                continue;
+              }
               std::string_view qk = qk_res.value();
               auto qfv_res = qf_res.value();
-              if (qfv_res.error() != simdjson::SUCCESS) continue;
+              if (qfv_res.error() != simdjson::SUCCESS) {
+                ThrowIfSimdjsonSyntaxError(qfv_res.error());
+                continue;
+              }
               auto qfv = qfv_res.value();
               if (qk == "quantile" || qk == "Quantile") {
                 sq.quantile = core::ParseDouble(qfv);
@@ -380,15 +653,24 @@ void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, double
           }
         }
       }
-    } else if (k == "values") {
+    } else if (k == "values" || k == "Values") {
       auto arr_res = v.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
+      if (arr_res.error() != simdjson::SUCCESS) {
+        ThrowIfSimdjsonSyntaxError(arr_res.error());
+      } else {
         for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
+          if (elem_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(elem_res.error());
+            continue;
+          }
           auto elem_val = elem_res.value();
           scratch_bounds.push_back(core::ParseDouble(elem_val));
         }
       }
+    } else if (k == "exemplars" || k == "Exemplars") {
+      exemplars_writer.Reset();
+      core::SerializeExemplarsJson(v, exemplars_writer);
+      has_exemplars = true;
     }
   }
   if (has_parallel_quantiles && !scratch_bounds.empty()) {
@@ -401,7 +683,7 @@ void ParseJsonSummary(simdjson::ondemand::value& fv, uint64_t& sum_count, double
 }
 
 struct JsonTagValue {
-  enum class Kind { kNone, kString, kInt64, kUint64, kDouble, kBool } kind = Kind::kNone;
+  enum class Kind { kNone, kString, kInt64, kUint64, kDouble, kBool, kRawJson } kind = Kind::kNone;
   std::string_view str_val;
   int64_t int_val = 0;
   uint64_t uint_val = 0;
@@ -409,10 +691,105 @@ struct JsonTagValue {
   bool bool_val = false;
 };
 
-void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter& writer,
+struct DeferredJsonTag {
+  enum class Target { kResource, kScope, kDatapoint } target = Target::kDatapoint;
+  size_t key_offset = 0;
+  size_t key_len = 0;
+  JsonTagValue::Kind kind = JsonTagValue::Kind::kNone;
+  size_t str_offset = 0;
+  size_t str_len = 0;
+  int64_t int_val = 0;
+  uint64_t uint_val = 0;
+  double dbl_val = 0.0;
+  bool bool_val = false;
+};
+
+// Reusable per-thread staging buffers (capacity retained between invocations). A `metric` / `log`
+// wrapper nests at most one level (`depth == 0` only), and the enclosing object has already parsed
+// part of its state into its buffers when the wrapper is reached, so level 1 gets its own set:
+// an unmatched wrapper must not clobber the enclosing object's staged fields.
+struct NativeMetricsScratch {
+  core::FastJsonWriter res_attrs_writer;
+  core::FastJsonWriter scope_attrs_writer;
+  core::FastJsonWriter dp_attrs_writer;
+  core::FastJsonWriter exemplars_writer;
+  core::FastJsonWriter payload_writer;
+  std::string metric_name;
+  std::string service;
+  std::string scope_name;
+  std::string scope_ver;
+  std::string metric_desc;
+  std::string metric_unit;
+  std::vector<uint64_t> bucket_counts;
+  std::vector<double> explicit_bounds;
+  std::vector<uint64_t> pos_bucket_counts;
+  std::vector<uint64_t> neg_bucket_counts;
+  std::vector<SummaryQuantile> summary_quantiles;
+  std::vector<DeferredJsonTag> deferred_tags;
+  std::string tag_arena;
+};
+
+constexpr int kScratchLevels = 2;
+
+NativeMetricsScratch& ScratchLevel(int level) {
+  static thread_local NativeMetricsScratch levels[kScratchLevels];
+  return levels[level];
+}
+
+void ResetScratch(NativeMetricsScratch& s) {
+  s.res_attrs_writer.Reset();
+  s.scope_attrs_writer.Reset();
+  s.dp_attrs_writer.Reset();
+  s.exemplars_writer.Reset();
+  s.payload_writer.Reset();
+  core::ReserveScratchString(s.metric_name);
+  core::ReserveScratchString(s.service);
+  core::ReserveScratchString(s.scope_name);
+  core::ReserveScratchString(s.scope_ver);
+  core::ReserveScratchString(s.metric_desc);
+  core::ReserveScratchString(s.metric_unit);
+  core::ReserveScratchVector(s.bucket_counts);
+  core::ReserveScratchVector(s.explicit_bounds);
+  core::ReserveScratchVector(s.pos_bucket_counts);
+  core::ReserveScratchVector(s.neg_bucket_counts);
+  core::ReserveScratchVector(s.summary_quantiles);
+  core::ReserveScratchVector(s.deferred_tags);
+  core::ReserveScratchString(s.tag_arena);
+}
+
+void TrimScratch(NativeMetricsScratch& s) noexcept {
+  s.res_attrs_writer.Trim();
+  s.scope_attrs_writer.Trim();
+  s.dp_attrs_writer.Trim();
+  s.exemplars_writer.Trim();
+  s.payload_writer.Trim();
+  core::ResetScratchVector(s.bucket_counts);
+  core::ResetScratchVector(s.explicit_bounds);
+  core::ResetScratchVector(s.pos_bucket_counts);
+  core::ResetScratchVector(s.neg_bucket_counts);
+  core::ResetScratchVector(s.summary_quantiles);
+  core::ResetScratchVector(s.deferred_tags);
+  core::TrimScratchString(s.tag_arena);
+  core::TrimScratchString(s.metric_name);
+  core::TrimScratchString(s.service);
+  core::TrimScratchString(s.scope_name);
+  core::TrimScratchString(s.scope_ver);
+  core::TrimScratchString(s.metric_desc);
+  core::TrimScratchString(s.metric_unit);
+}
+
+void TrimAllScratch() noexcept {
+  for (int i = 0; i < kScratchLevels; ++i) {
+    TrimScratch(ScratchLevel(i));
+  }
+  core::ResetServiceNameScratch();
+}
+
+void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter& scratch_writer,
                               JsonTagValue& out) {
   auto t_res = v.type();
   if (t_res.error() != simdjson::SUCCESS) {
+    ThrowIfSimdjsonSyntaxError(t_res.error());
     return;
   }
   const auto t = t_res.value();
@@ -421,6 +798,8 @@ void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter
     if (s_res.error() == simdjson::SUCCESS) {
       out.kind = JsonTagValue::Kind::kString;
       out.str_val = s_res.value();
+    } else {
+      ThrowIfSimdjsonSyntaxError(s_res.error());
     }
   } else if (t == simdjson::ondemand::json_type::number) {
     auto num_res = v.get_number();
@@ -436,302 +815,745 @@ void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter
         out.kind = JsonTagValue::Kind::kDouble;
         out.dbl_val = num.get_double();
       }
+    } else {
+      ThrowIfSimdjsonSyntaxError(num_res.error());
     }
   } else if (t == simdjson::ondemand::json_type::boolean) {
     auto b_res = v.get_bool();
     if (b_res.error() == simdjson::SUCCESS) {
       out.kind = JsonTagValue::Kind::kBool;
       out.bool_val = b_res.value();
+    } else {
+      ThrowIfSimdjsonSyntaxError(b_res.error());
     }
   } else if (t == simdjson::ondemand::json_type::object) {
-    auto raw_res = v.raw_json();
-    if (raw_res.error() == simdjson::SUCCESS) {
-      writer.Reset();
-      writer.RawJson(core::TrimJsonWhitespace(raw_res.value()));
-      out.kind = JsonTagValue::Kind::kString;
-      out.str_val = writer.Str();
-    }
+    scratch_writer.Reset();
+    core::WriteAnyValueJson(scratch_writer, v);
+    out.kind = JsonTagValue::Kind::kRawJson;
+    out.str_val = scratch_writer.Str();
   }
 }
 
-// Exact text of the unsupported-variant diagnostic, built without allocating.
-bool FailUnsupportedVariant(OperationContext& ctx, std::string_view variant) {
-  static constexpr std::string_view kPrefix = "Unsupported non-OTLP metric variant '";
-  static constexpr std::string_view kSuffix =
-      "': vector_native only supports OpenTelemetry metric types (counter, gauge, "
-      "aggregated_histogram, aggregated_summary)";
-  char buf[256];
-  std::size_t n = 0;
-  auto append = [&](std::string_view text) {
-    const std::size_t take = std::min(text.size(), sizeof(buf) - n);
-    std::memcpy(buf + n, text.data(), take);
-    n += take;
+void WriteJsonTagValueToWriter(core::FastJsonWriter& dst_writer, std::string_view key,
+                               const JsonTagValue& tv) {
+  if (tv.kind == JsonTagValue::Kind::kNone) {
+    return;
+  }
+  dst_writer.Key(key);
+  switch (tv.kind) {
+    case JsonTagValue::Kind::kString:
+      dst_writer.String(tv.str_val);
+      break;
+    case JsonTagValue::Kind::kInt64:
+      dst_writer.Int64(tv.int_val);
+      break;
+    case JsonTagValue::Kind::kUint64:
+      dst_writer.Uint64(tv.uint_val);
+      break;
+    case JsonTagValue::Kind::kDouble:
+      dst_writer.Double(tv.dbl_val);
+      break;
+    case JsonTagValue::Kind::kBool:
+      dst_writer.Bool(tv.bool_val);
+      break;
+    case JsonTagValue::Kind::kRawJson:
+      dst_writer.RawJson(tv.str_val);
+      break;
+    case JsonTagValue::Kind::kNone:
+      dst_writer.Null();
+      break;
+  }
+}
+
+bool ExtractNativeMetricObjectJson(
+    lua_State* L, simdjson::ondemand::object& rec_obj, std::string_view processed_at,
+    core::FastJsonWriter& res_attrs_writer, core::FastJsonWriter& scope_attrs_writer,
+    core::FastJsonWriter& dp_attrs_writer, core::FastJsonWriter& exemplars_writer,
+    core::FastJsonWriter& payload_writer, std::string& tls_metric_name_scratch,
+    std::string& tls_service_scratch, std::string& tls_scope_name_scratch,
+    std::string& tls_scope_ver_scratch, std::string& tls_metric_desc_scratch,
+    std::string& tls_metric_unit_scratch, std::vector<uint64_t>& tls_bucket_counts,
+    std::vector<double>& tls_explicit_bounds, std::vector<uint64_t>& tls_pos_bucket_counts,
+    std::vector<uint64_t>& tls_neg_bucket_counts,
+    std::vector<SummaryQuantile>& tls_summary_quantiles, core::RowEmitter& emitter,
+    std::string& err_out, int depth = 0, bool* out_matched = nullptr) {
+  NativeMetricsScratch& level = ScratchLevel(depth);
+  std::vector<DeferredJsonTag>& tls_deferred_tags = level.deferred_tags;
+  std::string& tls_tag_arena = level.tag_arena;
+  // Recurses into a wrapper's object with the next level's buffers.
+  auto extract_wrapped = [&](simdjson::ondemand::object& inner, bool* matched) -> bool {
+    NativeMetricsScratch& n = ScratchLevel(depth + 1);
+    ResetScratch(n);
+    return ExtractNativeMetricObjectJson(
+        L, inner, processed_at, n.res_attrs_writer, n.scope_attrs_writer, n.dp_attrs_writer,
+        n.exemplars_writer, n.payload_writer, n.metric_name, n.service, n.scope_name, n.scope_ver,
+        n.metric_desc, n.metric_unit, n.bucket_counts, n.explicit_bounds, n.pos_bucket_counts,
+        n.neg_bucket_counts, n.summary_quantiles, emitter, err_out, depth + 1, matched);
   };
-  append(kPrefix);
-  append(variant.substr(0, 16));
-  append(kSuffix);
-  ctx.error.Set(ErrorCode::Schema, std::string_view(buf, n));
-  return false;
-}
+  uint64_t t_ns = 0;
+  uint64_t start_ns = 0;
+  uint64_t interval_ms = 0;
+  bool has_ts = false;
+  bool has_start_ts = false;
+  bool has_interval_ms = false;
 
-bool FailJson(OperationContext& ctx, simdjson::error_code code) {
-  ctx.error.Set(ErrorCode::Json, simdjson::error_message(code));
-  return false;
-}
-
-// Per-nesting-level staging state. A wrapper ({"metric": {...}}) nests at most one level, so two
-// levels cover an enclosing object and its record; the table path uses level 0. Everything is
-// retained between invocations, so the steady state performs no C++ allocation per record.
-struct Level {
-  StagedRow row;            // the record being built
-  StagedRow res_tape;       // ResourceAttributes (tags "resource.*" plus resources / resource)
-  StagedRow scope_tape;     // ScopeAttributes (tags "scope.*" plus scope.attributes)
-  StagedRow dp_tape;        // Attributes (remaining tags plus attributes)
-  StagedRow bucket_tape;    // histogram bucketCounts
-  StagedRow bounds_tape;    // histogram explicitBounds
-  StagedRow quantile_tape;  // summary quantileValues
-  std::string metric_name;
-  std::string service;
-  std::string scope_name;
-  std::string scope_ver;
-  std::string metric_desc;
-  std::string metric_unit;
-  std::vector<int64_t> bucket_counts;
-  std::vector<double> explicit_bounds;
-  std::vector<SummaryQuantile> summary_quantiles;
-};
-
-struct NativeMetricsScratch {
-  core::FastJsonWriter writer;  // tag / attribute serialisation
-  Level levels[2];
-};
-
-NativeMetricsScratch& Scratch() {
-  static thread_local NativeMetricsScratch scratch;
-  return scratch;
-}
-
-void ReserveLevel(Level& lv) {
-  core::ReserveScratchString(lv.metric_name);
-  core::ReserveScratchString(lv.service);
-  core::ReserveScratchString(lv.scope_name);
-  core::ReserveScratchString(lv.scope_ver);
-  core::ReserveScratchString(lv.metric_desc);
-  core::ReserveScratchString(lv.metric_unit);
-  core::ReserveScratchVector(lv.bucket_counts);
-  core::ReserveScratchVector(lv.explicit_bounds);
-  core::ReserveScratchVector(lv.summary_quantiles);
-}
-
-void ResetLevel(Level& lv) noexcept {
-  core::TrimScratchString(lv.metric_name);
-  core::TrimScratchString(lv.service);
-  core::TrimScratchString(lv.scope_name);
-  core::TrimScratchString(lv.scope_ver);
-  core::TrimScratchString(lv.metric_desc);
-  core::TrimScratchString(lv.metric_unit);
-  core::ResetScratchVector(lv.bucket_counts);
-  core::ResetScratchVector(lv.explicit_bounds);
-  core::ResetScratchVector(lv.summary_quantiles);
-}
-
-// ---- row staging -------------------------------------------------------------------------------
-
-void DualInt(StagedRow& r, Key camel, Key pascal, std::int64_t v) {
-  r.Int(camel, v);
-  r.Int(pascal, v);
-}
-void DualUint(StagedRow& r, Key camel, Key pascal, std::uint64_t v) {
-  r.Uint(camel, v);
-  r.Uint(pascal, v);
-}
-void DualDbl(StagedRow& r, Key camel, Key pascal, double v) {
-  r.Dbl(camel, v);
-  r.Dbl(pascal, v);
-}
-void DualAnchor(StagedRow& r, Key camel, Key pascal, AnchorSlot slot) {
-  r.Anchor(camel, slot);
-  r.Anchor(pascal, slot);
-}
-
-// Dry runs never touch Lua; otherwise the tape becomes a table in its anchor slot.
-bool MaterializeTape(OperationContext& ctx, const StagedRow& tape, AnchorSlot slot) {
-  return ctx.dry_run || core::MaterializeToAnchor(ctx, tape, slot);
-}
-
-// Everything a record needs, collected before the row is staged.
-struct MetricRecord {
-  std::string_view name;
-  std::string_view description;
-  std::string_view unit;
-  std::string_view type;
-  std::string_view service;
+  std::string_view raw_name;
+  std::string_view metric_ns;
+  std::string_view metric_desc;
+  std::string_view metric_unit;
+  std::string_view metric_type;
+  std::string_view service_name;
+  std::string_view top_service_name;
   std::string_view scope_name;
   std::string_view scope_version;
-  std::string_view start_time;
-  std::string_view time_unix;
-  bool is_sum = false;
-  bool is_histogram = false;
-  bool is_summary = false;
-  int64_t agg_temporality = 0;
-  bool has_is_monotonic = false;
-  bool is_monotonic = false;
+
   MetricValueKind val_kind = MetricValueKind::kNone;
   double double_val = 0.0;
   int64_t int_val = 0;
-  uint64_t count = 0;
-  double sum = 0.0;
-  bool has_min = false;
-  double min = 0.0;
-  bool has_max = false;
-  double max = 0.0;
   int64_t flags = 0;
-};
+  int64_t agg_temporality = 0;
+  bool has_is_monotonic = false;
+  bool is_monotonic = false;
 
-// Stages every column except Exemplars and processed_at (the table path stages its own exemplars).
-// The attribute maps and the histogram / summary arrays are anchors, materialised by
-// MaterializeRecordTapes() right before the row is delivered.
-void StageRecordColumns(StagedRow& r, const MetricRecord& m) {
-  r.Str("MetricName", m.name);
-  r.Str("MetricDescription", m.description);
-  r.Str("MetricUnit", m.unit);
-  r.Str("MetricType", m.type);
-  r.Str("ServiceName", m.service);
-  if (m.is_sum || m.is_histogram) {
-    r.Int("AggregationTemporality", m.agg_temporality);
-  }
-  if (m.is_sum && m.has_is_monotonic) {
-    r.Bool("IsMonotonic", m.is_monotonic);
-  }
-  r.Anchor("ResourceAttributes", AnchorSlot::kResourceAttrs);
-  r.Str("ScopeName", m.scope_name);
-  r.Str("ScopeVersion", m.scope_version);
-  r.Anchor("ScopeAttributes", AnchorSlot::kScopeAttrs);
-  r.Anchor("Attributes", AnchorSlot::kRecordAttrs);
-  r.Str("StartTimeUnix", m.start_time);
-  r.Str("TimeUnix", m.time_unix);
-  if (!m.is_histogram && !m.is_summary) {
-    if (m.val_kind == MetricValueKind::kDouble) {
-      r.Dbl("Value", m.double_val);
-    } else if (m.val_kind == MetricValueKind::kInt64) {
-      r.Int("Value", m.int_val);
+  uint64_t hist_count = 0;
+  bool has_sum = false;
+  double hist_sum = 0.0;
+  bool has_min = false;
+  double hist_min = 0.0;
+  bool has_max = false;
+  double hist_max = 0.0;
+  int64_t exp_scale = 0;
+  uint64_t exp_zero_count = 0;
+  double exp_zero_threshold = 0.0;
+  int64_t pos_offset = 0;
+  int64_t neg_offset = 0;
+
+  tls_bucket_counts.clear();
+  tls_explicit_bounds.clear();
+  tls_pos_bucket_counts.clear();
+  tls_neg_bucket_counts.clear();
+  tls_summary_quantiles.clear();
+
+  bool has_res_attrs = false;
+  bool has_scope_attrs = false;
+  bool has_dp_attrs = false;
+  bool has_exemplars = false;
+  bool has_seen_tags = false;
+
+  size_t tag_res_svc_off = 0, tag_res_svc_len = 0;
+  bool has_tag_res_svc = false;
+  size_t tag_dp_svc_off = 0, tag_dp_svc_len = 0;
+  bool has_tag_dp_svc = false;
+  size_t tag_scope_name_off = 0, tag_scope_name_len = 0;
+  bool has_tag_scope_name = false;
+  size_t tag_scope_ver_off = 0, tag_scope_ver_len = 0;
+  bool has_tag_scope_ver = false;
+  size_t tag_otel_scope_name_off = 0, tag_otel_scope_name_len = 0;
+  bool has_tag_otel_scope_name = false;
+  size_t tag_otel_scope_ver_off = 0, tag_otel_scope_ver_len = 0;
+  bool has_tag_otel_scope_ver = false;
+  size_t tag_unit_off = 0, tag_unit_len = 0;
+  bool has_tag_unit = false;
+  size_t tag_desc_off = 0, tag_desc_len = 0;
+  bool has_tag_desc = false;
+
+  auto append_to_arena = [&tls_tag_arena](std::string_view sv, size_t& out_off, size_t& out_len) {
+    out_off = tls_tag_arena.size();
+    out_len = sv.size();
+    tls_tag_arena.append(sv.data(), sv.size());
+  };
+
+  auto push_deferred_tag = [&](DeferredJsonTag::Target target, std::string_view key,
+                               const JsonTagValue& tv) {
+    DeferredJsonTag dt{};
+    dt.target = target;
+    append_to_arena(key, dt.key_offset, dt.key_len);
+    dt.kind = tv.kind;
+    if (tv.kind == JsonTagValue::Kind::kString || tv.kind == JsonTagValue::Kind::kRawJson) {
+      append_to_arena(tv.str_val, dt.str_offset, dt.str_len);
+    } else if (tv.kind == JsonTagValue::Kind::kInt64) {
+      dt.int_val = tv.int_val;
+    } else if (tv.kind == JsonTagValue::Kind::kUint64) {
+      dt.uint_val = tv.uint_val;
+    } else if (tv.kind == JsonTagValue::Kind::kDouble) {
+      dt.dbl_val = tv.dbl_val;
+    } else if (tv.kind == JsonTagValue::Kind::kBool) {
+      dt.bool_val = tv.bool_val;
+    }
+    tls_deferred_tags.push_back(dt);
+  };
+
+  auto ensure_res_attrs_open = [&]() {
+    if (!has_res_attrs) {
+      res_attrs_writer.Reset();
+      res_attrs_writer.StartObject();
+      has_res_attrs = true;
+    }
+  };
+  auto ensure_scope_attrs_open = [&]() {
+    if (!has_scope_attrs) {
+      scope_attrs_writer.Reset();
+      scope_attrs_writer.StartObject();
+      has_scope_attrs = true;
+    }
+  };
+  auto ensure_dp_attrs_open = [&]() {
+    if (!has_dp_attrs) {
+      dp_attrs_writer.Reset();
+      dp_attrs_writer.StartObject();
+      has_dp_attrs = true;
+    }
+  };
+
+  bool has_recognized_field = false;
+
+  for (auto field_res : rec_obj) {
+    if (field_res.error() != simdjson::SUCCESS) {
+      err_out = std::string(simdjson::error_message(field_res.error()));
+      return false;
+    }
+    auto k_res = field_res.unescaped_key();
+    if (k_res.error() != simdjson::SUCCESS) {
+      err_out = std::string(simdjson::error_message(k_res.error()));
+      return false;
+    }
+    std::string_view k = k_res.value();
+    auto fv_res = field_res.value();
+    if (fv_res.error() != simdjson::SUCCESS) {
+      err_out = std::string(simdjson::error_message(fv_res.error()));
+      return false;
+    }
+    auto fv = fv_res.value();
+
+    if ((k == "metric" || k == "log") && depth == 0) {
+      auto t_res = fv.type();
+      if (t_res.error() != simdjson::SUCCESS) {
+        err_out = std::string(simdjson::error_message(t_res.error()));
+        return false;
+      }
+      if (t_res.value() == simdjson::ondemand::json_type::object) {
+        auto inner_obj_res = fv.get_object();
+        if (inner_obj_res.error() != simdjson::SUCCESS) {
+          err_out = std::string(simdjson::error_message(inner_obj_res.error()));
+          return false;
+        }
+        auto inner_obj = inner_obj_res.value();
+        bool inner_matched = false;
+        if (!extract_wrapped(inner_obj, &inner_matched)) {
+          return false;
+        }
+        if (inner_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
+      } else if (t_res.value() == simdjson::ondemand::json_type::array) {
+        auto inner_arr_res = fv.get_array();
+        if (inner_arr_res.error() != simdjson::SUCCESS) {
+          err_out = std::string(simdjson::error_message(inner_arr_res.error()));
+          return false;
+        }
+        bool any_matched = false;
+        for (auto elem_res : inner_arr_res.value()) {
+          if (elem_res.error() != simdjson::SUCCESS) {
+            err_out = std::string(simdjson::error_message(elem_res.error()));
+            return false;
+          }
+          auto elem_obj_res = elem_res.value().get_object();
+          if (elem_obj_res.error() != simdjson::SUCCESS) {
+            err_out = std::string(simdjson::error_message(elem_obj_res.error()));
+            return false;
+          }
+          auto elem_obj = elem_obj_res.value();
+          bool elem_matched = false;
+          if (!extract_wrapped(elem_obj, &elem_matched)) {
+            return false;
+          }
+          any_matched = any_matched || elem_matched;
+        }
+        if (any_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
+      }
+      continue;
+    }
+
+    if (k == "distribution" || k == "set" || k == "sketch") {
+      auto t_res = fv.type();
+      if (t_res.error() == simdjson::SUCCESS &&
+          t_res.value() != simdjson::ondemand::json_type::null) {
+        err_out = UnsupportedMetricVariantError(k);
+        return false;
+      }
+      continue;
+    }
+
+    if (k == "name") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        raw_name = s_res.value();
+      }
+    } else if (k == "namespace") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        metric_ns = s_res.value();
+      }
+    } else if (k == "description") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        metric_desc = s_res.value();
+      }
+    } else if (k == "unit") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        metric_unit = s_res.value();
+      }
+    } else if (k == "timestamp" || k == "timeUnixNano" || k == "time_unix_nano") {
+      has_recognized_field = true;
+      uint64_t parsed = 0;
+      if (core::ParseJsonTimestamp(fv, parsed)) {
+        t_ns = parsed;
+        has_ts = true;
+      }
+    } else if (k == "start_time_unix_nano" || k == "startTimeUnixNano" || k == "start_timestamp") {
+      has_recognized_field = true;
+      uint64_t parsed = 0;
+      if (core::ParseJsonTimestamp(fv, parsed)) {
+        start_ns = parsed;
+        has_start_ts = true;
+      }
+    } else if (k == "interval_ms") {
+      has_recognized_field = true;
+      uint64_t iv = core::ParseUint64(fv);
+      if (iv > 0) {
+        interval_ms = iv;
+        has_interval_ms = true;
+      }
+    } else if (k == "flags") {
+      has_recognized_field = true;
+      flags = core::ParseInt64(fv);
+    } else if (k == "kind" || k == "aggregationTemporality" || k == "aggregation_temporality") {
+      has_recognized_field = true;
+      ParseJsonAggregationTemporality(fv, agg_temporality);
+    } else if (k == "isMonotonic" || k == "is_monotonic") {
+      has_recognized_field = true;
+      auto b_res = fv.get_bool();
+      if (b_res.error() == simdjson::SUCCESS) {
+        is_monotonic = b_res.value();
+        has_is_monotonic = true;
+      }
+    } else if (k == "counter" || k == "sum") {
+      has_recognized_field = true;
+      metric_type = "sum";
+      ParseJsonCounterOrGauge(fv, val_kind, double_val, int_val, agg_temporality, exemplars_writer,
+                              has_exemplars);
+    } else if (k == "gauge") {
+      has_recognized_field = true;
+      metric_type = "gauge";
+      ParseJsonCounterOrGauge(fv, val_kind, double_val, int_val, agg_temporality, exemplars_writer,
+                              has_exemplars);
+    } else if (k == "aggregated_histogram" || k == "histogram") {
+      has_recognized_field = true;
+      metric_type = "histogram";
+      ParseJsonHistogram(fv, agg_temporality, hist_count, has_sum, hist_sum, has_min, hist_min,
+                         has_max, hist_max, tls_bucket_counts, tls_explicit_bounds,
+                         exemplars_writer, has_exemplars);
+    } else if (k == "exponential_histogram" || k == "exponentialHistogram" ||
+               k == "aggregated_exponential_histogram") {
+      has_recognized_field = true;
+      metric_type = "exponential_histogram";
+      ParseJsonExponentialHistogram(
+          fv, agg_temporality, hist_count, has_sum, hist_sum, has_min, hist_min, has_max, hist_max,
+          exp_scale, exp_zero_count, exp_zero_threshold, pos_offset, tls_pos_bucket_counts,
+          neg_offset, tls_neg_bucket_counts, exemplars_writer, has_exemplars);
+    } else if (k == "aggregated_summary" || k == "summary") {
+      has_recognized_field = true;
+      metric_type = "summary";
+      ParseJsonSummary(fv, hist_count, has_sum, hist_sum, tls_summary_quantiles,
+                       tls_explicit_bounds, exemplars_writer, has_exemplars);
+    } else if (k == "exemplars" || k == "Exemplars") {
+      has_recognized_field = true;
+      exemplars_writer.Reset();
+      core::SerializeExemplarsJson(fv, exemplars_writer);
+      has_exemplars = true;
+    } else if (k == "tags") {
+      has_recognized_field = true;
+      if (!has_seen_tags) {
+        tls_deferred_tags.clear();
+        tls_tag_arena.clear();
+        has_seen_tags = true;
+      }
+      auto tags_obj_res = fv.get_object();
+      if (tags_obj_res.error() == simdjson::SUCCESS) {
+        for (auto tf_res : tags_obj_res.value()) {
+          if (tf_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tf_res.error());
+            continue;
+          }
+          auto tk_res = tf_res.unescaped_key();
+          if (tk_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tk_res.error());
+            continue;
+          }
+          std::string_view tk = tk_res.value();
+          auto tv_res = tf_res.value();
+          if (tv_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tv_res.error());
+            continue;
+          }
+          auto tv = tv_res.value();
+
+          JsonTagValue tag_val;
+          auto tv_type_res = tv.type();
+          if (tv_type_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(tv_type_res.error());
+            continue;
+          }
+          if (tv_type_res.value() == simdjson::ondemand::json_type::array) {
+            auto arr_res = tv.get_array();
+            if (arr_res.error() == simdjson::SUCCESS) {
+              for (auto elem_res : arr_res.value()) {
+                if (elem_res.error() != simdjson::SUCCESS) {
+                  ThrowIfSimdjsonSyntaxError(elem_res.error());
+                  continue;
+                }
+                auto elem_v = elem_res.value();
+                ReadSingleJsonTagElement(elem_v, payload_writer, tag_val);
+              }
+            } else {
+              ThrowIfSimdjsonSyntaxError(arr_res.error());
+            }
+          } else {
+            ReadSingleJsonTagElement(tv, payload_writer, tag_val);
+          }
+
+          if (tag_val.kind == JsonTagValue::Kind::kNone) {
+            continue;
+          }
+
+          if (tk.size() > 9 && tk.substr(0, 9) == "resource.") {
+            std::string_view sub_key = tk.substr(9);
+            if ((sub_key == "service.name" || sub_key == "service_name") &&
+                tag_val.kind == JsonTagValue::Kind::kString && !tag_val.str_val.empty()) {
+              append_to_arena(tag_val.str_val, tag_res_svc_off, tag_res_svc_len);
+              has_tag_res_svc = true;
+            }
+            push_deferred_tag(DeferredJsonTag::Target::kResource, sub_key, tag_val);
+          } else if (tk.size() > 6 && tk.substr(0, 6) == "scope.") {
+            std::string_view sub_key = tk.substr(6);
+            if (sub_key == "name") {
+              if (tag_val.kind == JsonTagValue::Kind::kString) {
+                append_to_arena(tag_val.str_val, tag_scope_name_off, tag_scope_name_len);
+                has_tag_scope_name = true;
+              }
+            } else if (sub_key == "version") {
+              if (tag_val.kind == JsonTagValue::Kind::kString) {
+                append_to_arena(tag_val.str_val, tag_scope_ver_off, tag_scope_ver_len);
+                has_tag_scope_ver = true;
+              }
+            } else {
+              push_deferred_tag(DeferredJsonTag::Target::kScope, sub_key, tag_val);
+            }
+          } else if (tk == "otel.unit" || tk == "metric.unit") {
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_unit_off, tag_unit_len);
+              has_tag_unit = true;
+            }
+          } else if (tk == "otel.description" || tk == "metric.description") {
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_desc_off, tag_desc_len);
+              has_tag_desc = true;
+            }
+          } else if (tk == "otel.scope.name") {
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_otel_scope_name_off, tag_otel_scope_name_len);
+              has_tag_otel_scope_name = true;
+            }
+          } else if (tk == "otel.scope.version") {
+            if (tag_val.kind == JsonTagValue::Kind::kString) {
+              append_to_arena(tag_val.str_val, tag_otel_scope_ver_off, tag_otel_scope_ver_len);
+              has_tag_otel_scope_ver = true;
+            }
+          } else {
+            push_deferred_tag(DeferredJsonTag::Target::kDatapoint, tk, tag_val);
+            if ((tk == "service.name" || tk == "service_name") &&
+                tag_val.kind == JsonTagValue::Kind::kString && !tag_val.str_val.empty()) {
+              append_to_arena(tag_val.str_val, tag_dp_svc_off, tag_dp_svc_len);
+              has_tag_dp_svc = true;
+            }
+          }
+        }
+      } else {
+        ThrowIfSimdjsonSyntaxError(tags_obj_res.error());
+      }
+    } else if (k == "resources" || k == "resource_attributes" || k == "resourceAttributes" ||
+               k == "resource") {
+      has_recognized_field = true;
+      res_attrs_writer.Reset();
+      res_attrs_writer.StartObject();
+      has_res_attrs = true;
+      service_name = "unknown_service";
+      std::string_view extracted_svc = "unknown_service";
+      core::WriteAttributesEntriesJson(res_attrs_writer, fv, &extracted_svc);
+      if (extracted_svc != "unknown_service" && !extracted_svc.empty()) {
+        tls_service_scratch.assign(extracted_svc);
+        service_name = std::string_view(tls_service_scratch);
+      }
+    } else if (k == "scope") {
+      has_recognized_field = true;
+      auto s_obj_res = fv.get_object();
+      if (s_obj_res.error() == simdjson::SUCCESS) {
+        for (auto sf_res : s_obj_res.value()) {
+          if (sf_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(sf_res.error());
+            continue;
+          }
+          auto sk_res = sf_res.unescaped_key();
+          if (sk_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(sk_res.error());
+            continue;
+          }
+          std::string_view sk = sk_res.value();
+          auto sfv_res = sf_res.value();
+          if (sfv_res.error() != simdjson::SUCCESS) {
+            ThrowIfSimdjsonSyntaxError(sfv_res.error());
+            continue;
+          }
+          auto sfv = sfv_res.value();
+          if (sk == "name") {
+            auto s_res = sfv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              tls_scope_name_scratch.assign(s_res.value());
+              scope_name = std::string_view(tls_scope_name_scratch);
+            } else {
+              ThrowIfSimdjsonSyntaxError(s_res.error());
+            }
+          } else if (sk == "version") {
+            auto s_res = sfv.get_string();
+            if (s_res.error() == simdjson::SUCCESS) {
+              tls_scope_ver_scratch.assign(s_res.value());
+              scope_version = std::string_view(tls_scope_ver_scratch);
+            } else {
+              ThrowIfSimdjsonSyntaxError(s_res.error());
+            }
+          } else if (sk == "attributes") {
+            scope_attrs_writer.Reset();
+            scope_attrs_writer.StartObject();
+            has_scope_attrs = true;
+            core::WriteAttributesEntriesJson(scope_attrs_writer, sfv);
+          }
+        }
+      } else {
+        ThrowIfSimdjsonSyntaxError(s_obj_res.error());
+      }
+    } else if (k == "attributes") {
+      has_recognized_field = true;
+      dp_attrs_writer.Reset();
+      dp_attrs_writer.StartObject();
+      has_dp_attrs = true;
+      core::WriteAttributesEntriesJson(dp_attrs_writer, fv);
+    } else if (k == "service_name" || k == "service") {
+      has_recognized_field = true;
+      auto s_res = fv.get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        top_service_name = s_res.value();
+      } else {
+        ThrowIfSimdjsonSyntaxError(s_res.error());
+      }
     }
   }
-  if (m.is_histogram) {
-    r.BeginMap("Histogram");
-    DualInt(r, "aggregationTemporality", "AggregationTemporality", m.agg_temporality);
-    DualUint(r, "count", "Count", m.count);
-    DualDbl(r, "sum", "Sum", m.sum);
-    if (m.has_min) DualDbl(r, "min", "Min", m.min);
-    if (m.has_max) DualDbl(r, "max", "Max", m.max);
-    DualAnchor(r, "bucketCounts", "BucketCounts", AnchorSlot::kBucketCounts);
-    DualAnchor(r, "explicitBounds", "ExplicitBounds", AnchorSlot::kExplicitBounds);
-    r.End();
-  }
-  if (m.is_summary) {
-    r.BeginMap("Summary");
-    DualUint(r, "count", "Count", m.count);
-    DualDbl(r, "sum", "Sum", m.sum);
-    DualAnchor(r, "quantileValues", "QuantileValues", AnchorSlot::kQuantiles);
-    r.End();
-  }
-  r.Int("Flags", m.flags);
-}
 
-// Builds the array tapes from the parsed vectors and anchors every table the row references.
-bool MaterializeRecordTapes(OperationContext& ctx, Level& lv, const MetricRecord& m) {
-  if (!MaterializeTape(ctx, lv.res_tape, AnchorSlot::kResourceAttrs) ||
-      !MaterializeTape(ctx, lv.scope_tape, AnchorSlot::kScopeAttrs) ||
-      !MaterializeTape(ctx, lv.dp_tape, AnchorSlot::kRecordAttrs)) {
+  if (!has_recognized_field || metric_type.empty()) {
+    return true;
+  }
+  if (out_matched != nullptr) {
+    *out_matched = true;
+  }
+
+  if (has_seen_tags) {
+    for (const auto& dt : tls_deferred_tags) {
+      std::string_view key(tls_tag_arena.data() + dt.key_offset, dt.key_len);
+      JsonTagValue tv{};
+      tv.kind = dt.kind;
+      if (dt.kind == JsonTagValue::Kind::kString || dt.kind == JsonTagValue::Kind::kRawJson) {
+        tv.str_val = std::string_view(tls_tag_arena.data() + dt.str_offset, dt.str_len);
+      } else if (dt.kind == JsonTagValue::Kind::kInt64) {
+        tv.int_val = dt.int_val;
+      } else if (dt.kind == JsonTagValue::Kind::kUint64) {
+        tv.uint_val = dt.uint_val;
+      } else if (dt.kind == JsonTagValue::Kind::kDouble) {
+        tv.dbl_val = dt.dbl_val;
+      } else if (dt.kind == JsonTagValue::Kind::kBool) {
+        tv.bool_val = dt.bool_val;
+      }
+      if (dt.target == DeferredJsonTag::Target::kResource) {
+        ensure_res_attrs_open();
+        WriteJsonTagValueToWriter(res_attrs_writer, key, tv);
+      } else if (dt.target == DeferredJsonTag::Target::kScope) {
+        ensure_scope_attrs_open();
+        WriteJsonTagValueToWriter(scope_attrs_writer, key, tv);
+      } else {
+        ensure_dp_attrs_open();
+        WriteJsonTagValueToWriter(dp_attrs_writer, key, tv);
+      }
+    }
+    if (has_tag_res_svc) {
+      tls_service_scratch.assign(tls_tag_arena.data() + tag_res_svc_off, tag_res_svc_len);
+      service_name = std::string_view(tls_service_scratch);
+    } else if ((service_name.empty() || service_name == "unknown_service") && has_tag_dp_svc) {
+      tls_service_scratch.assign(tls_tag_arena.data() + tag_dp_svc_off, tag_dp_svc_len);
+      service_name = std::string_view(tls_service_scratch);
+    }
+    if (has_tag_scope_name) {
+      tls_scope_name_scratch.assign(tls_tag_arena.data() + tag_scope_name_off, tag_scope_name_len);
+      scope_name = std::string_view(tls_scope_name_scratch);
+    } else if (scope_name.empty() && has_tag_otel_scope_name) {
+      tls_scope_name_scratch.assign(tls_tag_arena.data() + tag_otel_scope_name_off,
+                                    tag_otel_scope_name_len);
+      scope_name = std::string_view(tls_scope_name_scratch);
+    }
+    if (has_tag_scope_ver) {
+      tls_scope_ver_scratch.assign(tls_tag_arena.data() + tag_scope_ver_off, tag_scope_ver_len);
+      scope_version = std::string_view(tls_scope_ver_scratch);
+    } else if (scope_version.empty() && has_tag_otel_scope_ver) {
+      tls_scope_ver_scratch.assign(tls_tag_arena.data() + tag_otel_scope_ver_off,
+                                   tag_otel_scope_ver_len);
+      scope_version = std::string_view(tls_scope_ver_scratch);
+    }
+    if (metric_unit.empty() && has_tag_unit) {
+      tls_metric_unit_scratch.assign(tls_tag_arena.data() + tag_unit_off, tag_unit_len);
+      metric_unit = std::string_view(tls_metric_unit_scratch);
+    }
+    if (metric_desc.empty() && has_tag_desc) {
+      tls_metric_desc_scratch.assign(tls_tag_arena.data() + tag_desc_off, tag_desc_len);
+      metric_desc = std::string_view(tls_metric_desc_scratch);
+    }
+  }
+
+  if (has_res_attrs) {
+    res_attrs_writer.EndObject();
+  }
+  if (has_scope_attrs) {
+    scope_attrs_writer.EndObject();
+  }
+  if (has_dp_attrs) {
+    dp_attrs_writer.EndObject();
+  }
+  if (!has_exemplars) {
+    exemplars_writer.Reset();
+    exemplars_writer.StartArray();
+    exemplars_writer.EndArray();
+  }
+
+  std::string_view metric_name = raw_name;
+  if (!metric_ns.empty() && !raw_name.empty()) {
+    tls_metric_name_scratch.clear();
+    tls_metric_name_scratch.append(metric_ns);
+    tls_metric_name_scratch.push_back('.');
+    tls_metric_name_scratch.append(raw_name);
+    metric_name = std::string_view(tls_metric_name_scratch);
+  } else if (!metric_ns.empty()) {
+    metric_name = metric_ns;
+  }
+
+  if (service_name.empty() || service_name == "unknown_service") {
+    if (!top_service_name.empty()) {
+      service_name = top_service_name;
+    } else {
+      service_name = "unknown_service";
+    }
+  }
+
+  std::array<char, 32> time_ts_buf;
+  std::string_view time_unix_sv = processed_at;
+  if (has_ts) {
+    core::FormatIso8601Nano(t_ns, time_ts_buf.data());
+    time_unix_sv = std::string_view(time_ts_buf.data(), 30);
+  }
+
+  std::array<char, 32> start_ts_buf;
+  std::string_view start_time_sv;
+  if (has_start_ts) {
+    core::FormatIso8601Nano(start_ns, start_ts_buf.data());
+    start_time_sv = std::string_view(start_ts_buf.data(), 30);
+  } else if (has_ts && has_interval_ms && interval_ms > 0) {
+    const uint64_t interval_ns = interval_ms * 1000000ULL;
+    const uint64_t computed_start = (t_ns >= interval_ns) ? (t_ns - interval_ns) : 0ULL;
+    core::FormatIso8601Nano(computed_start, start_ts_buf.data());
+    start_time_sv = std::string_view(start_ts_buf.data(), 30);
+  }
+
+  const bool is_sum = (metric_type == "sum");
+  const bool is_histogram = (metric_type == "histogram");
+  const bool is_exp_histogram = (metric_type == "exponential_histogram");
+  const bool is_summary = (metric_type == "summary");
+
+  emitter.StartRecord();
+  emitter.SetString("MetricName", metric_name);
+  emitter.SetString("MetricDescription", metric_desc);
+  emitter.SetString("MetricUnit", metric_unit);
+  emitter.SetString("MetricType", metric_type);
+  emitter.SetString("ServiceName", service_name);
+
+  if (is_sum || is_histogram || is_exp_histogram) {
+    emitter.SetInt64("AggregationTemporality", agg_temporality);
+  }
+  if (is_sum && has_is_monotonic) {
+    emitter.SetBool("IsMonotonic", is_monotonic);
+  }
+
+  emitter.SetString("ResourceAttributes", has_res_attrs ? res_attrs_writer.Str() : "{}");
+  emitter.SetString("ScopeName", scope_name);
+  emitter.SetString("ScopeVersion", scope_version);
+  emitter.SetString("ScopeAttributes", has_scope_attrs ? scope_attrs_writer.Str() : "{}");
+  emitter.SetString("Attributes", has_dp_attrs ? dp_attrs_writer.Str() : "{}");
+
+  emitter.SetString("StartTimeUnix", start_time_sv);
+  emitter.SetString("TimeUnix", time_unix_sv);
+
+  if (!is_histogram && !is_exp_histogram && !is_summary) {
+    if (val_kind == MetricValueKind::kDouble) {
+      emitter.SetDouble("Value", double_val);
+    } else if (val_kind == MetricValueKind::kInt64) {
+      emitter.SetInt64("Value", int_val);
+    }
+  }
+
+  if (is_histogram) {
+    SerializeHistogramJson(payload_writer, agg_temporality, hist_count, has_sum, hist_sum, has_min,
+                           hist_min, has_max, hist_max, tls_bucket_counts, tls_explicit_bounds);
+    emitter.SetString("Histogram", payload_writer.Str());
+  }
+
+  if (is_exp_histogram) {
+    SerializeExponentialHistogramJson(payload_writer, agg_temporality, hist_count, has_sum,
+                                      hist_sum, has_min, hist_min, has_max, hist_max, exp_scale,
+                                      exp_zero_count, exp_zero_threshold, pos_offset,
+                                      tls_pos_bucket_counts, neg_offset, tls_neg_bucket_counts);
+    emitter.SetString("ExponentialHistogram", payload_writer.Str());
+  }
+
+  if (is_summary) {
+    SerializeSummaryJson(payload_writer, hist_count, has_sum, hist_sum, tls_summary_quantiles);
+    emitter.SetString("Summary", payload_writer.Str());
+  }
+
+  emitter.SetInt64("Flags", flags);
+  emitter.SetString("Exemplars", exemplars_writer.Str());
+  emitter.SetString("processed_at", processed_at);
+
+  emitter.EndRecord();
+  if (emitter.HasError()) {
+    err_out = std::string(emitter.ErrorMessage());
     return false;
   }
-  if (m.is_histogram) {
-    lv.bucket_tape.Reset(/*root_array=*/true);
-    for (const int64_t c : lv.bucket_counts) lv.bucket_tape.Int(Key(), c);
-    lv.bounds_tape.Reset(/*root_array=*/true);
-    for (const double b : lv.explicit_bounds) lv.bounds_tape.Dbl(Key(), b);
-    return MaterializeTape(ctx, lv.bucket_tape, AnchorSlot::kBucketCounts) &&
-           MaterializeTape(ctx, lv.bounds_tape, AnchorSlot::kExplicitBounds);
-  }
-  if (m.is_summary) {
-    lv.quantile_tape.Reset(/*root_array=*/true);
-    for (const SummaryQuantile& q : lv.summary_quantiles) {
-      lv.quantile_tape.BeginMap(Key());
-      DualDbl(lv.quantile_tape, "quantile", "Quantile", q.quantile);
-      DualDbl(lv.quantile_tape, "value", "Value", q.value);
-      lv.quantile_tape.End();
-    }
-    return MaterializeTape(ctx, lv.quantile_tape, AnchorSlot::kQuantiles);
-  }
   return true;
-}
-
-// ---- tag staging
-// ---------------------------------------------------------------------------------
-
-void StageJsonTagValue(StagedRow& tape, std::string_view key, const JsonTagValue& tv) {
-  switch (tv.kind) {
-    case JsonTagValue::Kind::kString:
-      tape.Str(Key::Dynamic(key), tv.str_val);
-      break;
-    case JsonTagValue::Kind::kInt64:
-      tape.Int(Key::Dynamic(key), tv.int_val);
-      break;
-    case JsonTagValue::Kind::kUint64:
-      tape.Uint(Key::Dynamic(key), tv.uint_val);
-      break;
-    case JsonTagValue::Kind::kDouble:
-      tape.Dbl(Key::Dynamic(key), tv.dbl_val);
-      break;
-    case JsonTagValue::Kind::kBool:
-      tape.Bool(Key::Dynamic(key), tv.bool_val);
-      break;
-    case JsonTagValue::Kind::kNone:
-      break;
-  }
-}
-
-// Scalars keep their type; a table is serialised to a JSON string; anything else becomes "".
-void StageLuaTag(StagedRow& tape, std::string_view key, lua_State* L, int val_idx,
-                 core::FastJsonWriter& writer) {
-  const int abs_idx = lua_absindex(L, val_idx);
-  switch (lua_type(L, abs_idx)) {
-    case LUA_TSTRING: {
-      size_t len = 0;
-      const char* s = lua_tolstring(L, abs_idx, &len);
-      tape.Str(Key::Dynamic(key), std::string_view(s, len));
-      break;
-    }
-    case LUA_TNUMBER:
-      if (lua_isinteger(L, abs_idx)) {
-        tape.Int(Key::Dynamic(key), static_cast<int64_t>(lua_tointeger(L, abs_idx)));
-      } else {
-        tape.Dbl(Key::Dynamic(key), static_cast<double>(lua_tonumber(L, abs_idx)));
-      }
-      break;
-    case LUA_TBOOLEAN:
-      tape.Bool(Key::Dynamic(key), lua_toboolean(L, abs_idx) != 0);
-      break;
-    case LUA_TTABLE:
-      writer.Reset();
-      core::SerializeLuaValueToJson(L, abs_idx, writer);
-      tape.Str(Key::Dynamic(key), writer.Str());
-      break;
-    default:
-      tape.Str(Key::Dynamic(key), "");
-      break;
-  }
-}
-
-// Text of a scalar (string or number) tag value without converting the Lua value in place.
-std::string_view ReadLuaScalarStringView(lua_State* L, int val_idx, std::string& scratch) {
-  char buffer[core::kScalarTextBuffer];
-  std::string_view text;
-  if (!core::ScalarText(L, val_idx, buffer, text)) {
-    return "";
-  }
-  scratch.assign(text);
-  return std::string_view(scratch);
 }
 
 bool HasNativeMetricFields(lua_State* L, int table_idx) {
@@ -747,6 +1569,9 @@ bool HasNativeMetricFields(lua_State* L, int table_idx) {
       "gauge",
       "aggregated_histogram",
       "histogram",
+      "exponential_histogram",
+      "exponentialHistogram",
+      "aggregated_exponential_histogram",
       "aggregated_summary",
       "summary",
       "distribution",
@@ -767,8 +1592,38 @@ bool HasNativeMetricFields(lua_State* L, int table_idx) {
   return false;
 }
 
+// Text of a scalar (string or number) tag value without converting the Lua value in place.
+std::string_view ReadLuaScalarStringView(lua_State* L, int val_idx, std::string& scratch) {
+  char buffer[core::kScalarTextBuffer];
+  std::string_view text;
+  if (!core::ScalarText(L, val_idx, buffer, text)) {
+    return "";
+  }
+  scratch.assign(text);
+  return std::string_view(scratch);
+}
+
+void ReadLuaBucketCountsArray(lua_State* L, int arr_idx, std::vector<uint64_t>& out) {
+  out.clear();
+  int abs_idx = lua_absindex(L, arr_idx);
+  if (!lua_istable(L, abs_idx)) {
+    return;
+  }
+  const size_t c_len = lua_rawlen(L, abs_idx);
+  for (size_t i = 1; i <= c_len; ++i) {
+    lua_rawgeti(L, abs_idx, static_cast<lua_Integer>(i));
+    uint64_t bc = 0;
+    if (!core::TryParseTableUint64At(L, -1, bc)) {
+      bc = 0;
+    }
+    out.push_back(bc);
+    lua_pop(L, 1);
+  }
+}
+
 void ReadLuaMetricValue(lua_State* L, int type_obj_idx, MetricValueKind& val_kind,
-                        double& double_val, int64_t& int_val) {
+                        double& double_val, int64_t& int_val, int64_t& agg_temporality,
+                        core::FastJsonWriter& exemplars_writer, bool& has_exemplars) {
   int abs_idx = lua_absindex(L, type_obj_idx);
   auto parse_val_at = [&](int v_idx) {
     int abs_v = lua_absindex(L, v_idx);
@@ -809,14 +1664,18 @@ void ReadLuaMetricValue(lua_State* L, int type_obj_idx, MetricValueKind& val_kin
   };
 
   if (lua_istable(L, abs_idx)) {
-    if (core::GetTableFieldRaw(L, abs_idx, "value", "asDouble")) {
-      parse_val_at(-1);
-      lua_pop(L, 1);
-    } else if (core::GetTableFieldRaw(L, abs_idx, "as_double")) {
+    ReadLuaAggregationTemporality(L, abs_idx, agg_temporality);
+    if (core::GetTableFieldRaw(L, abs_idx, "value", "asDouble", "as_double")) {
       parse_val_at(-1);
       lua_pop(L, 1);
     } else if (core::GetTableFieldRaw(L, abs_idx, "asInt", "as_int")) {
       parse_val_at(-1);
+      lua_pop(L, 1);
+    }
+    if (core::GetTableFieldRaw(L, abs_idx, "exemplars", "Exemplars")) {
+      exemplars_writer.Reset();
+      core::SerializeTableExemplarsToJson(L, -1, exemplars_writer);
+      has_exemplars = true;
       lua_pop(L, 1);
     }
   } else {
@@ -824,9 +1683,11 @@ void ReadLuaMetricValue(lua_State* L, int type_obj_idx, MetricValueKind& val_kin
   }
 }
 
-void ReadLuaHistogram(lua_State* L, int hist_idx, uint64_t& hist_count, double& hist_sum,
-                      bool& has_min, double& hist_min, bool& has_max, double& hist_max,
-                      std::vector<int64_t>& bucket_counts, std::vector<double>& explicit_bounds) {
+void ReadLuaHistogram(lua_State* L, int hist_idx, int64_t& agg_temporality, uint64_t& hist_count,
+                      bool& has_sum, double& hist_sum, bool& has_min, double& hist_min,
+                      bool& has_max, double& hist_max, std::vector<uint64_t>& bucket_counts,
+                      std::vector<double>& explicit_bounds, core::FastJsonWriter& exemplars_writer,
+                      bool& has_exemplars) {
   int abs_idx = lua_absindex(L, hist_idx);
   bucket_counts.clear();
   explicit_bounds.clear();
@@ -834,10 +1695,11 @@ void ReadLuaHistogram(lua_State* L, int hist_idx, uint64_t& hist_count, double& 
     return;
   }
 
-  hist_count = core::ReadTableUint64(L, abs_idx, "count", nullptr, 0);
-  hist_sum = core::ReadTableDouble(L, abs_idx, "sum", nullptr, 0.0);
+  ReadLuaAggregationTemporality(L, abs_idx, agg_temporality);
+  hist_count = core::ReadTableUint64(L, abs_idx, "count", "Count", 0);
+  has_sum = core::TryReadTableDouble(L, abs_idx, "sum", "Sum", hist_sum);
 
-  if (core::GetTableFieldRaw(L, abs_idx, "min")) {
+  if (core::GetTableFieldRaw(L, abs_idx, "min", "Min")) {
     double d = 0.0;
     if (TryParseLuaFiniteBound(L, -1, d)) {
       hist_min = d;
@@ -845,7 +1707,7 @@ void ReadLuaHistogram(lua_State* L, int hist_idx, uint64_t& hist_count, double& 
     }
     lua_pop(L, 1);
   }
-  if (core::GetTableFieldRaw(L, abs_idx, "max")) {
+  if (core::GetTableFieldRaw(L, abs_idx, "max", "Max")) {
     double d = 0.0;
     if (TryParseLuaFiniteBound(L, -1, d)) {
       hist_max = d;
@@ -869,8 +1731,8 @@ void ReadLuaHistogram(lua_State* L, int hist_idx, uint64_t& hist_count, double& 
             lua_rawgeti(L, b_arr_idx, static_cast<lua_Integer>(i));
             if (lua_istable(L, -1)) {
               int b_obj_idx = lua_absindex(L, -1);
-              uint64_t bc = core::ReadTableUint64(L, b_obj_idx, "count", nullptr, 0);
-              bucket_counts.push_back(static_cast<int64_t>(std::min(bc, kMaxLuaInt)));
+              uint64_t bc = core::ReadTableUint64(L, b_obj_idx, "count", "Count", 0);
+              bucket_counts.push_back(bc);
               if (core::GetTableFieldRaw(L, b_obj_idx, "upper_limit", "upperLimit")) {
                 double bound = 0.0;
                 if (TryParseLuaFiniteBound(L, -1, bound)) {
@@ -894,7 +1756,8 @@ void ReadLuaHistogram(lua_State* L, int hist_idx, uint64_t& hist_count, double& 
       }
     }
     lua_pop(L, 1);
-  } else if (core::GetTableFieldRaw(L, abs_idx, "explicitBounds", "explicit_bounds")) {
+  } else if (core::GetTableFieldRaw(L, abs_idx, "explicitBounds", "explicit_bounds",
+                                    "ExplicitBounds")) {
     int eb_arr_idx = lua_absindex(L, -1);
     if (lua_istable(L, eb_arr_idx)) {
       const size_t eb_len = lua_rawlen(L, eb_arr_idx);
@@ -911,50 +1774,103 @@ void ReadLuaHistogram(lua_State* L, int hist_idx, uint64_t& hist_count, double& 
   }
 
   if (!is_obj_buckets) {
-    bool has_counts = core::GetTableFieldRaw(L, abs_idx, "counts", "bucketCounts");
+    bool has_counts = core::GetTableFieldRaw(L, abs_idx, "counts", "bucketCounts", "bucket_counts");
     if (!has_counts) {
-      has_counts = core::GetTableFieldRaw(L, abs_idx, "bucket_counts");
+      has_counts = core::GetTableFieldRaw(L, abs_idx, "BucketCounts");
     }
     if (has_counts) {
-      int c_arr_idx = lua_absindex(L, -1);
-      if (lua_istable(L, c_arr_idx)) {
-        const size_t c_len = lua_rawlen(L, c_arr_idx);
-        for (size_t i = 1; i <= c_len; ++i) {
-          lua_rawgeti(L, c_arr_idx, static_cast<lua_Integer>(i));
-          uint64_t bc = 0;
-          if (lua_isinteger(L, -1)) {
-            lua_Integer iv = lua_tointeger(L, -1);
-            if (iv >= 0) {
-              bc = static_cast<uint64_t>(iv);
-            }
-          } else if (lua_type(L, -1) == LUA_TNUMBER) {
-            double d = lua_tonumber(L, -1);
-            if (std::isfinite(d) && d >= 0.0 && d < 18446744073709551616.0) {
-              bc = static_cast<uint64_t>(d);
-            }
-          } else if (lua_type(L, -1) == LUA_TSTRING) {
-            size_t slen = 0;
-            const char* s = lua_tolstring(L, -1, &slen);
-            if (s != nullptr) {
-              std::string_view sv = core::TrimJsonWhitespace(std::string_view(s, slen));
-              uint64_t parsed_bc = 0;
-              auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), parsed_bc);
-              if (ec == std::errc() && ptr == sv.data() + sv.size()) {
-                bc = parsed_bc;
-              }
-            }
-          }
-          bucket_counts.push_back(static_cast<int64_t>(std::min(bc, kMaxLuaInt)));
-          lua_pop(L, 1);
-        }
-      }
+      ReadLuaBucketCountsArray(L, -1, bucket_counts);
       lua_pop(L, 1);
     }
   }
+
+  if (core::GetTableFieldRaw(L, abs_idx, "exemplars", "Exemplars")) {
+    exemplars_writer.Reset();
+    core::SerializeTableExemplarsToJson(L, -1, exemplars_writer);
+    has_exemplars = true;
+    lua_pop(L, 1);
+  }
 }
 
-void ReadLuaSummary(lua_State* L, int sum_idx, uint64_t& sum_count, double& sum_total,
-                    std::vector<SummaryQuantile>& quantiles) {
+void ReadLuaExpBucketsSubTable(lua_State* L, int parent_idx, core::ReadKey k1, core::ReadKey k2,
+                               int64_t& out_offset, std::vector<uint64_t>& out_buckets) {
+  out_offset = 0;
+  out_buckets.clear();
+  if (!core::GetTableFieldRaw(L, parent_idx, k1, k2)) {
+    return;
+  }
+  if (lua_istable(L, -1)) {
+    int b_obj_idx = lua_absindex(L, -1);
+    out_offset = core::ReadTableInt64(L, b_obj_idx, "offset", "Offset", 0);
+    bool has_bc = core::GetTableFieldRaw(L, b_obj_idx, "counts", "bucketCounts", "bucket_counts");
+    if (!has_bc) {
+      has_bc = core::GetTableFieldRaw(L, b_obj_idx, "BucketCounts");
+    }
+    if (has_bc) {
+      ReadLuaBucketCountsArray(L, -1, out_buckets);
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);
+}
+
+void ReadLuaExponentialHistogram(lua_State* L, int eh_idx, int64_t& agg_temporality,
+                                 uint64_t& exp_count, bool& has_sum, double& exp_sum, bool& has_min,
+                                 double& exp_min, bool& has_max, double& exp_max,
+                                 int64_t& exp_scale, uint64_t& exp_zero_count,
+                                 double& exp_zero_threshold, int64_t& pos_offset,
+                                 std::vector<uint64_t>& pos_buckets, int64_t& neg_offset,
+                                 std::vector<uint64_t>& neg_buckets,
+                                 core::FastJsonWriter& exemplars_writer, bool& has_exemplars) {
+  int abs_idx = lua_absindex(L, eh_idx);
+  pos_offset = 0;
+  neg_offset = 0;
+  pos_buckets.clear();
+  neg_buckets.clear();
+  if (!lua_istable(L, abs_idx)) {
+    return;
+  }
+
+  ReadLuaAggregationTemporality(L, abs_idx, agg_temporality);
+  exp_count = core::ReadTableUint64(L, abs_idx, "count", "Count", 0);
+  has_sum = core::TryReadTableDouble(L, abs_idx, "sum", "Sum", exp_sum);
+
+  if (core::GetTableFieldRaw(L, abs_idx, "min", "Min")) {
+    double d = 0.0;
+    if (TryParseLuaFiniteBound(L, -1, d)) {
+      exp_min = d;
+      has_min = true;
+    }
+    lua_pop(L, 1);
+  }
+  if (core::GetTableFieldRaw(L, abs_idx, "max", "Max")) {
+    double d = 0.0;
+    if (TryParseLuaFiniteBound(L, -1, d)) {
+      exp_max = d;
+      has_max = true;
+    }
+    lua_pop(L, 1);
+  }
+
+  exp_scale = core::ReadTableInt64(L, abs_idx, "scale", "Scale", 0);
+  exp_zero_count = core::ReadTableUint64(L, abs_idx, "zeroCount", "zero_count", 0, "ZeroCount");
+  exp_zero_threshold =
+      core::ReadTableDouble(L, abs_idx, "zeroThreshold", "zero_threshold", 0.0, "ZeroThreshold");
+
+  ReadLuaExpBucketsSubTable(L, abs_idx, "positive", "Positive", pos_offset, pos_buckets);
+  ReadLuaExpBucketsSubTable(L, abs_idx, "negative", "Negative", neg_offset, neg_buckets);
+
+  if (core::GetTableFieldRaw(L, abs_idx, "exemplars", "Exemplars")) {
+    exemplars_writer.Reset();
+    core::SerializeTableExemplarsToJson(L, -1, exemplars_writer);
+    has_exemplars = true;
+    lua_pop(L, 1);
+  }
+}
+
+void ReadLuaSummary(lua_State* L, int sum_idx, uint64_t& sum_count, bool& has_sum,
+                    double& sum_total, std::vector<SummaryQuantile>& quantiles,
+                    core::FastJsonWriter& exemplars_writer, bool& has_exemplars) {
   int abs_idx = lua_absindex(L, sum_idx);
   quantiles.clear();
   if (!lua_istable(L, abs_idx)) {
@@ -962,7 +1878,7 @@ void ReadLuaSummary(lua_State* L, int sum_idx, uint64_t& sum_count, double& sum_
   }
 
   sum_count = core::ReadTableUint64(L, abs_idx, "count", "Count", 0);
-  sum_total = core::ReadTableDouble(L, abs_idx, "sum", "Sum", 0.0);
+  has_sum = core::TryReadTableDouble(L, abs_idx, "sum", "Sum", sum_total);
 
   bool is_obj_quantiles = false;
   bool has_q = core::GetTableFieldRaw(L, abs_idx, "quantiles", "quantileValues");
@@ -1023,470 +1939,93 @@ void ReadLuaSummary(lua_State* L, int sum_idx, uint64_t& sum_count, double& sum_
       lua_pop(L, 1);
     }
   }
+
+  if (core::GetTableFieldRaw(L, abs_idx, "exemplars", "Exemplars")) {
+    exemplars_writer.Reset();
+    core::SerializeTableExemplarsToJson(L, -1, exemplars_writer);
+    has_exemplars = true;
+    lua_pop(L, 1);
+  }
 }
 
-// ---- JSON input --------------------------------------------------------------------------------
-
-bool ExtractNativeMetricObjectJson(OperationContext& ctx, NativeMetricsScratch& s,
-                                   simdjson::ondemand::object& rec_obj,
-                                   std::string_view processed_at, int depth,
-                                   bool* out_matched = nullptr) {
-  Level& lv = s.levels[depth];
-  core::RowEmitter emitter(ctx, lv.row);
-
-  uint64_t t_ns = 0;
-  uint64_t start_ns = 0;
-  uint64_t interval_ms = 0;
-  bool has_ts = false;
-  bool has_start_ts = false;
-  bool has_interval_ms = false;
-
-  std::string_view raw_name;
-  std::string_view metric_ns;
-  std::string_view metric_desc;
-  std::string_view metric_unit;
-  std::string_view metric_type;
-  std::string_view service_name;
-  std::string_view top_service_name;
-  std::string_view scope_name;
-  std::string_view scope_version;
-
-  MetricRecord m;
-  uint64_t hist_count = 0;
-  double hist_sum = 0.0;
-  bool has_min = false;
-  double hist_min = 0.0;
-  bool has_max = false;
-  double hist_max = 0.0;
-  lv.bucket_counts.clear();
-  lv.explicit_bounds.clear();
-  lv.summary_quantiles.clear();
-  lv.res_tape.Reset();
-  lv.scope_tape.Reset();
-  lv.dp_tape.Reset();
-
-  bool has_recognized_field = false;
-
-  for (auto field_res : rec_obj) {
-    if (field_res.error() != simdjson::SUCCESS) {
-      return FailJson(ctx, field_res.error());
-    }
-    auto k_res = field_res.unescaped_key();
-    if (k_res.error() != simdjson::SUCCESS) {
-      return FailJson(ctx, k_res.error());
-    }
-    std::string_view k = k_res.value();
-    auto fv_res = field_res.value();
-    if (fv_res.error() != simdjson::SUCCESS) {
-      return FailJson(ctx, fv_res.error());
-    }
-    auto fv = fv_res.value();
-
-    if ((k == "metric" || k == "log") && depth == 0) {
-      auto t_res = fv.type();
-      if (t_res.error() != simdjson::SUCCESS) {
-        return FailJson(ctx, t_res.error());
-      }
-      if (t_res.value() == simdjson::ondemand::json_type::object) {
-        auto inner_obj_res = fv.get_object();
-        if (inner_obj_res.error() != simdjson::SUCCESS) {
-          return FailJson(ctx, inner_obj_res.error());
-        }
-        auto inner_obj = inner_obj_res.value();
-        bool inner_matched = false;
-        if (!ExtractNativeMetricObjectJson(ctx, s, inner_obj, processed_at, depth + 1,
-                                           &inner_matched)) {
-          return false;
-        }
-        if (inner_matched) {
-          if (out_matched != nullptr) *out_matched = true;
-          return true;
-        }
-        continue;
-      } else if (t_res.value() == simdjson::ondemand::json_type::array) {
-        auto inner_arr_res = fv.get_array();
-        if (inner_arr_res.error() != simdjson::SUCCESS) {
-          return FailJson(ctx, inner_arr_res.error());
-        }
-        bool any_matched = false;
-        for (auto elem_res : inner_arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) {
-            return FailJson(ctx, elem_res.error());
-          }
-          auto elem_obj_res = elem_res.value().get_object();
-          if (elem_obj_res.error() != simdjson::SUCCESS) {
-            return FailJson(ctx, elem_obj_res.error());
-          }
-          auto elem_obj = elem_obj_res.value();
-          bool elem_matched = false;
-          if (!ExtractNativeMetricObjectJson(ctx, s, elem_obj, processed_at, depth + 1,
-                                             &elem_matched)) {
-            return false;
-          }
-          any_matched = any_matched || elem_matched;
-        }
-        if (any_matched) {
-          if (out_matched != nullptr) *out_matched = true;
-          return true;
-        }
-        continue;
-      }
-      continue;
-    }
-
-    if (k == "distribution" || k == "set" || k == "sketch") {
-      auto t_res = fv.type();
-      if (t_res.error() == simdjson::SUCCESS &&
-          t_res.value() != simdjson::ondemand::json_type::null) {
-        return FailUnsupportedVariant(ctx, k);
-      }
-      continue;
-    }
-
-    if (k == "name") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        raw_name = s_res.value();
-      }
-    } else if (k == "namespace") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        metric_ns = s_res.value();
-      }
-    } else if (k == "description") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        metric_desc = s_res.value();
-      }
-    } else if (k == "unit") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        metric_unit = s_res.value();
-      }
-    } else if (k == "timestamp" || k == "timeUnixNano" || k == "time_unix_nano") {
-      has_recognized_field = true;
-      uint64_t parsed = 0;
-      if (core::ParseJsonTimestamp(fv, parsed)) {
-        t_ns = parsed;
-        has_ts = true;
-      }
-    } else if (k == "start_time_unix_nano" || k == "startTimeUnixNano" || k == "start_timestamp") {
-      has_recognized_field = true;
-      uint64_t parsed = 0;
-      if (core::ParseJsonTimestamp(fv, parsed)) {
-        start_ns = parsed;
-        has_start_ts = true;
-      }
-    } else if (k == "interval_ms") {
-      has_recognized_field = true;
-      uint64_t iv = core::ParseUint64(fv);
-      if (iv > 0) {
-        interval_ms = iv;
-        has_interval_ms = true;
-      }
-    } else if (k == "flags") {
-      has_recognized_field = true;
-      m.flags = core::ParseInt64(fv);
-    } else if (k == "kind" || k == "aggregationTemporality" || k == "aggregation_temporality") {
-      has_recognized_field = true;
-      auto t_res = fv.type();
-      if (t_res.error() == simdjson::SUCCESS) {
-        if (t_res.value() == simdjson::ondemand::json_type::string) {
-          auto s_res = fv.get_string();
-          if (s_res.error() == simdjson::SUCCESS) {
-            m.agg_temporality = ParseKindToTemporality(s_res.value());
-          }
-        } else if (t_res.value() == simdjson::ondemand::json_type::number) {
-          m.agg_temporality = core::ParseInt64(fv);
-        }
-      }
-    } else if (k == "isMonotonic" || k == "is_monotonic") {
-      has_recognized_field = true;
-      auto b_res = fv.get_bool();
-      if (b_res.error() == simdjson::SUCCESS) {
-        m.is_monotonic = b_res.value();
-        m.has_is_monotonic = true;
-      }
-    } else if (k == "counter" || k == "sum") {
-      has_recognized_field = true;
-      metric_type = "sum";
-      ParseJsonCounterOrGauge(fv, m.val_kind, m.double_val, m.int_val);
-    } else if (k == "gauge") {
-      has_recognized_field = true;
-      metric_type = "gauge";
-      ParseJsonCounterOrGauge(fv, m.val_kind, m.double_val, m.int_val);
-    } else if (k == "aggregated_histogram" || k == "histogram") {
-      has_recognized_field = true;
-      metric_type = "histogram";
-      ParseJsonHistogram(fv, hist_count, hist_sum, has_min, hist_min, has_max, hist_max,
-                         lv.bucket_counts, lv.explicit_bounds);
-    } else if (k == "aggregated_summary" || k == "summary") {
-      has_recognized_field = true;
-      metric_type = "summary";
-      ParseJsonSummary(fv, hist_count, hist_sum, lv.summary_quantiles, lv.explicit_bounds);
-    } else if (k == "tags") {
-      has_recognized_field = true;
-      auto tags_obj_res = fv.get_object();
-      if (tags_obj_res.error() == simdjson::SUCCESS) {
-        for (auto tf_res : tags_obj_res.value()) {
-          if (tf_res.error() != simdjson::SUCCESS) continue;
-          auto tk_res = tf_res.unescaped_key();
-          if (tk_res.error() != simdjson::SUCCESS) continue;
-          std::string_view tk = tk_res.value();
-          auto tv_res = tf_res.value();
-          if (tv_res.error() != simdjson::SUCCESS) continue;
-          auto tv = tv_res.value();
-
-          JsonTagValue tag_val;
-          auto tv_type_res = tv.type();
-          if (tv_type_res.error() != simdjson::SUCCESS) continue;
-          if (tv_type_res.value() == simdjson::ondemand::json_type::array) {
-            auto arr_res = tv.get_array();
-            if (arr_res.error() == simdjson::SUCCESS) {
-              for (auto elem_res : arr_res.value()) {
-                if (elem_res.error() != simdjson::SUCCESS) continue;
-                auto elem_v = elem_res.value();
-                ReadSingleJsonTagElement(elem_v, s.writer, tag_val);
-              }
-            }
-          } else {
-            ReadSingleJsonTagElement(tv, s.writer, tag_val);
-          }
-
-          if (tag_val.kind == JsonTagValue::Kind::kNone) {
-            continue;
-          }
-
-          if (tk.size() > 9 && tk.substr(0, 9) == "resource.") {
-            std::string_view sub_key = tk.substr(9);
-            if ((sub_key == "service.name" || sub_key == "service_name") &&
-                tag_val.kind == JsonTagValue::Kind::kString && !tag_val.str_val.empty()) {
-              lv.service.assign(tag_val.str_val);
-              service_name = std::string_view(lv.service);
-            }
-            StageJsonTagValue(lv.res_tape, sub_key, tag_val);
-          } else if (tk.size() > 6 && tk.substr(0, 6) == "scope.") {
-            std::string_view sub_key = tk.substr(6);
-            if (sub_key == "name") {
-              if (tag_val.kind == JsonTagValue::Kind::kString) {
-                lv.scope_name.assign(tag_val.str_val);
-                scope_name = std::string_view(lv.scope_name);
-              }
-            } else if (sub_key == "version") {
-              if (tag_val.kind == JsonTagValue::Kind::kString) {
-                lv.scope_ver.assign(tag_val.str_val);
-                scope_version = std::string_view(lv.scope_ver);
-              }
-            } else {
-              StageJsonTagValue(lv.scope_tape, sub_key, tag_val);
-            }
-          } else if (tk == "otel.unit" || tk == "metric.unit") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && metric_unit.empty()) {
-              lv.metric_unit.assign(tag_val.str_val);
-              metric_unit = std::string_view(lv.metric_unit);
-            }
-          } else if (tk == "otel.description" || tk == "metric.description") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && metric_desc.empty()) {
-              lv.metric_desc.assign(tag_val.str_val);
-              metric_desc = std::string_view(lv.metric_desc);
-            }
-          } else if (tk == "otel.scope.name") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && scope_name.empty()) {
-              lv.scope_name.assign(tag_val.str_val);
-              scope_name = std::string_view(lv.scope_name);
-            }
-          } else if (tk == "otel.scope.version") {
-            if (tag_val.kind == JsonTagValue::Kind::kString && scope_version.empty()) {
-              lv.scope_ver.assign(tag_val.str_val);
-              scope_version = std::string_view(lv.scope_ver);
-            }
-          } else {
-            StageJsonTagValue(lv.dp_tape, tk, tag_val);
-            if ((tk == "service.name" || tk == "service_name") && service_name.empty() &&
-                tag_val.kind == JsonTagValue::Kind::kString && !tag_val.str_val.empty()) {
-              lv.service.assign(tag_val.str_val);
-              service_name = std::string_view(lv.service);
-            }
-          }
-        }
-      }
-    } else if (k == "resources" || k == "resource_attributes" || k == "resourceAttributes" ||
-               k == "resource") {
-      has_recognized_field = true;
-      std::string_view extracted_svc = "unknown_service";
-      core::StageAttributeFields(lv.res_tape, fv, s.writer, &extracted_svc);
-      if (extracted_svc != "unknown_service" && !extracted_svc.empty()) {
-        lv.service.assign(extracted_svc);
-        service_name = std::string_view(lv.service);
-      }
-    } else if (k == "scope") {
-      has_recognized_field = true;
-      auto s_obj_res = fv.get_object();
-      if (s_obj_res.error() == simdjson::SUCCESS) {
-        for (auto sf_res : s_obj_res.value()) {
-          if (sf_res.error() != simdjson::SUCCESS) continue;
-          auto sk_res = sf_res.unescaped_key();
-          if (sk_res.error() != simdjson::SUCCESS) continue;
-          std::string_view sk = sk_res.value();
-          auto sfv_res = sf_res.value();
-          if (sfv_res.error() != simdjson::SUCCESS) continue;
-          auto sfv = sfv_res.value();
-          if (sk == "name") {
-            auto s_res = sfv.get_string();
-            if (s_res.error() == simdjson::SUCCESS) {
-              lv.scope_name.assign(s_res.value());
-              scope_name = std::string_view(lv.scope_name);
-            }
-          } else if (sk == "version") {
-            auto s_res = sfv.get_string();
-            if (s_res.error() == simdjson::SUCCESS) {
-              lv.scope_ver.assign(s_res.value());
-              scope_version = std::string_view(lv.scope_ver);
-            }
-          } else if (sk == "attributes") {
-            core::StageAttributeFields(lv.scope_tape, sfv, s.writer);
-          }
-        }
-      }
-    } else if (k == "attributes") {
-      has_recognized_field = true;
-      core::StageAttributeFields(lv.dp_tape, fv, s.writer);
-    } else if (k == "service_name" || k == "service") {
-      has_recognized_field = true;
-      auto s_res = fv.get_string();
-      if (s_res.error() == simdjson::SUCCESS) {
-        top_service_name = s_res.value();
-      }
-    }
-  }
-
-  if (!has_recognized_field || metric_type.empty()) {
-    return true;
-  }
-  if (out_matched != nullptr) {
-    *out_matched = true;
-  }
-
-  std::string_view metric_name = raw_name;
-  if (!metric_ns.empty() && !raw_name.empty()) {
-    lv.metric_name.clear();
-    lv.metric_name.append(metric_ns);
-    lv.metric_name.push_back('.');
-    lv.metric_name.append(raw_name);
-    metric_name = std::string_view(lv.metric_name);
-  } else if (!metric_ns.empty()) {
-    metric_name = metric_ns;
-  }
-
-  if (service_name.empty() || service_name == "unknown_service") {
-    if (!top_service_name.empty()) {
-      service_name = top_service_name;
-    } else {
-      service_name = "unknown_service";
-    }
-  }
-
-  std::array<char, 32> time_ts_buf;
-  std::string_view time_unix_sv = processed_at;
-  if (has_ts) {
-    core::FormatIso8601Nano(t_ns, time_ts_buf.data());
-    time_unix_sv = std::string_view(time_ts_buf.data(), 30);
-  }
-
-  std::array<char, 32> start_ts_buf;
-  std::string_view start_time_sv;
-  if (has_start_ts) {
-    core::FormatIso8601Nano(start_ns, start_ts_buf.data());
-    start_time_sv = std::string_view(start_ts_buf.data(), 30);
-  } else if (has_ts && has_interval_ms && interval_ms > 0) {
-    const uint64_t interval_ns = interval_ms * 1000000ULL;
-    const uint64_t computed_start = (t_ns >= interval_ns) ? (t_ns - interval_ns) : 0ULL;
-    core::FormatIso8601Nano(computed_start, start_ts_buf.data());
-    start_time_sv = std::string_view(start_ts_buf.data(), 30);
-  }
-
-  m.name = metric_name;
-  m.description = metric_desc;
-  m.unit = metric_unit;
-  m.type = metric_type;
-  m.service = service_name;
-  m.scope_name = scope_name;
-  m.scope_version = scope_version;
-  m.start_time = start_time_sv;
-  m.time_unix = time_unix_sv;
-  m.is_sum = (metric_type == "sum");
-  m.is_histogram = (metric_type == "histogram");
-  m.is_summary = (metric_type == "summary");
-  m.count = hist_count;
-  m.sum = hist_sum;
-  m.has_min = has_min;
-  m.min = hist_min;
-  m.has_max = has_max;
-  m.max = hist_max;
-
-  emitter.StartRecord();
-  StageRecordColumns(lv.row, m);
-  lv.row.BeginArray("Exemplars");
-  lv.row.End();
-  lv.row.Str("processed_at", processed_at);
-  if (!MaterializeRecordTapes(ctx, lv, m)) {
+bool ExtractSingleNativeMetricTable(
+    lua_State* L, int rec_idx, std::string_view processed_at,
+    core::FastJsonWriter& res_attrs_writer, core::FastJsonWriter& scope_attrs_writer,
+    core::FastJsonWriter& dp_attrs_writer, core::FastJsonWriter& exemplars_writer,
+    core::FastJsonWriter& payload_writer, std::string& tls_metric_name_scratch,
+    std::string& tls_service_scratch, std::string& tls_scope_name_scratch,
+    std::string& tls_scope_ver_scratch, std::string& tls_metric_desc_scratch,
+    std::string& tls_metric_unit_scratch, std::vector<uint64_t>& tls_bucket_counts,
+    std::vector<double>& tls_explicit_bounds, std::vector<uint64_t>& tls_pos_bucket_counts,
+    std::vector<uint64_t>& tls_neg_bucket_counts,
+    std::vector<SummaryQuantile>& tls_summary_quantiles, core::RowEmitter& emitter,
+    std::string& err_out) {
+  if (!lua_checkstack(L, 16)) {
+    err_out = "Lua stack overflow during native metric extraction";
     return false;
   }
-  emitter.EndRecord();
-  return !emitter.HasError();
-}
+  int abs_rec_idx = lua_absindex(L, rec_idx);
 
-// ---- table input -------------------------------------------------------------------------------
-
-bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch& s, int rec_idx,
-                                    std::string_view processed_at) {
-  lua_State* L = ctx.L;
-  Level& lv = s.levels[0];
-  core::RowEmitter emitter(ctx, lv.row);
-  const int abs_rec_idx = lua_absindex(L, rec_idx);
-
-  // 1. Unsupported non-OTLP metric variants are rejected first.
+  // 1. Check for unsupported non-OTLP metric variants first
   static constexpr core::ReadKey kUnsupportedVariants[] = {"distribution", "set", "sketch"};
   for (const core::ReadKey& v : kUnsupportedVariants) {
     if (core::GetTableFieldRaw(L, abs_rec_idx, v)) {
       lua_pop(L, 1);
-      return FailUnsupportedVariant(ctx, v.c_str());
+      err_out = UnsupportedMetricVariantError(v.c_str());
+      return false;
     }
   }
 
-  // 2. Detect the supported OTLP metric variant.
-  MetricRecord m;
+  // 2. Top-level temporality & supported OTLP metric variant
+  int64_t agg_temporality = 0;
+  ReadLuaAggregationTemporality(L, abs_rec_idx, agg_temporality);
+
   std::string_view metric_type;
+  MetricValueKind val_kind = MetricValueKind::kNone;
+  double double_val = 0.0;
+  int64_t int_val = 0;
   uint64_t hist_count = 0;
+  bool has_sum = false;
   double hist_sum = 0.0;
   bool has_min = false;
   double hist_min = 0.0;
   bool has_max = false;
   double hist_max = 0.0;
-  lv.bucket_counts.clear();
-  lv.explicit_bounds.clear();
-  lv.summary_quantiles.clear();
+  int64_t exp_scale = 0;
+  uint64_t exp_zero_count = 0;
+  double exp_zero_threshold = 0.0;
+  int64_t pos_offset = 0;
+  int64_t neg_offset = 0;
+  bool has_exemplars = false;
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "counter", "sum")) {
     metric_type = "sum";
-    ReadLuaMetricValue(L, -1, m.val_kind, m.double_val, m.int_val);
+    ReadLuaMetricValue(L, -1, val_kind, double_val, int_val, agg_temporality, exemplars_writer,
+                       has_exemplars);
     lua_pop(L, 1);
   } else if (core::GetTableFieldRaw(L, abs_rec_idx, "gauge")) {
     metric_type = "gauge";
-    ReadLuaMetricValue(L, -1, m.val_kind, m.double_val, m.int_val);
+    ReadLuaMetricValue(L, -1, val_kind, double_val, int_val, agg_temporality, exemplars_writer,
+                       has_exemplars);
     lua_pop(L, 1);
   } else if (core::GetTableFieldRaw(L, abs_rec_idx, "aggregated_histogram", "histogram")) {
     metric_type = "histogram";
-    ReadLuaHistogram(L, -1, hist_count, hist_sum, has_min, hist_min, has_max, hist_max,
-                     lv.bucket_counts, lv.explicit_bounds);
+    ReadLuaHistogram(L, -1, agg_temporality, hist_count, has_sum, hist_sum, has_min, hist_min,
+                     has_max, hist_max, tls_bucket_counts, tls_explicit_bounds, exemplars_writer,
+                     has_exemplars);
+    lua_pop(L, 1);
+  } else if (core::GetTableFieldRaw(L, abs_rec_idx, "exponential_histogram", "exponentialHistogram",
+                                    "aggregated_exponential_histogram")) {
+    metric_type = "exponential_histogram";
+    ReadLuaExponentialHistogram(L, -1, agg_temporality, hist_count, has_sum, hist_sum, has_min,
+                                hist_min, has_max, hist_max, exp_scale, exp_zero_count,
+                                exp_zero_threshold, pos_offset, tls_pos_bucket_counts, neg_offset,
+                                tls_neg_bucket_counts, exemplars_writer, has_exemplars);
     lua_pop(L, 1);
   } else if (core::GetTableFieldRaw(L, abs_rec_idx, "aggregated_summary", "summary")) {
     metric_type = "summary";
-    ReadLuaSummary(L, -1, hist_count, hist_sum, lv.summary_quantiles);
+    ReadLuaSummary(L, -1, hist_count, has_sum, hist_sum, tls_summary_quantiles, exemplars_writer,
+                   has_exemplars);
     lua_pop(L, 1);
   }
 
@@ -1494,57 +2033,55 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
     return true;
   }
 
-  if (core::GetTableFieldRaw(L, abs_rec_idx, "kind", "aggregationTemporality")) {
-    if (lua_type(L, -1) == LUA_TSTRING) {
-      size_t klen = 0;
-      const char* ks = lua_tolstring(L, -1, &klen);
-      if (ks != nullptr) {
-        m.agg_temporality = ParseKindToTemporality(std::string_view(ks, klen));
-      }
-    } else if (lua_type(L, -1) == LUA_TNUMBER) {
-      int64_t parsed_temp = 0;
-      if (core::TryParseTableInt64At(L, -1, parsed_temp)) {
-        m.agg_temporality = parsed_temp;
-      }
-    }
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "exemplars", "Exemplars")) {
+    exemplars_writer.Reset();
+    core::SerializeTableExemplarsToJson(L, -1, exemplars_writer);
+    has_exemplars = true;
     lua_pop(L, 1);
   }
+  if (!has_exemplars) {
+    exemplars_writer.Reset();
+    exemplars_writer.StartArray();
+    exemplars_writer.EndArray();
+  }
 
+  bool has_is_monotonic = false;
+  bool is_monotonic = false;
   if (core::GetTableFieldRaw(L, abs_rec_idx, "isMonotonic", "is_monotonic")) {
     if (lua_isboolean(L, -1)) {
-      m.is_monotonic = lua_toboolean(L, -1) != 0;
-      m.has_is_monotonic = true;
+      is_monotonic = lua_toboolean(L, -1) != 0;
+      has_is_monotonic = true;
     }
     lua_pop(L, 1);
   }
 
-  // 3. MetricName (namespace .. "." .. name), MetricDescription, MetricUnit.
+  // 3. MetricName (namespace .. "." .. name), MetricDescription, MetricUnit
   std::string_view raw_name =
-      core::ReadTableStringView(L, abs_rec_idx, "name", nullptr, lv.service);
+      core::ReadTableStringView(L, abs_rec_idx, "name", nullptr, tls_service_scratch);
   std::string_view metric_ns =
-      core::ReadTableStringView(L, abs_rec_idx, "namespace", nullptr, lv.metric_name);
+      core::ReadTableStringView(L, abs_rec_idx, "namespace", nullptr, tls_metric_name_scratch);
   std::string_view metric_name = raw_name;
   if (!metric_ns.empty() && !raw_name.empty()) {
-    if (metric_ns.data() != lv.metric_name.data()) {
-      lv.metric_name.clear();
-      lv.metric_name.append(metric_ns);
+    if (metric_ns.data() != tls_metric_name_scratch.data()) {
+      tls_metric_name_scratch.clear();
+      tls_metric_name_scratch.append(metric_ns);
     }
-    lv.metric_name.push_back('.');
-    lv.metric_name.append(raw_name);
-    metric_name = std::string_view(lv.metric_name);
+    tls_metric_name_scratch.push_back('.');
+    tls_metric_name_scratch.append(raw_name);
+    metric_name = std::string_view(tls_metric_name_scratch);
   } else if (!metric_ns.empty()) {
     metric_name = metric_ns;
-  } else if (raw_name.data() == lv.service.data() && !raw_name.empty()) {
-    lv.metric_name.assign(raw_name);
-    metric_name = std::string_view(lv.metric_name);
+  } else if (raw_name.data() == tls_service_scratch.data() && !raw_name.empty()) {
+    tls_metric_name_scratch.assign(raw_name);
+    metric_name = std::string_view(tls_metric_name_scratch);
   }
 
   std::string_view metric_desc =
-      core::ReadTableStringView(L, abs_rec_idx, "description", nullptr, lv.metric_desc);
+      core::ReadTableStringView(L, abs_rec_idx, "description", nullptr, tls_metric_desc_scratch);
   std::string_view metric_unit =
-      core::ReadTableStringView(L, abs_rec_idx, "unit", nullptr, lv.metric_unit);
+      core::ReadTableStringView(L, abs_rec_idx, "unit", nullptr, tls_metric_unit_scratch);
 
-  // 4. Timestamps: TimeUnix and StartTimeUnix.
+  // 4. Timestamps: TimeUnix and StartTimeUnix
   uint64_t t_ns = 0;
   bool has_ts = core::ReadTableTimestampField(L, abs_rec_idx, "timestamp", "timeUnixNano", t_ns);
   if (!has_ts) {
@@ -1580,24 +2117,26 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
     start_time_sv = std::string_view(start_ts_buf.data(), 30);
   }
 
-  // 5. Optional resources / scope / attributes tables + single-pass tags splitting. The three
-  //    attribute maps are staged into tapes; later writes to a key win, exactly as the legacy
-  //    raw-set into one table did.
-  lv.res_tape.Reset();
-  lv.scope_tape.Reset();
-  lv.dp_tape.Reset();
+  // 5. Optional resources / scope / attributes tables + single-pass tags merging
   std::string_view service_name;
   std::string_view scope_name =
-      core::ReadTableStringView(L, abs_rec_idx, "scope_name", "scopeName", lv.scope_name);
-  std::string_view scope_version =
-      core::ReadTableStringView(L, abs_rec_idx, "scope_version", "scopeVersion", lv.scope_ver);
+      core::ReadTableStringView(L, abs_rec_idx, "scope_name", "scopeName", tls_scope_name_scratch);
+  std::string_view scope_version = core::ReadTableStringView(L, abs_rec_idx, "scope_version",
+                                                             "scopeVersion", tls_scope_ver_scratch);
+
+  res_attrs_writer.Reset();
+  res_attrs_writer.StartObject();
+  scope_attrs_writer.Reset();
+  scope_attrs_writer.StartObject();
+  dp_attrs_writer.Reset();
+  dp_attrs_writer.StartObject();
 
   bool has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resources", "resource_attributes");
   if (!has_res) {
     has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resourceAttributes", "resource");
   }
   if (has_res) {
-    const int res_idx = lua_absindex(L, -1);
+    int res_idx = lua_absindex(L, -1);
     if (lua_istable(L, res_idx)) {
       int attrs_src_idx = res_idx;
       bool has_nested_attrs = false;
@@ -1609,10 +2148,10 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
           lua_pop(L, 1);
         }
       }
-      core::StageTableAttributeFields(lv.res_tape, L, attrs_src_idx, s.writer, &service_name);
+      core::WriteTableAttributesEntriesJson(L, attrs_src_idx, res_attrs_writer, &service_name);
       if (!service_name.empty()) {
-        lv.service.assign(service_name);
-        service_name = std::string_view(lv.service);
+        tls_service_scratch.assign(service_name);
+        service_name = std::string_view(tls_service_scratch);
       }
       if (has_nested_attrs) {
         lua_pop(L, 1);
@@ -1622,16 +2161,17 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
   }
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "scope")) {
-    const int s_idx = lua_absindex(L, -1);
+    int s_idx = lua_absindex(L, -1);
     if (lua_istable(L, s_idx)) {
       if (scope_name.empty()) {
-        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, lv.scope_name);
+        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
       }
       if (scope_version.empty()) {
-        scope_version = core::ReadTableStringView(L, s_idx, "version", nullptr, lv.scope_ver);
+        scope_version =
+            core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
       }
       if (core::GetTableFieldRaw(L, s_idx, "attributes")) {
-        core::StageTableAttributeFields(lv.scope_tape, L, lua_absindex(L, -1), s.writer);
+        core::WriteTableAttributesEntriesJson(L, -1, scope_attrs_writer);
         lua_pop(L, 1);
       }
     }
@@ -1640,13 +2180,13 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "attributes")) {
     if (lua_istable(L, -1)) {
-      core::StageTableAttributeFields(lv.dp_tape, L, lua_absindex(L, -1), s.writer);
+      core::WriteTableAttributesEntriesJson(L, -1, dp_attrs_writer);
     }
     lua_pop(L, 1);
   }
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "tags")) {
-    const int tags_idx = lua_absindex(L, -1);
+    int tags_idx = lua_absindex(L, -1);
     if (lua_istable(L, tags_idx) && !core::IsLuaTableEmpty(L, tags_idx)) {
       lua_pushnil(L);
       while (lua_next(L, tags_idx) != 0) {
@@ -1673,48 +2213,51 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
           if (k.size() > 9 && k.substr(0, 9) == "resource.") {
             std::string_view sub_key = k.substr(9);
             if (sub_key == "service.name" || sub_key == "service_name") {
-              std::string_view sv = ReadLuaScalarStringView(L, val_idx, lv.service);
+              std::string_view sv = ReadLuaScalarStringView(L, val_idx, tls_service_scratch);
               if (!sv.empty()) {
                 service_name = sv;
               }
             }
-            StageLuaTag(lv.res_tape, sub_key, L, val_idx, s.writer);
+            res_attrs_writer.Key(sub_key);
+            core::SerializeLuaValueToJson(L, val_idx, res_attrs_writer);
           } else if (k.size() > 6 && k.substr(0, 6) == "scope.") {
             std::string_view sub_key = k.substr(6);
             if (sub_key == "name") {
-              std::string_view sv = ReadLuaScalarStringView(L, val_idx, lv.scope_name);
+              std::string_view sv = ReadLuaScalarStringView(L, val_idx, tls_scope_name_scratch);
               if (!sv.empty()) {
                 scope_name = sv;
               }
             } else if (sub_key == "version") {
-              std::string_view sv = ReadLuaScalarStringView(L, val_idx, lv.scope_ver);
+              std::string_view sv = ReadLuaScalarStringView(L, val_idx, tls_scope_ver_scratch);
               if (!sv.empty()) {
                 scope_version = sv;
               }
             } else {
-              StageLuaTag(lv.scope_tape, sub_key, L, val_idx, s.writer);
+              scope_attrs_writer.Key(sub_key);
+              core::SerializeLuaValueToJson(L, val_idx, scope_attrs_writer);
             }
           } else if (k == "otel.unit" || k == "metric.unit") {
             if (metric_unit.empty()) {
-              metric_unit = ReadLuaScalarStringView(L, val_idx, lv.metric_unit);
+              metric_unit = ReadLuaScalarStringView(L, val_idx, tls_metric_unit_scratch);
             }
           } else if (k == "otel.description" || k == "metric.description") {
             if (metric_desc.empty()) {
-              metric_desc = ReadLuaScalarStringView(L, val_idx, lv.metric_desc);
+              metric_desc = ReadLuaScalarStringView(L, val_idx, tls_metric_desc_scratch);
             }
           } else if (k == "otel.scope.name") {
             if (scope_name.empty()) {
-              scope_name = ReadLuaScalarStringView(L, val_idx, lv.scope_name);
+              scope_name = ReadLuaScalarStringView(L, val_idx, tls_scope_name_scratch);
             }
           } else if (k == "otel.scope.version") {
             if (scope_version.empty()) {
-              scope_version = ReadLuaScalarStringView(L, val_idx, lv.scope_ver);
+              scope_version = ReadLuaScalarStringView(L, val_idx, tls_scope_ver_scratch);
             }
           } else {
-            StageLuaTag(lv.dp_tape, k, L, val_idx, s.writer);
+            dp_attrs_writer.Key(k);
+            core::SerializeLuaValueToJson(L, val_idx, dp_attrs_writer);
             if ((k == "service.name" || k == "service_name") &&
                 (service_name.empty() || service_name == "unknown_service")) {
-              std::string_view sv = ReadLuaScalarStringView(L, val_idx, lv.service);
+              std::string_view sv = ReadLuaScalarStringView(L, val_idx, tls_service_scratch);
               if (!sv.empty()) {
                 service_name = sv;
               }
@@ -1731,9 +2274,13 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
     lua_pop(L, 1);
   }
 
+  res_attrs_writer.EndObject();
+  scope_attrs_writer.EndObject();
+  dp_attrs_writer.EndObject();
+
   if (service_name.empty() || service_name == "unknown_service") {
     std::string_view top_svc =
-        core::ReadTableStringView(L, abs_rec_idx, "service_name", "service", lv.service);
+        core::ReadTableStringView(L, abs_rec_idx, "service_name", "service", tls_service_scratch);
     if (!top_svc.empty()) {
       service_name = top_svc;
     } else {
@@ -1741,65 +2288,116 @@ bool ExtractSingleNativeMetricTable(OperationContext& ctx, NativeMetricsScratch&
     }
   }
 
-  m.flags = core::ReadTableInt64(L, abs_rec_idx, "flags", nullptr, 0);
-  m.name = metric_name;
-  m.description = metric_desc;
-  m.unit = metric_unit;
-  m.type = metric_type;
-  m.service = service_name;
-  m.scope_name = scope_name;
-  m.scope_version = scope_version;
-  m.start_time = start_time_sv;
-  m.time_unix = time_unix_sv;
-  m.is_sum = (metric_type == "sum");
-  m.is_histogram = (metric_type == "histogram");
-  m.is_summary = (metric_type == "summary");
-  m.count = hist_count;
-  m.sum = hist_sum;
-  m.has_min = has_min;
-  m.min = hist_min;
-  m.has_max = has_max;
-  m.max = hist_max;
+  int64_t flags = core::ReadTableInt64(L, abs_rec_idx, "flags", nullptr, 0);
+  const bool is_sum = (metric_type == "sum");
+  const bool is_histogram = (metric_type == "histogram");
+  const bool is_exp_histogram = (metric_type == "exponential_histogram");
+  const bool is_summary = (metric_type == "summary");
 
-  // 6. Stage all columns of metrics.schema.
+  // 6. Emit all columns of metrics.schema
   emitter.StartRecord();
-  StageRecordColumns(lv.row, m);
-  if (core::GetTableFieldRaw(L, abs_rec_idx, "exemplars")) {
-    core::StageTableExemplars(lv.row, "Exemplars", L, lua_absindex(L, -1), s.writer);
-    lua_pop(L, 1);
-  } else {
-    lv.row.BeginArray("Exemplars");
-    lv.row.End();
+  emitter.SetString("MetricName", metric_name);
+  emitter.SetString("MetricDescription", metric_desc);
+  emitter.SetString("MetricUnit", metric_unit);
+  emitter.SetString("MetricType", metric_type);
+  emitter.SetString("ServiceName", service_name);
+
+  if (is_sum || is_histogram || is_exp_histogram) {
+    emitter.SetInt64("AggregationTemporality", agg_temporality);
   }
-  lv.row.Str("processed_at", processed_at);
-  if (!MaterializeRecordTapes(ctx, lv, m)) {
+  if (is_sum && has_is_monotonic) {
+    emitter.SetBool("IsMonotonic", is_monotonic);
+  }
+
+  emitter.SetString("ResourceAttributes", res_attrs_writer.Str());
+  emitter.SetString("ScopeName", scope_name);
+  emitter.SetString("ScopeVersion", scope_version);
+  emitter.SetString("ScopeAttributes", scope_attrs_writer.Str());
+  emitter.SetString("Attributes", dp_attrs_writer.Str());
+
+  emitter.SetString("StartTimeUnix", start_time_sv);
+  emitter.SetString("TimeUnix", time_unix_sv);
+
+  if (!is_histogram && !is_exp_histogram && !is_summary) {
+    if (val_kind == MetricValueKind::kDouble) {
+      emitter.SetDouble("Value", double_val);
+    } else if (val_kind == MetricValueKind::kInt64) {
+      emitter.SetInt64("Value", int_val);
+    }
+  }
+
+  if (is_histogram) {
+    SerializeHistogramJson(payload_writer, agg_temporality, hist_count, has_sum, hist_sum, has_min,
+                           hist_min, has_max, hist_max, tls_bucket_counts, tls_explicit_bounds);
+    emitter.SetString("Histogram", payload_writer.Str());
+  }
+
+  if (is_exp_histogram) {
+    SerializeExponentialHistogramJson(payload_writer, agg_temporality, hist_count, has_sum,
+                                      hist_sum, has_min, hist_min, has_max, hist_max, exp_scale,
+                                      exp_zero_count, exp_zero_threshold, pos_offset,
+                                      tls_pos_bucket_counts, neg_offset, tls_neg_bucket_counts);
+    emitter.SetString("ExponentialHistogram", payload_writer.Str());
+  }
+
+  if (is_summary) {
+    SerializeSummaryJson(payload_writer, hist_count, has_sum, hist_sum, tls_summary_quantiles);
+    emitter.SetString("Summary", payload_writer.Str());
+  }
+
+  emitter.SetInt64("Flags", flags);
+  emitter.SetString("Exemplars", exemplars_writer.Str());
+  emitter.SetString("processed_at", processed_at);
+
+  emitter.EndRecord();
+  if (emitter.HasError()) {
+    err_out = std::string(emitter.ErrorMessage());
     return false;
   }
-  emitter.EndRecord();
-  return !emitter.HasError();
+  return true;
+}
+
+// The row staged for emission (one record at a time).
+core::StagedRow& RowBuffer() {
+  static thread_local core::StagedRow row;
+  return row;
+}
+
+struct ScratchGuard {
+  ScratchGuard() = default;
+  ScratchGuard(const ScratchGuard&) = delete;
+  ScratchGuard& operator=(const ScratchGuard&) = delete;
+  ~ScratchGuard() noexcept { TrimAllScratch(); }
+};
+
+// Records a failed extraction on the context (unless the emitter already did).
+bool FailExtraction(OperationContext& ctx, const core::RowEmitter& emitter, ErrorCode code,
+                    std::string_view message) {
+  if (!emitter.HasError()) {
+    ctx.error.Set(code, message);
+  }
+  return false;
+}
+
+bool FailMetric(OperationContext& ctx, const core::RowEmitter& emitter,
+                const std::string& message) {
+  const bool unsupported = message.rfind("Unsupported non-OTLP metric variant", 0) == 0;
+  return FailExtraction(ctx, emitter, unsupported ? ErrorCode::Schema : ErrorCode::Json, message);
+}
+
+bool FailJson(OperationContext& ctx, simdjson::error_code code) {
+  ctx.error.Set(ErrorCode::Json, simdjson::error_message(code));
+  return false;
 }
 
 }  // namespace
 
 bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
                               simdjson::padded_string_view admitted) {
-  NativeMetricsScratch& s = Scratch();
-  s.writer.Reset();
-  ReserveLevel(s.levels[0]);
-  ReserveLevel(s.levels[1]);
-  struct TrimGuard {
-    explicit TrimGuard(NativeMetricsScratch& scratch) : s(scratch) {}
-    TrimGuard(const TrimGuard&) = delete;
-    TrimGuard& operator=(const TrimGuard&) = delete;
-    ~TrimGuard() noexcept {
-      s.writer.Trim();
-      for (Level& lv : s.levels) ResetLevel(lv);
-      core::ResetServiceNameScratch();
-    }
-    NativeMetricsScratch& s;
-  } trim_guard{s};
-
-  core::RowEmitter emitter(ctx, s.levels[0].row);
+  NativeMetricsScratch& s = ScratchLevel(0);
+  ResetScratch(s);
+  ScratchGuard guard;
+  core::RowEmitter emitter(ctx, RowBuffer());
 
   auto doc_res = parser.IteratePrepared(admitted);
   if (doc_res.error() != simdjson::SUCCESS) {
@@ -1814,6 +2412,15 @@ bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
   std::array<char, 32> proc_buf;
   core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
   std::string_view processed_at(proc_buf.data(), 30);
+  std::string err_out;
+
+  auto extract_object = [&](simdjson::ondemand::object& obj) -> bool {
+    return ExtractNativeMetricObjectJson(
+        ctx.L, obj, processed_at, s.res_attrs_writer, s.scope_attrs_writer, s.dp_attrs_writer,
+        s.exemplars_writer, s.payload_writer, s.metric_name, s.service, s.scope_name, s.scope_ver,
+        s.metric_desc, s.metric_unit, s.bucket_counts, s.explicit_bounds, s.pos_bucket_counts,
+        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out);
+  };
 
   const auto root_type = type_res.value();
   if (root_type == simdjson::ondemand::json_type::object) {
@@ -1822,8 +2429,8 @@ bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
       return FailJson(ctx, doc_obj_res.error());
     }
     auto doc_obj = doc_obj_res.value();
-    if (!ExtractNativeMetricObjectJson(ctx, s, doc_obj, processed_at, 0)) {
-      return false;
+    if (!extract_object(doc_obj)) {
+      return FailMetric(ctx, emitter, err_out);
     }
   } else if (root_type == simdjson::ondemand::json_type::array) {
     auto doc_arr_res = doc.get_array();
@@ -1839,8 +2446,8 @@ bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
         return FailJson(ctx, elem_obj_res.error());
       }
       auto elem_obj = elem_obj_res.value();
-      if (!ExtractNativeMetricObjectJson(ctx, s, elem_obj, processed_at, 0)) {
-        return false;
+      if (!extract_object(elem_obj)) {
+        return FailMetric(ctx, emitter, err_out);
       }
     }
   } else {
@@ -1853,39 +2460,44 @@ bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
 }
 
 bool ExtractNativeMetricsTable(OperationContext& ctx) {
-  NativeMetricsScratch& s = Scratch();
-  s.writer.Reset();
-  ReserveLevel(s.levels[0]);
+  NativeMetricsScratch& s = ScratchLevel(0);
+  ResetScratch(s);
   struct Guard {
-    Guard(lua_State* l, int top, NativeMetricsScratch& scratch)
-        : L(l), entry_top(top), s(scratch) {}
+    Guard(lua_State* l, int top) : L(l), entry_top(top) {}
     Guard(const Guard&) = delete;
     Guard& operator=(const Guard&) = delete;
     ~Guard() noexcept {
       lua_settop(L, entry_top);
-      s.writer.Trim();
-      ResetLevel(s.levels[0]);
+      TrimAllScratch();
     }
     lua_State* L;
     int entry_top;
-    NativeMetricsScratch& s;
-  } guard{ctx.L, lua_gettop(ctx.L), s};
+  } guard{ctx.L, lua_gettop(ctx.L)};
 
   lua_State* L = ctx.L;
-  core::RowEmitter emitter(ctx, s.levels[0].row);
+  core::RowEmitter emitter(ctx, RowBuffer());
   std::array<char, 32> proc_buf;
   core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
   std::string_view processed_at(proc_buf.data(), 30);
+  std::string err_out;
 
   const int abs_idx = lua_absindex(L, ctx.input_index);
+
+  auto extract_one = [&](int idx) -> bool {
+    return ExtractSingleNativeMetricTable(
+        L, idx, processed_at, s.res_attrs_writer, s.scope_attrs_writer, s.dp_attrs_writer,
+        s.exemplars_writer, s.payload_writer, s.metric_name, s.service, s.scope_name, s.scope_ver,
+        s.metric_desc, s.metric_unit, s.bucket_counts, s.explicit_bounds, s.pos_bucket_counts,
+        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out);
+  };
 
   auto extract_array = [&](int arr_idx, size_t len) -> bool {
     for (size_t i = 1; i <= len; ++i) {
       lua_rawgeti(L, arr_idx, static_cast<lua_Integer>(i));
       if (lua_istable(L, -1)) {
-        const int item_idx = lua_absindex(L, -1);
+        int item_idx = lua_absindex(L, -1);
         if (HasNativeMetricFields(L, item_idx)) {
-          if (!ExtractSingleNativeMetricTable(ctx, s, item_idx, processed_at)) {
+          if (!extract_one(item_idx)) {
             lua_pop(L, 1);
             return false;
           }
@@ -1899,33 +2511,33 @@ bool ExtractNativeMetricsTable(OperationContext& ctx) {
   const size_t raw_len = lua_rawlen(L, abs_idx);
   if (raw_len > 0) {
     if (!extract_array(abs_idx, raw_len)) {
-      return false;
+      return FailMetric(ctx, emitter, err_out);
     }
   } else {
     bool handled_wrapper = false;
     if (core::GetTableFieldRaw(L, abs_idx, "metric", "log")) {
-      const int inner_idx = lua_absindex(L, -1);
+      int inner_idx = lua_absindex(L, -1);
       if (lua_istable(L, inner_idx)) {
         const size_t inner_len = lua_rawlen(L, inner_idx);
         if (inner_len > 0) {
           handled_wrapper = true;
           if (!extract_array(inner_idx, inner_len)) {
             lua_pop(L, 1);
-            return false;
+            return FailMetric(ctx, emitter, err_out);
           }
         } else if (HasNativeMetricFields(L, inner_idx)) {
           handled_wrapper = true;
-          if (!ExtractSingleNativeMetricTable(ctx, s, inner_idx, processed_at)) {
+          if (!extract_one(inner_idx)) {
             lua_pop(L, 1);
-            return false;
+            return FailMetric(ctx, emitter, err_out);
           }
         }
       }
       lua_pop(L, 1);
     }
     if (!handled_wrapper && HasNativeMetricFields(L, abs_idx)) {
-      if (!ExtractSingleNativeMetricTable(ctx, s, abs_idx, processed_at)) {
-        return false;
+      if (!extract_one(abs_idx)) {
+        return FailMetric(ctx, emitter, err_out);
       }
     }
   }

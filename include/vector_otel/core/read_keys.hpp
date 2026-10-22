@@ -52,6 +52,7 @@ inline constexpr std::string_view kReadKeyList[] = {
     "Values",
     "ZeroCount",
     "ZeroThreshold",
+    "aggregated_exponential_histogram",
     "aggregated_histogram",
     "aggregated_summary",
     "aggregationTemporality",

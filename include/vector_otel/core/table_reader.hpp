@@ -154,8 +154,19 @@ void StageTableAttributes(StagedRow& row, Key key, lua_State* L, int attrs_idx,
 void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, int depth = 0);
 
 // Serialises attributes table (OTLP array-of-KeyValue or direct key-value map)
+// entries to FastJsonWriter without enclosing StartObject/EndObject or writer.Reset().
+void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                                     std::string_view* out_service_name = nullptr);
+
+// Serialises attributes table (OTLP array-of-KeyValue or direct key-value map)
 // directly to FastJsonWriter as a flattened JSON object without calling writer.Reset().
-void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer);
+void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                              std::string_view* out_service_name = nullptr);
+
+// Serialises metric exemplars array to FastJsonWriter in ClickHouse JSON format
+// [{"FilteredAttributes":{...},"TimeUnix":"...","Value":...,"SpanId":"...","TraceId":"..."}]
+// without calling writer.Reset().
+void SerializeTableExemplarsToJson(lua_State* L, int exemplars_idx, FastJsonWriter& writer);
 
 // Serialises span events array to FastJsonWriter in ClickHouse JSON format
 // [{"Timestamp":"...","Name":"...","Attributes":{...}}, ...] without calling writer.Reset().
@@ -165,11 +176,5 @@ void SerializeTableSpanEventsToJson(lua_State* L, int events_idx, FastJsonWriter
 // [{"TraceId":"...","SpanId":"...","TraceState":"...","Attributes":{...}}, ...]
 // with normalized hex IDs and without calling writer.Reset().
 void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& writer);
-
-// Stages a normalized array of metric exemplars under `key` (FilteredAttributes, TimeUnix, Value,
-// SpanId, TraceId per exemplar; non-table entries are skipped, a non-table input stages an empty
-// array). Reads are raw and allocation-free; the Lua stack is restored on return.
-void StageTableExemplars(StagedRow& row, Key key, lua_State* L, int exemplars_idx,
-                         FastJsonWriter& writer);
 
 }  // namespace vector_otel::core

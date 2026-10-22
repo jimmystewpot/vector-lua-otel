@@ -330,7 +330,7 @@ const Sig kLogsSig{
     LogsJson,
     LogsLua,
     true,
-    {"\"Body\":\"msg-0\"", "\"ServiceName\":\"svc-0\"", "\"LogAttributes\":{\"k\":\"v0\"}"},
+    {"\"Body\":\"msg-0\"", "\"ServiceName\":\"svc-0\"", "\"LogAttributes\":\"{\"k\":\"v0\"}\""},
     {"{}", "{\"resourceLogs\":[]}", "{\"resourceLogs\":[{}]}",
      "{\"resourceLogs\":[{\"scopeLogs\":[]}]}", "{\"resourceLogs\":[{\"scopeLogs\":[{}]}]}",
      "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":[]}]}]}"},
@@ -346,8 +346,9 @@ const Sig kTracesSig{
     TracesJson,
     TracesLua,
     false,
-    {"\"SpanName\":\"span-0\"", "\"ServiceName\":\"svc-0\"", "\"SpanAttributes\":{\"k\":\"v0\"}",
-     "\"SpanKind\":\"SPAN_KIND_SERVER\"", "\"StatusCode\":\"STATUS_CODE_OK\"", "\"Duration\":998"},
+    {"\"SpanName\":\"span-0\"", "\"ServiceName\":\"svc-0\"",
+     "\"SpanAttributes\":\"{\"k\":\"v0\"}\"", "\"SpanKind\":\"SPAN_KIND_SERVER\"",
+     "\"StatusCode\":\"STATUS_CODE_OK\"", "\"Duration\":998"},
     {"{}", "{\"resourceSpans\":[]}", "{\"resourceSpans\":[{}]}",
      "{\"resourceSpans\":[{\"scopeSpans\":[]}]}", "{\"resourceSpans\":[{\"scopeSpans\":[{}]}]}",
      "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[]}]}]}"},
@@ -364,7 +365,7 @@ const Sig kMetricsSig{
     MetricsLua,
     true,
     {"\"MetricName\":\"m\"", "\"MetricType\":\"gauge\"", "\"ServiceName\":\"svc-0\"",
-     "\"MetricUnit\":\"1\"", "\"Attributes\":{\"k\":\"v0\"}",
+     "\"MetricUnit\":\"1\"", "\"Attributes\":\"{\"k\":\"v0\"}\"",
      "\"FilteredAttributes\":{\"fk\":\"f0\"}"},
     {"{}", "{\"resourceMetrics\":[]}", "{\"resourceMetrics\":[{}]}",
      "{\"resourceMetrics\":[{\"scopeMetrics\":[]}]}",
@@ -393,7 +394,7 @@ bool AnyMetricRowComplete(const std::string& dump) {
     return has("\"bucketCounts\":[1,2,3]") && has("\"bucketCounts\":[4,5]");
   }
   if (has("\"MetricType\":\"summary\"")) return has("\"quantileValues\":[");
-  return has("\"Exemplars\":[");
+  return has("\"Exemplars\":\"[");
 }
 
 const Sig kAnyMetricsSig{
@@ -402,7 +403,7 @@ const Sig kAnyMetricsSig{
     AnyMetricsLua,
     true,
     {"\"MetricName\":\"m0\"", "\"MetricType\":\"gauge\"", "\"ServiceName\":\"svc-0\"",
-     "\"Attributes\":{\"k\":\"v0\"}", "\"FilteredAttributes\":{\"fk\":\"f0\"}"},
+     "\"Attributes\":\"{\"k\":\"v0\"}\"", "\"FilteredAttributes\":{\"fk\":\"f0\"}"},
     {"{}", "{\"resourceMetrics\":[]}"},
     {"return {}", "return {resourceMetrics={}}"},
     extractors::ProcessMetrics,
@@ -460,7 +461,7 @@ const Sig kNativeLogsSig{
     NativeLogsJson,
     NativeLogsLua,
     true,
-    {"\"Body\":\"msg-0\"", "\"ServiceName\":\"svc-0\"", "\"LogAttributes\":{\"k\":\"v0\"}",
+    {"\"Body\":\"msg-0\"", "\"ServiceName\":\"svc-0\"", "\"LogAttributes\":\"{\"k\":\"v0\"}\"",
      "\"ScopeName\":\"scope-0\"", "\"SeverityText\":\"INFO\""},
     {"{}", "[]", "[{}]", "{\"log\":{}}", "{\"log\":[]}", "{\"log\":[{}]}", "[{\"log\":{}}]"},
     {"return {}", "return {{}}", "return {log={}}", "return {log={{}}}", "return {{log={}}}",
@@ -533,10 +534,10 @@ const Sig kNativeTracesSig{
     NativeTracesJson,
     NativeTracesLua,
     false,
-    {"\"SpanName\":\"span-0\"", "\"ServiceName\":\"svc-0\"", "\"SpanAttributes\":{\"k\":\"v0\"}",
-     "\"SpanKind\":\"SPAN_KIND_SERVER\"", "\"StatusCode\":\"STATUS_CODE_OK\"", "\"Duration\":998",
-     "\"ScopeName\":\"scope-0\"", "\"StatusMessage\":\"fine\"", "\"Name\":\"ev\"",
-     "\"SpanId\":\"bb\""},
+    {"\"SpanName\":\"span-0\"", "\"ServiceName\":\"svc-0\"",
+     "\"SpanAttributes\":\"{\"k\":\"v0\"}\"", "\"SpanKind\":\"SPAN_KIND_SERVER\"",
+     "\"StatusCode\":\"STATUS_CODE_OK\"", "\"Duration\":998", "\"ScopeName\":\"scope-0\"",
+     "\"StatusMessage\":\"fine\"", "\"Name\":\"ev\"", "\"SpanId\":\"bb\""},
     {"{}", "[]", "[{}]", "{\"log\":{}}", "{\"trace\":[]}", "{\"log\":[{}]}", "[{\"trace\":{}}]"},
     {"return {}", "return {{}}", "return {log={}}", "return {trace={{}}}", "return {{trace={}}}",
      "return {{unrelated=1}}"},
@@ -619,8 +620,8 @@ std::string NativeMetricsLua(int resources, int records) {
 
 bool NativeMetricRowComplete(const std::string& dump) {
   auto has = [&](const char* needle) { return dump.find(needle) != std::string::npos; };
-  if (!has("\"Exemplars\":") || !has("\"ScopeAttributes\":{") || !has("\"ResourceAttributes\":{") ||
-      !has("\"Attributes\":{")) {
+  if (!has("\"Exemplars\":") || !has("\"ScopeAttributes\":\"{") ||
+      !has("\"ResourceAttributes\":\"{") || !has("\"Attributes\":\"{")) {
     return false;
   }
   if (has("\"MetricType\":\"histogram\"")) {
@@ -636,8 +637,8 @@ const Sig kNativeMetricsSig{
     NativeMetricsLua,
     true,
     {"\"MetricName\":\"ns.m-0\"", "\"MetricType\":\"gauge\"", "\"ServiceName\":\"svc-0\"",
-     "\"ScopeName\":\"scope-0\"", "\"Attributes\":{\"host\":\"h0\"}",
-     "\"ResourceAttributes\":{\"service.name\":\"svc-0\"}", "\"MetricUnit\":\"1\""},
+     "\"ScopeName\":\"scope-0\"", "\"Attributes\":\"{\"host\":\"h0\"}\"",
+     "\"ResourceAttributes\":\"{\"service.name\":\"svc-0\"}\"", "\"MetricUnit\":\"1\""},
     {"{}", "[]", "[{}]", "{\"metric\":{}}", "{\"log\":[]}", "{\"log\":[{}]}", "[{\"metric\":{}}]",
      "{\"name\":\"m\"}"},
     {"return {}", "return {{}}", "return {metric={}}", "return {log={{}}}", "return {{metric={}}}",
@@ -680,8 +681,8 @@ int CeilDiv(int a, int b) { return (a + b - 1) / b; }
 
 // ---- behaviour --------------------------------------------------------------------------------
 
-TEST_P(FailureSafetyOtelTest, ShareOneResourceAndScopeTablePerResource) {
-  if (!g_sig->shared_tables) GTEST_SKIP() << "native rows carry their own attribute tables";
+TEST_P(FailureSafetyOtelTest, RowsOfOneResourceCarryIdenticalAttributeJson) {
+  if (!g_sig->shared_tables) GTEST_SKIP() << "native rows derive attributes per record";
   for (bool table : {false, true}) {
     SCOPED_TRACE(table ? "table input" : "json input");
     RawState s;
@@ -693,21 +694,17 @@ TEST_P(FailureSafetyOtelTest, ShareOneResourceAndScopeTablePerResource) {
     EXPECT_TRUE(r.first_nil == false);
     EXPECT_EQ(r.count, 6);
     EXPECT_EQ(rec.rows, 6);
-    EXPECT_EQ(rec.calls, CeilDiv(6, kN) <= 6 ? rec.calls : -1);
-    ASSERT_EQ(rec.resource_ptrs.size(), 6u);
+    ASSERT_EQ(rec.resource_json.size(), 6u);
     for (int i = 0; i < 6; ++i) {
-      ASSERT_NE(rec.resource_ptrs[i], nullptr);
-      if (g_sig->scope_attrs) ASSERT_NE(rec.scope_ptrs[i], nullptr);
+      EXPECT_FALSE(rec.resource_json[i].empty());
+      if (g_sig->scope_attrs) EXPECT_FALSE(rec.scope_json[i].empty());
     }
     for (int i = 1; i < 3; ++i) {
-      EXPECT_EQ(rec.resource_ptrs[0], rec.resource_ptrs[i]) << "ResourceAttributes copied per row";
-      if (g_sig->scope_attrs) {
-        EXPECT_EQ(rec.scope_ptrs[0], rec.scope_ptrs[i]) << "ScopeAttributes copied per row";
-      }
-      EXPECT_EQ(rec.resource_ptrs[3], rec.resource_ptrs[3 + i]);
+      EXPECT_EQ(rec.resource_json[0], rec.resource_json[i]);
+      if (g_sig->scope_attrs) EXPECT_EQ(rec.scope_json[0], rec.scope_json[i]);
+      EXPECT_EQ(rec.resource_json[3], rec.resource_json[3 + i]);
     }
-    EXPECT_NE(rec.resource_ptrs[0], rec.resource_ptrs[3]) << "distinct resources must not share";
-    if (g_sig->scope_attrs) EXPECT_NE(rec.scope_ptrs[0], rec.scope_ptrs[3]);
+    EXPECT_NE(rec.resource_json[0], rec.resource_json[3]) << "distinct resources must differ";
     ExpectAnchorsReleased(s.L());
   }
 }
@@ -954,12 +951,12 @@ void SweepLuaAllocations(bool table, int resources, int records) {
     ASSERT_EQ(r.status, LUA_OK) << "an error escaped the dispatcher frame";
     ExpectAnchorsReleased(s.L());
     ExpectRowsComplete(rec);
-    for (const void* p : rec.resource_ptrs) {
-      EXPECT_NE(p, nullptr) << "a delivered row lost its shared ResourceAttributes table";
+    for (const std::string& json : rec.resource_json) {
+      EXPECT_FALSE(json.empty()) << "a delivered row lost its ResourceAttributes JSON string";
     }
-    for (const void* p : rec.scope_ptrs) {
+    for (const std::string& json : rec.scope_json) {
       if (!g_sig->scope_attrs) break;
-      EXPECT_NE(p, nullptr) << "a delivered row lost its shared ScopeAttributes table";
+      EXPECT_FALSE(json.empty()) << "a delivered row lost its ScopeAttributes JSON string";
     }
     if (r.nresults == 3) {
       saw_failure = true;
@@ -1018,12 +1015,12 @@ void SweepLuaWindows(bool table) {
     ASSERT_EQ(r.status, LUA_OK) << "an error escaped the dispatcher frame";
     ExpectAnchorsReleased(s.L());
     ExpectRowsComplete(rec);
-    for (const void* p : rec.resource_ptrs) {
-      EXPECT_NE(p, nullptr) << "a delivered row lost its shared ResourceAttributes table";
+    for (const std::string& json : rec.resource_json) {
+      EXPECT_FALSE(json.empty()) << "a delivered row lost its ResourceAttributes JSON string";
     }
-    for (const void* p : rec.scope_ptrs) {
+    for (const std::string& json : rec.scope_json) {
       if (!g_sig->scope_attrs) break;
-      EXPECT_NE(p, nullptr) << "a delivered row lost its shared ScopeAttributes table";
+      EXPECT_FALSE(json.empty()) << "a delivered row lost its ScopeAttributes JSON string";
     }
     if (r.nresults == 3) {
       saw_failure = true;
@@ -1329,19 +1326,19 @@ TEST(FailureSafetyMetrics, ArraysAndAttributesNeverLeakAcrossDataPoints) {
     };
     // First points carry their arrays and attributes.
     EXPECT_TRUE(has(0, "\"bucketCounts\":[4,5,6]")) << rows[0];
-    EXPECT_TRUE(has(0, "\"Attributes\":{\"k\":\"v\"}")) << rows[0];
+    EXPECT_TRUE(has(0, "\"Attributes\":\"{\"k\":\"v\"}\"")) << rows[0];
     EXPECT_TRUE(has(2, "\"bucketCounts\":[7,8]")) << rows[2];
     EXPECT_TRUE(has(4, "\"quantileValues\":[{")) << rows[4];
     // Second points have none of them, and an empty Attributes map.
     EXPECT_FALSE(has(1, "[4,5,6]")) << rows[1];
     EXPECT_FALSE(has(1, "1.500000f")) << "stale explicitBounds: " << rows[1];
     EXPECT_FALSE(has(1, "\"k\":\"v\"")) << "stale attributes: " << rows[1];
-    EXPECT_TRUE(has(1, "\"Attributes\":{}")) << rows[1];
+    EXPECT_TRUE(has(1, "\"Attributes\":\"{}\"")) << rows[1];
     EXPECT_FALSE(has(3, "[7,8]")) << rows[3];
     EXPECT_FALSE(has(3, "[9]")) << rows[3];
-    EXPECT_TRUE(has(3, "\"Attributes\":{}")) << rows[3];
+    EXPECT_TRUE(has(3, "\"Attributes\":\"{}\"")) << rows[3];
     EXPECT_FALSE(has(5, "3.500000f")) << "stale quantiles: " << rows[5];
-    EXPECT_TRUE(has(5, "\"Attributes\":{}")) << rows[5];
+    EXPECT_TRUE(has(5, "\"Attributes\":\"{}\"")) << rows[5];
   }
 }
 
@@ -1381,7 +1378,7 @@ TEST(FailureSafetyNativeLogs, AcceptedShapesAndSourceFieldOrdering) {
        R"(return {resources={["service.name"]="keep"},log={zzz=1},message="a"})",
        1,
        "a",
-       {R"("ServiceName":"keep")", R"("ResourceAttributes":{"service.name":"keep"})"}},
+       {R"("ServiceName":"keep")", R"("ResourceAttributes":"{"service.name":"keep"}")"}},
       {"a matching wrapper replaces the enclosing event",
        R"({"log":{"message":"inner"},"message":"outer"})", 1,
        R"(return {log={message="inner"},message="outer"})", 1, "inner"},
@@ -1391,7 +1388,7 @@ TEST(FailureSafetyNativeLogs, AcceptedShapesAndSourceFieldOrdering) {
        R"(return {message="a"})",
        1,
        "a",
-       {R"("LogAttributes":{})", R"("ResourceAttributes":{})", R"("ScopeAttributes":{})"}},
+       {R"("LogAttributes":"{}")", R"("ResourceAttributes":"{}")", R"("ScopeAttributes":"{}")"}},
       {"top-level service name",
        R"({"service_name":"top","message":"a"})",
        1,
@@ -1520,7 +1517,7 @@ TEST(FailureSafetyNativeTraces, AcceptedShapesAndMappings) {
        1,
        {R"("SpanName":"a")", R"("SpanKind":"SPAN_KIND_UNSPECIFIED")",
         R"("StatusCode":"STATUS_CODE_UNSET")", R"("Events":"[]")", R"("Links":"[]")",
-        R"("ResourceAttributes":{})", R"("SpanAttributes":{})", R"("Duration":0)",
+        R"("ResourceAttributes":"{}")", R"("SpanAttributes":"{}")", R"("Duration":0)",
         R"("Timestamp":"20)"}},
       {"root array",
        R"([{"name":"a"},{"name":"b"}])",
@@ -1551,7 +1548,7 @@ TEST(FailureSafetyNativeTraces, AcceptedShapesAndMappings) {
        1,
        R"(return {resources={["service.name"]="keep"},events={{name="e"}},log={zzz=1},name="a"})",
        1,
-       {R"("ServiceName":"keep")", R"("ResourceAttributes":{"service.name":"keep"})",
+       {R"("ServiceName":"keep")", R"("ResourceAttributes":"{"service.name":"keep"}")",
         R"("Name":"e")"}},
       {"kind and status as strings",
        R"({"kind":"SPAN_KIND_CLIENT","status":{"code":"STATUS_CODE_ERROR","message":"bad"}})",
@@ -1691,9 +1688,9 @@ TEST(FailureSafetyNativeMetrics, AcceptedShapesAndMappings) {
        R"({"name":"c","counter":{"value":2},"kind":"incremental","is_monotonic":true})",
        R"(return {name="c",counter={value=2},kind="incremental",is_monotonic=true})",
        {R"("MetricName":"c")", R"("MetricType":"sum")", R"("Value":2)", R"("IsMonotonic":true)",
-        R"("AggregationTemporality":1)", R"("ResourceAttributes":{})", R"("ScopeAttributes":{})",
-        R"("Attributes":{})", R"("Exemplars":{})", R"("ServiceName":"unknown_service")",
-        R"("Flags":0)"}},
+        R"("AggregationTemporality":1)", R"("ResourceAttributes":"{}")",
+        R"("ScopeAttributes":"{}")", R"("Attributes":"{}")", R"("Exemplars":"[]")",
+        R"("ServiceName":"unknown_service")", R"("Flags":0)"}},
       {"gauge keeps a double value",
        R"({"name":"g","gauge":{"value":99.25}})",
        R"(return {name="g",gauge={value=99.25}})",
@@ -1713,33 +1710,32 @@ TEST(FailureSafetyNativeMetrics, AcceptedShapesAndMappings) {
       {"histogram with bucket objects strips infinity",
        R"({"name":"h","aggregated_histogram":{"count":3,"sum":4.5,"min":1,"max":3,"buckets":[{"count":1,"upper_limit":1.0},{"count":2,"upper_limit":"+Inf"}]}})",
        R"(return {name="h",aggregated_histogram={count=3,sum=4.5,min=1,max=3,buckets={{count=1,upper_limit=1.0},{count=2,upper_limit=1e999}}}})",
-       {R"("MetricType":"histogram")", R"("bucketCounts":[1,2])", R"("BucketCounts":[1,2])",
-        R"("explicitBounds":[1)", R"("count":3)", R"("Count":3)", R"("min":1)", R"("Max":3)"}},
+       {R"("MetricType":"histogram")", R"("bucketCounts":[1,2])", R"("explicitBounds":[1])",
+        R"("count":3)", R"("min":1)", R"("max":3)"}},
       {"histogram with parallel arrays",
        R"({"name":"h","aggregated_histogram":{"count":6,"sum":10.5,"explicitBounds":[1.0,5.0],"counts":[1,2,3]}})",
        R"(return {name="h",aggregated_histogram={count=6,sum=10.5,explicitBounds={1.0,5.0},counts={1,2,3}}})",
-       {R"("bucketCounts":[1,2,3])", R"("BucketCounts":[1,2,3])", R"("explicitBounds":[1)",
-        R"("ExplicitBounds":[1)"}},
+       {R"("bucketCounts":[1,2,3])", R"("explicitBounds":[1,5])"}},
       {"summary with quantile objects",
        R"({"name":"s","aggregated_summary":{"count":2,"sum":3.5,"quantiles":[{"quantile":0.5,"value":1.0},{"quantile":0.99,"value":2.0}]}})",
        R"(return {name="s",aggregated_summary={count=2,sum=3.5,quantiles={{quantile=0.5,value=1.0},{quantile=0.99,value=2.0}}}})",
-       {R"("MetricType":"summary")", R"("quantileValues":[{)", R"("QuantileValues":[{)",
-        R"("Quantile":0.99)", R"("value":2)"}},
+       {R"("MetricType":"summary")", R"("quantileValues":[{)", R"("quantile":0.99)",
+        R"("value":2)"}},
       {"summary with parallel quantile and value arrays",
        R"({"name":"s","aggregated_summary":{"count":2,"sum":3.5,"quantiles":[0.5,0.99],"values":[1.0,2.0]}})",
        R"(return {name="s",aggregated_summary={count=2,sum=3.5,quantiles={0.5,0.99},values={1.0,2.0}}})",
-       {R"("quantile":0.5)", R"("Value":2)"}},
+       {R"("quantile":0.5)", R"("value":2)"}},
       {"tags split into resource, scope, unit, description and attributes",
        R"({"name":"t","gauge":{"value":1},"tags":{"resource.service.name":"svc","resource.region":"eu","scope.name":"sc","scope.version":"2","scope.attr":"sv","otel.unit":"ms","otel.description":"desc","host":"h1","count":7,"ratio":1.5,"flag":true}})",
        R"(return {name="t",gauge={value=1},tags={["resource.service.name"]="svc",["resource.region"]="eu",["scope.name"]="sc",["scope.version"]="2",["scope.attr"]="sv",["otel.unit"]="ms",["otel.description"]="desc",host="h1",count=7,ratio=1.5,flag=true}})",
-       {R"("ServiceName":"svc")", R"("ResourceAttributes":{"region":"eu","service.name":"svc"})",
-        R"("ScopeName":"sc")", R"("ScopeVersion":"2")", R"("ScopeAttributes":{"attr":"sv"})",
-        R"("MetricUnit":"ms")", R"("MetricDescription":"desc")",
-        R"("Attributes":{"count":7,"flag":true,"host":"h1","ratio":1.5)"}},
+       {R"("ServiceName":"svc")", R"("region":"eu")", R"("service.name":"svc")",
+        R"("ScopeName":"sc")", R"("ScopeVersion":"2")", R"("ScopeAttributes":"{"attr":"sv"}")",
+        R"("MetricUnit":"ms")", R"("MetricDescription":"desc")", R"("host":"h1")", R"("count":7)",
+        R"("ratio":1.5)", R"("flag":true)"}},
       {"multi-value tags keep the last value",
        R"({"name":"m","gauge":{"value":1},"tags":{"zone":["a","b"]}})",
        R"(return {name="m",gauge={value=1},tags={zone={"a","b"}}})",
-       {R"("Attributes":{"zone":"b"})"}},
+       {R"("Attributes":"{"zone":"b"}")"}},
       {"top-level service name is the fallback",
        R"({"name":"m","gauge":{"value":1},"service_name":"top"})",
        R"(return {name="m",gauge={value=1},service_name="top"})",
@@ -1752,8 +1748,8 @@ TEST(FailureSafetyNativeMetrics, AcceptedShapesAndMappings) {
       {"resources, scope attributes and attributes",
        R"({"name":"m","gauge":{"value":1},"resources":{"service.name":"r","k":"v"},"scope":{"name":"sn","attributes":{"sa":"sb"}},"attributes":{"a":"b"}})",
        R"(return {name="m",gauge={value=1},resources={["service.name"]="r",k="v"},scope={name="sn",attributes={sa="sb"}},attributes={a="b"}})",
-       {R"("ServiceName":"r")", R"("ResourceAttributes":{"k":"v","service.name":"r"})",
-        R"("ScopeName":"sn")", R"("ScopeAttributes":{"sa":"sb"})", R"("Attributes":{"a":"b"})"}},
+       {R"("ServiceName":"r")", R"("k":"v")", R"("service.name":"r")", R"("ScopeName":"sn")",
+        R"("ScopeAttributes":"{"sa":"sb"}")", R"("Attributes":"{"a":"b"}")"}},
   };
   for (const NativeMetricCase& c : cases) {
     for (bool table : {false, true}) {
@@ -1780,8 +1776,9 @@ TEST(FailureSafetyNativeMetrics, AcceptedShapesAndMappings) {
   }
 }
 
-// JSON attribute sources merge in document order and a later write to a key wins; table input
-// reads resources before attributes before tags.
+// Tags are applied after the resources / attributes sources and win on a conflicting key,
+// whatever the document order (key order within a map is not asserted: table input follows Lua's
+// iteration order).
 TEST(FailureSafetyNativeMetrics, AttributeSourcesMergeLastWriteWins) {
   RawState a;
   ProcRecorder json_first;
@@ -1792,10 +1789,12 @@ TEST(FailureSafetyNativeMetrics, AttributeSourcesMergeLastWriteWins) {
                         json_first)
                 .count,
             1);
-  EXPECT_NE(json_first.events[0].find(R"("ResourceAttributes":{"k":"res","r":"2","t":"1"})"),
-            std::string::npos)
+  for (const char* pair : {R"("k":"tag")", R"("r":"2")", R"("t":"1")"}) {
+    EXPECT_NE(json_first.events[0].find(pair), std::string::npos) << json_first.events[0];
+  }
+  EXPECT_EQ(json_first.events[0].find(R"("k":"res")"), std::string::npos) << json_first.events[0];
+  EXPECT_NE(json_first.events[0].find(R"("Attributes":"{"plain":"tag"}")"), std::string::npos)
       << json_first.events[0];
-  EXPECT_NE(json_first.events[0].find(R"("Attributes":{"plain":"attr"})"), std::string::npos);
 
   RawState b;
   ProcRecorder json_last;
@@ -1806,9 +1805,9 @@ TEST(FailureSafetyNativeMetrics, AttributeSourcesMergeLastWriteWins) {
                         json_last)
                 .count,
             1);
-  EXPECT_NE(json_last.events[0].find(R"("ResourceAttributes":{"k":"tag"})"), std::string::npos)
+  EXPECT_NE(json_last.events[0].find(R"("ResourceAttributes":"{"k":"tag"}")"), std::string::npos)
       << json_last.events[0];
-  EXPECT_NE(json_last.events[0].find(R"("Attributes":{"plain":"tag"})"), std::string::npos);
+  EXPECT_NE(json_last.events[0].find(R"("Attributes":"{"plain":"tag"}")"), std::string::npos);
 
   RawState c;
   ProcRecorder tbl;
@@ -1819,9 +1818,9 @@ TEST(FailureSafetyNativeMetrics, AttributeSourcesMergeLastWriteWins) {
                         tbl)
                 .count,
             1);
-  EXPECT_NE(tbl.events[0].find(R"("ResourceAttributes":{"k":"tag"})"), std::string::npos)
+  EXPECT_NE(tbl.events[0].find(R"("ResourceAttributes":"{"k":"tag"}")"), std::string::npos)
       << tbl.events[0];
-  EXPECT_NE(tbl.events[0].find(R"("Attributes":{"plain":"tag"})"), std::string::npos);
+  EXPECT_NE(tbl.events[0].find(R"("Attributes":"{"plain":"tag"}")"), std::string::npos);
 }
 
 // Table-mode exemplars are normalised into the row (the legacy path passed the caller's table
@@ -1836,7 +1835,7 @@ TEST(FailureSafetyNativeMetrics, TableExemplarsAreCopiedNotAliased) {
       rec);
   ASSERT_EQ(r.nresults, 2) << r.error;
   ASSERT_EQ(rec.rows, 1);
-  EXPECT_NE(rec.events[0].find(R"("Exemplars":[{)"), std::string::npos) << rec.events[0];
+  EXPECT_NE(rec.events[0].find(R"("Exemplars":"[{)"), std::string::npos) << rec.events[0];
   EXPECT_NE(rec.events[0].find(R"("SpanId":"ab")"), std::string::npos) << rec.events[0];
 }
 
@@ -1914,17 +1913,18 @@ TEST(FailureSafetyNativeMetrics, RootShapesWrappersAndErrors) {
     rec.dump = true;
     const ProcResult r = CallProcess(
         s, true, "metrics",
-        JsonPayload(R"({"name":"outer","aggregated_histogram":{"count":2,"sum":1,"counts":[1,1]},)"
-                    R"("tags":{"resource.k":"v","scope.s":"t","h":"x"},"metric":{"unrelated":1}})"),
+        JsonPayload(
+            R"({"name":"outer","aggregated_histogram":{"count":2,"sum":1,"counts":[1,1],"explicitBounds":[1]},)"
+            R"("tags":{"resource.k":"v","scope.s":"t","h":"x"},"metric":{"unrelated":1}})"),
         rec);
     ASSERT_EQ(r.nresults, 2) << r.error;
     ASSERT_EQ(rec.rows, 1);
     EXPECT_NE(rec.events[0].find(R"("MetricName":"outer")"), std::string::npos) << rec.events[0];
-    EXPECT_NE(rec.events[0].find(R"("ResourceAttributes":{"k":"v"})"), std::string::npos)
+    EXPECT_NE(rec.events[0].find(R"("ResourceAttributes":"{"k":"v"}")"), std::string::npos)
         << rec.events[0];
-    EXPECT_NE(rec.events[0].find(R"("ScopeAttributes":{"s":"t"})"), std::string::npos);
-    EXPECT_NE(rec.events[0].find(R"("Attributes":{"h":"x"})"), std::string::npos);
-    EXPECT_NE(rec.events[0].find(R"("bucketCounts":[1,1])"), std::string::npos);
+    EXPECT_NE(rec.events[0].find(R"("ScopeAttributes":"{"s":"t"}")"), std::string::npos);
+    EXPECT_NE(rec.events[0].find(R"("Attributes":"{"h":"x"}")"), std::string::npos);
+    EXPECT_NE(rec.events[0].find(R"("bucketCounts":[1,1])"), std::string::npos) << rec.events[0];
   }
 
   // The derived start time clamps at the epoch instead of wrapping.

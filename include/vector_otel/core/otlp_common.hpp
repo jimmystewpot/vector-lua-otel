@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "simdjson.h"
 #include "vector_otel/core/fast_json_writer.hpp"
@@ -54,6 +56,34 @@ void StageAttributeFields(StagedRow& row, simdjson::ondemand::value& attrs_val,
 void StageAttributes(StagedRow& row, Key key, simdjson::ondemand::value& attrs_val,
                      FastJsonWriter& json_writer, std::string_view* out_service_name = nullptr);
 
+void WriteAnyValueJson(FastJsonWriter& writer, simdjson::ondemand::value& val, int depth = 0);
+void WriteAttributesEntriesJson(FastJsonWriter& writer, simdjson::ondemand::value& attrs_val,
+                                std::string_view* out_service_name = nullptr);
+void WriteAttributesJson(FastJsonWriter& writer, simdjson::ondemand::value& attrs_val,
+                         std::string_view* out_service_name = nullptr);
+void SerializeExemplarsJson(simdjson::ondemand::value& val, FastJsonWriter& writer);
+
+struct SummaryQuantile {
+  double quantile = 0.0;
+  double value = 0.0;
+};
+
+void SerializeHistogramJson(FastJsonWriter& w, int64_t agg_temporality, uint64_t count,
+                            bool has_sum, double sum, bool has_min, double min_val, bool has_max,
+                            double max_val, const std::vector<uint64_t>& bucket_counts,
+                            const std::vector<double>& explicit_bounds);
+
+void SerializeExponentialHistogramJson(FastJsonWriter& w, int64_t agg_temporality, uint64_t count,
+                                       bool has_sum, double sum, bool has_min, double min_val,
+                                       bool has_max, double max_val, int64_t scale,
+                                       uint64_t zero_count, double zero_threshold,
+                                       int64_t pos_offset, const std::vector<uint64_t>& pos_buckets,
+                                       int64_t neg_offset,
+                                       const std::vector<uint64_t>& neg_buckets);
+
+void SerializeSummaryJson(FastJsonWriter& w, uint64_t count, bool has_sum, double sum,
+                          const std::vector<SummaryQuantile>& quantiles);
+
 int64_t ParseInt64(simdjson::ondemand::value& val);
 bool TryParseInt64(simdjson::ondemand::value& val, int64_t& out);
 int64_t ParseSeverityNumberString(std::string_view sv) noexcept;
@@ -72,6 +102,6 @@ void ResetServiceNameScratch() noexcept;
 
 std::string_view TrimJsonWhitespace(std::string_view sv) noexcept;
 bool EqualsIgnoreCaseAscii(std::string_view a, std::string_view b) noexcept;
-bool ParseJsonTimestamp(simdjson::ondemand::value& fv, uint64_t& out_ns) noexcept;
+bool ParseJsonTimestamp(simdjson::ondemand::value& fv, uint64_t& out_ns);
 
 }  // namespace vector_otel::core

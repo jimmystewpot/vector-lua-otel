@@ -33,12 +33,14 @@ using core::ErrorCode;
 using core::OperationContext;
 using extractors::ExtractionResult;
 
-constexpr int kMaxJsonDepth = 16;
-
 // Reusable per-thread staging buffers (capacity retained between invocations). A wrapper nests at
 // most one level, so two rows (and event/link writers) cover an enclosing object and its record.
+// The attribute writers are shared across the two levels: an unrecognised wrapper writes none of
+// them, and a recognised one ends the enclosing object's extraction.
 struct NativeTracesScratch {
-  core::FastJsonWriter writer;  // attribute / AnyValue serialisation, table-mode events and links
+  core::FastJsonWriter writer;  // span event / link attribute serialisation, table-mode events
+  core::FastJsonWriter res_attrs_writer;   // ResourceAttributes JSON
+  core::FastJsonWriter span_attrs_writer;  // SpanAttributes JSON
   core::FastJsonWriter events[2];
   core::FastJsonWriter links[2];
   core::StagedRow rows[2];
@@ -69,12 +71,16 @@ bool FailJson(OperationContext& ctx, simdjson::error_code code) {
 
 void ResetWriters(NativeTracesScratch& s) {
   s.writer.Reset();
+  s.res_attrs_writer.Reset();
+  s.span_attrs_writer.Reset();
   for (auto& w : s.events) w.Reset();
   for (auto& w : s.links) w.Reset();
 }
 
 void TrimWriters(NativeTracesScratch& s) noexcept {
   s.writer.Trim();
+  s.res_attrs_writer.Trim();
+  s.span_attrs_writer.Trim();
   for (auto& w : s.events) w.Trim();
   for (auto& w : s.links) w.Trim();
 }
@@ -185,176 +191,6 @@ std::string_view ParseJsonStatusCode(simdjson::ondemand::value& code_val) {
   return "STATUS_CODE_UNSET";
 }
 
-void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& val,
-                       int depth = 0) {
-  if (depth >= kMaxJsonDepth) {
-    writer.String("[max_depth_exceeded]");
-    return;
-  }
-  auto type_res = val.type();
-  if (type_res.error() != simdjson::SUCCESS) {
-    writer.Null();
-    return;
-  }
-  auto type = type_res.value();
-  if (type == simdjson::ondemand::json_type::object) {
-    auto obj_res = val.get_object();
-    if (obj_res.error() != simdjson::SUCCESS) {
-      writer.Null();
-      return;
-    }
-    auto obj = obj_res.value();
-    bool matched = false;
-    bool has_plain_fields = false;
-    for (auto field_res : obj) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
-      auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
-      std::string_view k = k_res.value();
-      auto v_res = field_res.value();
-      if (v_res.error() != simdjson::SUCCESS) continue;
-      auto fv = v_res.value();
-
-      if (!has_plain_fields) {
-        if (k == "stringValue" || k == "string_value") {
-          auto s_res = fv.get_string();
-          if (s_res.error() == simdjson::SUCCESS) {
-            writer.String(s_res.value());
-            matched = true;
-            break;
-          }
-        } else if (k == "intValue" || k == "int_value") {
-          writer.Int64(core::ParseInt64(fv));
-          matched = true;
-          break;
-        } else if (k == "uintValue" || k == "uint_value") {
-          writer.Uint64(core::ParseUint64(fv));
-          matched = true;
-          break;
-        } else if (k == "doubleValue" || k == "double_value") {
-          writer.Double(core::ParseDouble(fv));
-          matched = true;
-          break;
-        } else if (k == "boolValue" || k == "bool_value") {
-          auto b_res = fv.get_bool();
-          writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
-          matched = true;
-          break;
-        } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
-                   k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
-          auto raw_res = fv.raw_json();
-          if (raw_res.error() == simdjson::SUCCESS) {
-            writer.RawJson(core::TrimJsonWhitespace(raw_res.value()));
-          } else {
-            writer.Null();
-          }
-          matched = true;
-          break;
-        }
-      }
-
-      if (!has_plain_fields) {
-        writer.StartObject();
-        has_plain_fields = true;
-      }
-      writer.Key(k);
-      WriteAnyValueJson(writer, fv, depth + 1);
-    }
-    if (!matched) {
-      if (!has_plain_fields) {
-        writer.StartObject();
-      }
-      writer.EndObject();
-    }
-  } else if (type == simdjson::ondemand::json_type::array) {
-    auto arr_res = val.get_array();
-    if (arr_res.error() != simdjson::SUCCESS) {
-      writer.Null();
-      return;
-    }
-    writer.StartArray();
-    for (auto elem_res : arr_res.value()) {
-      if (elem_res.error() != simdjson::SUCCESS) continue;
-      auto elem_val = elem_res.value();
-      WriteAnyValueJson(writer, elem_val, depth + 1);
-    }
-    writer.EndArray();
-  } else if (type == simdjson::ondemand::json_type::string) {
-    auto s_res = val.get_string();
-    if (s_res.error() == simdjson::SUCCESS) {
-      writer.String(s_res.value());
-    } else {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::number) {
-    auto num_res = val.get_number();
-    if (num_res.error() == simdjson::SUCCESS) {
-      auto num = num_res.value();
-      if (num.is_int64()) {
-        writer.Int64(num.get_int64());
-      } else if (num.is_uint64()) {
-        writer.Uint64(num.get_uint64());
-      } else {
-        writer.Double(num.get_double());
-      }
-    } else {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::boolean) {
-    auto b_res = val.get_bool();
-    writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
-  } else {
-    writer.Null();
-  }
-}
-
-void WriteAttributesJson(core::FastJsonWriter& writer, simdjson::ondemand::value& attrs_val) {
-  writer.StartObject();
-  auto type_res = attrs_val.type();
-  if (type_res.error() == simdjson::SUCCESS) {
-    if (type_res.value() == simdjson::ondemand::json_type::array) {
-      auto arr_res = attrs_val.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
-        for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
-          auto item_val = elem_res.value();
-          auto obj_res = item_val.get_object();
-          if (obj_res.error() != simdjson::SUCCESS) continue;
-          auto kv = obj_res.value();
-          auto k_res = kv.find_field_unordered("key");
-          if (k_res.error() != simdjson::SUCCESS) continue;
-          auto k_str_res = k_res.value().get_string();
-          if (k_str_res.error() != simdjson::SUCCESS) continue;
-          std::string_view k = k_str_res.value();
-
-          auto v_res = kv.find_field_unordered("value");
-          if (v_res.error() != simdjson::SUCCESS) continue;
-          auto v = v_res.value();
-
-          writer.Key(k);
-          WriteAnyValueJson(writer, v);
-        }
-      }
-    } else if (type_res.value() == simdjson::ondemand::json_type::object) {
-      auto obj_res = attrs_val.get_object();
-      if (obj_res.error() == simdjson::SUCCESS) {
-        for (auto field_res : obj_res.value()) {
-          if (field_res.error() != simdjson::SUCCESS) continue;
-          auto k_res = field_res.unescaped_key();
-          if (k_res.error() != simdjson::SUCCESS) continue;
-          auto v_res = field_res.value();
-          if (v_res.error() != simdjson::SUCCESS) continue;
-          auto fv = v_res.value();
-
-          writer.Key(k_res.value());
-          WriteAnyValueJson(writer, fv);
-        }
-      }
-    }
-  }
-  writer.EndObject();
-}
-
 void SerializeNativeSpanEventsJson(simdjson::ondemand::value& events_val,
                                    core::FastJsonWriter& events_writer,
                                    core::FastJsonWriter& attr_writer) {
@@ -397,7 +233,7 @@ void SerializeNativeSpanEventsJson(simdjson::ondemand::value& events_val,
             }
           } else if (k == "attributes") {
             attr_writer.Reset();
-            WriteAttributesJson(attr_writer, fv);
+            core::WriteAttributesJson(attr_writer, fv);
             has_ev_attrs = true;
           }
         }
@@ -473,7 +309,7 @@ void SerializeNativeSpanLinksJson(simdjson::ondemand::value& links_val,
             }
           } else if (k == "attributes") {
             attr_writer.Reset();
-            WriteAttributesJson(attr_writer, fv);
+            core::WriteAttributesJson(attr_writer, fv);
             has_link_attrs = true;
           }
         }
@@ -596,74 +432,6 @@ std::string_view ParseLuaStatusCodeValue(lua_State* L, int val_idx) {
   return "STATUS_CODE_UNSET";
 }
 
-void SerializeTableAttributesToJson(lua_State* L, int attrs_idx, core::FastJsonWriter& writer) {
-  int abs_idx = lua_absindex(L, attrs_idx);
-  writer.StartObject();
-  if (!lua_istable(L, abs_idx)) {
-    writer.EndObject();
-    return;
-  }
-
-  bool is_kv_array = false;
-  const size_t len = lua_rawlen(L, abs_idx);
-  if (len > 0) {
-    lua_rawgeti(L, abs_idx, 1);
-    if (lua_istable(L, -1)) {
-      if (core::GetTableFieldRaw(L, -1, "key")) {
-        if (lua_type(L, -1) == LUA_TSTRING) {
-          is_kv_array = true;
-        }
-        lua_pop(L, 1);
-      }
-    }
-    lua_pop(L, 1);
-  }
-
-  if (is_kv_array) {
-    for (size_t i = 1; i <= len; ++i) {
-      lua_rawgeti(L, abs_idx, static_cast<lua_Integer>(i));
-      if (lua_istable(L, -1)) {
-        int item_idx = lua_absindex(L, -1);
-        if (core::GetTableFieldRaw(L, item_idx, "key")) {
-          if (lua_type(L, -1) == LUA_TSTRING) {
-            size_t klen = 0;
-            const char* ks = lua_tolstring(L, -1, &klen);
-            if (klen > 0 && core::GetTableFieldRaw(L, item_idx, "value")) {
-              writer.Key(std::string_view(ks, klen));
-              core::SerializeLuaValueToJson(L, -1, writer);
-              lua_pop(L, 1);
-            }
-          }
-          lua_pop(L, 1);
-        }
-      }
-      lua_pop(L, 1);
-    }
-  } else {
-    lua_pushnil(L);
-    while (lua_next(L, abs_idx) != 0) {
-      if (lua_type(L, -2) == LUA_TSTRING) {
-        size_t klen = 0;
-        const char* ks = lua_tolstring(L, -2, &klen);
-        writer.Key(std::string_view(ks, klen));
-        core::SerializeLuaValueToJson(L, -1, writer);
-      } else if (lua_type(L, -2) == LUA_TNUMBER) {
-        // Formatted into a stack buffer: lua_tolstring() would allocate a Lua string (which can
-        // raise) and the key must stay untouched for lua_next.
-        char num[core::kScalarTextBuffer];
-        std::string_view text;
-        if (core::ScalarText(L, -2, num, text)) {
-          writer.Key(text);
-        }
-        core::SerializeLuaValueToJson(L, -1, writer);
-      }
-      lua_pop(L, 1);
-    }
-  }
-
-  writer.EndObject();
-}
-
 void SerializeTableSpanEventsToJson(lua_State* L, int events_idx, core::FastJsonWriter& writer,
                                     std::string& scratch) {
   int abs_idx = lua_absindex(L, events_idx);
@@ -697,7 +465,7 @@ void SerializeTableSpanEventsToJson(lua_State* L, int events_idx, core::FastJson
 
       writer.Key("Attributes");
       if (core::GetTableFieldRaw(L, ev_idx, "attributes")) {
-        SerializeTableAttributesToJson(L, -1, writer);
+        core::WriteTableAttributesJson(L, -1, writer);
         lua_pop(L, 1);
       } else {
         writer.StartObject();
@@ -745,7 +513,7 @@ void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, core::FastJsonWr
 
       writer.Key("Attributes");
       if (core::GetTableFieldRaw(L, link_idx, "attributes")) {
-        SerializeTableAttributesToJson(L, -1, writer);
+        core::WriteTableAttributesJson(L, -1, writer);
         lua_pop(L, 1);
       } else {
         writer.StartObject();
@@ -769,6 +537,8 @@ bool ExtractNativeTraceObjectJson(OperationContext& ctx, NativeTracesScratch& s,
   core::FastJsonWriter& events_writer = s.events[depth];
   core::FastJsonWriter& links_writer = s.links[depth];
   core::FastJsonWriter& attr_writer = s.writer;
+  core::FastJsonWriter& res_attrs_writer = s.res_attrs_writer;
+  core::FastJsonWriter& span_attrs_writer = s.span_attrs_writer;
   core::RowEmitter emitter(ctx, row);
   emitter.StartRecord();
   uint64_t start_ns = 0;
@@ -793,10 +563,9 @@ bool ExtractNativeTraceObjectJson(OperationContext& ctx, NativeTracesScratch& s,
 
   bool has_events = false;
   bool has_links = false;
-  bool has_recognized_field = false;
-
   bool has_res_attrs = false;
   bool has_span_attrs = false;
+  bool has_recognized_field = false;
 
   events_writer.Reset();
   links_writer.Reset();
@@ -962,7 +731,8 @@ bool ExtractNativeTraceObjectJson(OperationContext& ctx, NativeTracesScratch& s,
                k == "resource") {
       has_recognized_field = true;
       res_service_name = "unknown_service";
-      core::StageAttributes(row, "ResourceAttributes", fv, attr_writer, &res_service_name);
+      res_attrs_writer.Reset();
+      core::WriteAttributesJson(res_attrs_writer, fv, &res_service_name);
       has_res_attrs = true;
     } else if (k == "scope") {
       has_recognized_field = true;
@@ -1003,7 +773,8 @@ bool ExtractNativeTraceObjectJson(OperationContext& ctx, NativeTracesScratch& s,
       }
     } else if (k == "attributes" || k == "span_attributes" || k == "spanAttributes") {
       has_recognized_field = true;
-      core::StageAttributes(row, "SpanAttributes", fv, attr_writer);
+      span_attrs_writer.Reset();
+      core::WriteAttributesJson(span_attrs_writer, fv);
       has_span_attrs = true;
     } else if (k == "events") {
       has_recognized_field = true;
@@ -1077,20 +848,10 @@ bool ExtractNativeTraceObjectJson(OperationContext& ctx, NativeTracesScratch& s,
   emitter.SetString("SpanName", span_name);
   emitter.SetString("SpanKind", span_kind);
   emitter.SetString("ServiceName", service_name);
-
-  if (!has_res_attrs) {
-    row.BeginMap("ResourceAttributes");
-    row.End();
-  }
-
+  emitter.SetString("ResourceAttributes", has_res_attrs ? res_attrs_writer.Str() : "{}");
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
-
-  if (!has_span_attrs) {
-    row.BeginMap("SpanAttributes");
-    row.End();
-  }
-
+  emitter.SetString("SpanAttributes", has_span_attrs ? span_attrs_writer.Str() : "{}");
   emitter.SetInt64("Duration", duration);
   emitter.SetString("StatusCode", status_code);
   emitter.SetString("StatusMessage", status_msg);
@@ -1108,6 +869,8 @@ bool ExtractNativeTraceObjectJson(OperationContext& ctx, NativeTracesScratch& s,
 bool ExtractSingleNativeTraceTable(OperationContext& ctx, NativeTracesScratch& s, TableScratch& t,
                                    int rec_idx, std::string_view processed_at) {
   lua_State* L = ctx.L;
+  core::FastJsonWriter& res_attrs_writer = s.res_attrs_writer;
+  core::FastJsonWriter& span_attrs_writer = s.span_attrs_writer;
   core::StagedRow& row = s.rows[0];
   core::RowEmitter emitter(ctx, row);
   const int abs_rec_idx = lua_absindex(L, rec_idx);
@@ -1153,7 +916,8 @@ bool ExtractSingleNativeTraceTable(OperationContext& ctx, NativeTracesScratch& s
 
   // 2. ResourceAttributes & ServiceName
   std::string_view service_name;
-  bool res_attrs_staged = false;
+  res_attrs_writer.Reset();
+  bool has_res_attrs = false;
 
   bool has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resources", "resource_attributes");
   if (!has_res) {
@@ -1172,18 +936,13 @@ bool ExtractSingleNativeTraceTable(OperationContext& ctx, NativeTracesScratch& s
           lua_pop(L, 1);
         }
       }
-      core::StageTableAttributes(row, "ResourceAttributes", L, attrs_src_idx, s.writer,
-                                 &service_name);
-      res_attrs_staged = true;
+      core::WriteTableAttributesJson(L, attrs_src_idx, res_attrs_writer, &service_name);
+      has_res_attrs = true;
       if (has_nested_attrs) {
         lua_pop(L, 1);
       }
     }
     lua_pop(L, 1);
-  }
-  if (!res_attrs_staged) {
-    row.BeginMap("ResourceAttributes");
-    row.End();
   }
   if (service_name.empty() || service_name == "unknown_service") {
     std::string_view top_svc =
@@ -1270,21 +1029,20 @@ bool ExtractSingleNativeTraceTable(OperationContext& ctx, NativeTracesScratch& s
 
   emitter.SetString("SpanKind", span_kind);
   emitter.SetString("ServiceName", service_name);
-
+  emitter.SetString("ResourceAttributes", has_res_attrs ? res_attrs_writer.Str() : "{}");
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
 
+  span_attrs_writer.Reset();
   bool has_span_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "attributes", "span_attributes");
   if (!has_span_attrs) {
     has_span_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "spanAttributes");
   }
   if (has_span_attrs) {
-    core::StageTableAttributes(row, "SpanAttributes", L, -1, s.writer);
+    core::WriteTableAttributesJson(L, -1, span_attrs_writer);
     lua_pop(L, 1);
-  } else {
-    row.BeginMap("SpanAttributes");
-    row.End();
   }
+  emitter.SetString("SpanAttributes", has_span_attrs ? span_attrs_writer.Str() : "{}");
 
   emitter.SetInt64("Duration", duration);
   emitter.SetString("StatusCode", status_code);

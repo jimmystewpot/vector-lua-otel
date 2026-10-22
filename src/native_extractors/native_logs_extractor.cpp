@@ -32,10 +32,26 @@ using extractors::ExtractionResult;
 // Reusable per-thread staging buffers (capacity retained between invocations). A `log` wrapper
 // nests at most one level, so two rows cover an enclosing object and its wrapped record.
 struct NativeLogsScratch {
-  core::FastJsonWriter writer;       // attribute / AnyValue serialisation
-  core::FastJsonWriter body_writer;  // structured body serialisation
+  core::FastJsonWriter res_attrs_writer;    // ResourceAttributes JSON
+  core::FastJsonWriter scope_attrs_writer;  // ScopeAttributes JSON
+  core::FastJsonWriter log_attrs_writer;    // LogAttributes JSON
+  core::FastJsonWriter body_writer;         // structured body serialisation
   core::StagedRow rows[2];
 };
+
+void ResetScratch(NativeLogsScratch& s) {
+  s.res_attrs_writer.Reset();
+  s.scope_attrs_writer.Reset();
+  s.log_attrs_writer.Reset();
+  s.body_writer.Reset();
+}
+
+void TrimScratch(NativeLogsScratch& s) noexcept {
+  s.res_attrs_writer.Trim();
+  s.scope_attrs_writer.Trim();
+  s.log_attrs_writer.Trim();
+  s.body_writer.Trim();
+}
 
 NativeLogsScratch& Scratch() {
   static thread_local NativeLogsScratch scratch;
@@ -157,8 +173,13 @@ bool ExtractNativeLogObjectJson(OperationContext& ctx, NativeLogsScratch& s,
                                 simdjson::ondemand::object& rec_obj, std::string_view processed_at,
                                 int depth = 0, bool* out_matched = nullptr) {
   // A nested wrapper object stages into its own row, so an unrecognised wrapper never disturbs
-  // what the enclosing object has staged so far (the wrapper nests at most one level).
+  // what the enclosing object has staged so far (the wrapper nests at most one level). The
+  // attribute writers are shared: an unrecognised wrapper writes none of them, and a recognised
+  // one ends the enclosing object's extraction.
   core::StagedRow& row = s.rows[depth];
+  core::FastJsonWriter& res_attrs_writer = s.res_attrs_writer;
+  core::FastJsonWriter& scope_attrs_writer = s.scope_attrs_writer;
+  core::FastJsonWriter& log_attrs_writer = s.log_attrs_writer;
   core::RowEmitter emitter(ctx, row);
   emitter.StartRecord();
   uint64_t t_ns = 0;
@@ -303,7 +324,8 @@ bool ExtractNativeLogObjectJson(OperationContext& ctx, NativeLogsScratch& s,
                k == "resource") {
       has_recognized_field = true;
       res_service_name = "unknown_service";
-      core::StageAttributes(row, "ResourceAttributes", fv, s.writer, &res_service_name);
+      res_attrs_writer.Reset();
+      core::WriteAttributesJson(res_attrs_writer, fv, &res_service_name);
       has_res_attrs = true;
     } else if (k == "resource_schema_url" || k == "resourceSchemaUrl" || k == "schema_url" ||
                k == "schemaUrl") {
@@ -341,7 +363,8 @@ bool ExtractNativeLogObjectJson(OperationContext& ctx, NativeLogsScratch& s,
               scope_schema_url = s_res.value();
             }
           } else if (sk == "attributes") {
-            core::StageAttributes(row, "ScopeAttributes", sfv, s.writer);
+            scope_attrs_writer.Reset();
+            core::WriteAttributesJson(scope_attrs_writer, sfv);
             has_scope_attrs = true;
           }
         }
@@ -367,12 +390,14 @@ bool ExtractNativeLogObjectJson(OperationContext& ctx, NativeLogsScratch& s,
     } else if (k == "scope_attributes" || k == "scopeAttributes") {
       has_recognized_field = true;
       if (!has_scope_attrs) {
-        core::StageAttributes(row, "ScopeAttributes", fv, s.writer);
+        scope_attrs_writer.Reset();
+        core::WriteAttributesJson(scope_attrs_writer, fv);
         has_scope_attrs = true;
       }
     } else if (k == "attributes" || k == "log_attributes" || k == "logAttributes") {
       has_recognized_field = true;
-      core::StageAttributes(row, "LogAttributes", fv, s.writer);
+      log_attrs_writer.Reset();
+      core::WriteAttributesJson(log_attrs_writer, fv);
       has_log_attrs = true;
     } else if (k == "event_name" || k == "eventName") {
       has_recognized_field = true;
@@ -427,25 +452,12 @@ bool ExtractNativeLogObjectJson(OperationContext& ctx, NativeLogsScratch& s,
   emitter.SetString("ServiceName", service_name);
   emitter.SetString("Body", body_sv);
   emitter.SetString("ResourceSchemaUrl", resource_schema_url);
-
-  if (!has_res_attrs) {
-    row.BeginMap("ResourceAttributes");
-    row.End();
-  }
-
+  emitter.SetString("ResourceAttributes", has_res_attrs ? res_attrs_writer.Str() : "{}");
   emitter.SetString("ScopeSchemaUrl", scope_schema_url);
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
-
-  if (!has_scope_attrs) {
-    row.BeginMap("ScopeAttributes");
-    row.End();
-  }
-  if (!has_log_attrs) {
-    row.BeginMap("LogAttributes");
-    row.End();
-  }
-
+  emitter.SetString("ScopeAttributes", has_scope_attrs ? scope_attrs_writer.Str() : "{}");
+  emitter.SetString("LogAttributes", has_log_attrs ? log_attrs_writer.Str() : "{}");
   emitter.SetString("EventName", event_name);
   emitter.SetString("processed_at", processed_at);
 
@@ -560,6 +572,9 @@ void CopyNativeTableBody(lua_State* L, int rec_idx, core::FastJsonWriter& writer
 bool ExtractSingleNativeLogTable(OperationContext& ctx, NativeLogsScratch& s, TableScratch& t,
                                  int rec_idx, std::string_view processed_at) {
   lua_State* L = ctx.L;
+  core::FastJsonWriter& res_attrs_writer = s.res_attrs_writer;
+  core::FastJsonWriter& scope_attrs_writer = s.scope_attrs_writer;
+  core::FastJsonWriter& log_attrs_writer = s.log_attrs_writer;
   core::StagedRow& row = s.rows[0];
   core::RowEmitter emitter(ctx, row);
   const int abs_rec_idx = lua_absindex(L, rec_idx);
@@ -603,7 +618,8 @@ bool ExtractSingleNativeLogTable(OperationContext& ctx, NativeLogsScratch& s, Ta
   }
 
   std::string_view service_name;
-  bool res_attrs_staged = false;
+  res_attrs_writer.Reset();
+  bool has_res_attrs = false;
 
   bool has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resources", "resource_attributes");
   if (!has_res) {
@@ -626,18 +642,13 @@ bool ExtractSingleNativeLogTable(OperationContext& ctx, NativeLogsScratch& s, Ta
           lua_pop(L, 1);
         }
       }
-      core::StageTableAttributes(row, "ResourceAttributes", L, attrs_src_idx, s.writer,
-                                 &service_name);
-      res_attrs_staged = true;
+      core::WriteTableAttributesJson(L, attrs_src_idx, res_attrs_writer, &service_name);
+      has_res_attrs = true;
       if (has_nested_attrs) {
         lua_pop(L, 1);
       }
     }
     lua_pop(L, 1);
-  }
-  if (!res_attrs_staged) {
-    row.BeginMap("ResourceAttributes");
-    row.End();
   }
   if (service_name.empty() || service_name == "unknown_service") {
     std::string_view top_svc =
@@ -656,7 +667,8 @@ bool ExtractSingleNativeLogTable(OperationContext& ctx, NativeLogsScratch& s, Ta
       core::ReadTableStringView(L, abs_rec_idx, "scope_name", "scopeName", t.scope_name);
   std::string_view scope_version =
       core::ReadTableStringView(L, abs_rec_idx, "scope_version", "scopeVersion", t.scope_version);
-  bool scope_attrs_staged = false;
+  scope_attrs_writer.Reset();
+  bool has_scope_attrs = false;
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "scope")) {
     int s_idx = lua_absindex(L, -1);
@@ -672,22 +684,18 @@ bool ExtractSingleNativeLogTable(OperationContext& ctx, NativeLogsScratch& s, Ta
             core::ReadTableStringView(L, s_idx, "schema_url", "schemaUrl", t.scope_schema);
       }
       if (core::GetTableFieldRaw(L, s_idx, "attributes")) {
-        core::StageTableAttributes(row, "ScopeAttributes", L, -1, s.writer);
-        scope_attrs_staged = true;
+        core::WriteTableAttributesJson(L, -1, scope_attrs_writer);
+        has_scope_attrs = true;
         lua_pop(L, 1);
       }
     }
     lua_pop(L, 1);
   }
-  if (!scope_attrs_staged &&
+  if (!has_scope_attrs &&
       core::GetTableFieldRaw(L, abs_rec_idx, "scope_attributes", "scopeAttributes")) {
-    core::StageTableAttributes(row, "ScopeAttributes", L, -1, s.writer);
-    scope_attrs_staged = true;
+    core::WriteTableAttributesJson(L, -1, scope_attrs_writer);
+    has_scope_attrs = true;
     lua_pop(L, 1);
-  }
-  if (!scope_attrs_staged) {
-    row.BeginMap("ScopeAttributes");
-    row.End();
   }
 
   // 4. The remaining columns of logs.schema
@@ -714,21 +722,22 @@ bool ExtractSingleNativeLogTable(OperationContext& ctx, NativeLogsScratch& s, Ta
   emitter.SetString("ServiceName", service_name);
   CopyNativeTableBody(L, abs_rec_idx, s.body_writer, emitter);
   emitter.SetString("ResourceSchemaUrl", resource_schema_url);
+  emitter.SetString("ResourceAttributes", has_res_attrs ? res_attrs_writer.Str() : "{}");
   emitter.SetString("ScopeSchemaUrl", scope_schema_url);
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
+  emitter.SetString("ScopeAttributes", has_scope_attrs ? scope_attrs_writer.Str() : "{}");
 
+  log_attrs_writer.Reset();
   bool has_log_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "attributes", "log_attributes");
   if (!has_log_attrs) {
     has_log_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "logAttributes");
   }
   if (has_log_attrs) {
-    core::StageTableAttributes(row, "LogAttributes", L, -1, s.writer);
+    core::WriteTableAttributesJson(L, -1, log_attrs_writer);
     lua_pop(L, 1);
-  } else {
-    row.BeginMap("LogAttributes");
-    row.End();
   }
+  emitter.SetString("LogAttributes", has_log_attrs ? log_attrs_writer.Str() : "{}");
 
   core::CopyStringFieldAlways(L, abs_rec_idx, "event_name", "eventName", emitter, "EventName");
   emitter.SetString("processed_at", processed_at);
@@ -742,15 +751,13 @@ bool ExtractSingleNativeLogTable(OperationContext& ctx, NativeLogsScratch& s, Ta
 bool ExtractNativeLogsJson(OperationContext& ctx, core::OtelParser& parser,
                            simdjson::padded_string_view admitted) {
   NativeLogsScratch& s = Scratch();
-  s.writer.Reset();
-  s.body_writer.Reset();
+  ResetScratch(s);
   struct TrimGuard {
     explicit TrimGuard(NativeLogsScratch& scratch) : s(scratch) {}
     TrimGuard(const TrimGuard&) = delete;
     TrimGuard& operator=(const TrimGuard&) = delete;
     ~TrimGuard() noexcept {
-      s.writer.Trim();
-      s.body_writer.Trim();
+      TrimScratch(s);
       core::ResetServiceNameScratch();
     }
     NativeLogsScratch& s;
@@ -812,8 +819,7 @@ bool ExtractNativeLogsJson(OperationContext& ctx, core::OtelParser& parser,
 bool ExtractNativeLogsTable(OperationContext& ctx) {
   NativeLogsScratch& s = Scratch();
   TableScratch& t = TScratch();
-  s.writer.Reset();
-  s.body_writer.Reset();
+  ResetScratch(s);
   core::ReserveScratchString(t.res_schema, 128);
   core::ReserveScratchString(t.service, 128);
   core::ReserveScratchString(t.scope_schema, 128);
@@ -826,8 +832,7 @@ bool ExtractNativeLogsTable(OperationContext& ctx) {
     Guard& operator=(const Guard&) = delete;
     ~Guard() noexcept {
       lua_settop(L, entry_top);
-      s.writer.Trim();
-      s.body_writer.Trim();
+      TrimScratch(s);
       core::ResetScratchString(t.res_schema);
       core::ResetScratchString(t.service);
       core::ResetScratchString(t.scope_schema);

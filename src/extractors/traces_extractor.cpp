@@ -26,145 +26,6 @@ extern "C" {
 namespace vector_otel::extractors {
 namespace {
 
-void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& val) {
-  auto type_res = val.type();
-  if (type_res.error() != simdjson::SUCCESS) {
-    writer.Null();
-    return;
-  }
-  auto type = type_res.value();
-  if (type == simdjson::ondemand::json_type::object) {
-    auto obj_res = val.get_object();
-    if (obj_res.error() != simdjson::SUCCESS) {
-      writer.Null();
-      return;
-    }
-    auto obj = obj_res.value();
-    bool matched = false;
-    for (auto field_res : obj) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
-      auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
-      std::string_view k = k_res.value();
-      auto v_res = field_res.value();
-      if (v_res.error() != simdjson::SUCCESS) continue;
-      auto fv = v_res.value();
-
-      if (k == "stringValue" || k == "string_value") {
-        auto s_res = fv.get_string();
-        if (s_res.error() == simdjson::SUCCESS) {
-          writer.String(s_res.value());
-          matched = true;
-          break;
-        }
-      } else if (k == "intValue" || k == "int_value") {
-        writer.Int64(core::ParseInt64(fv));
-        matched = true;
-        break;
-      } else if (k == "uintValue" || k == "uint_value") {
-        writer.Uint64(core::ParseUint64(fv));
-        matched = true;
-        break;
-      } else if (k == "doubleValue" || k == "double_value") {
-        writer.Double(core::ParseDouble(fv));
-        matched = true;
-        break;
-      } else if (k == "boolValue" || k == "bool_value") {
-        auto b_res = fv.get_bool();
-        writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
-        matched = true;
-        break;
-      } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
-                 k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
-        auto raw_res = fv.raw_json();
-        if (raw_res.error() == simdjson::SUCCESS) {
-          writer.RawJson(raw_res.value());
-        } else {
-          writer.Null();
-        }
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::string) {
-    auto s_res = val.get_string();
-    if (s_res.error() == simdjson::SUCCESS) {
-      writer.String(s_res.value());
-    } else {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::number) {
-    auto num_res = val.get_number();
-    if (num_res.error() == simdjson::SUCCESS) {
-      auto num = num_res.value();
-      if (num.is_int64()) {
-        writer.Int64(num.get_int64());
-      } else if (num.is_uint64()) {
-        writer.Uint64(num.get_uint64());
-      } else {
-        writer.Double(num.get_double());
-      }
-    } else {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::boolean) {
-    auto b_res = val.get_bool();
-    writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
-  } else {
-    writer.Null();
-  }
-}
-
-void WriteAttributesJson(core::FastJsonWriter& writer, simdjson::ondemand::value& attrs_val) {
-  writer.StartObject();
-  auto type_res = attrs_val.type();
-  if (type_res.error() == simdjson::SUCCESS) {
-    if (type_res.value() == simdjson::ondemand::json_type::array) {
-      auto arr_res = attrs_val.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
-        for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
-          auto item_val = elem_res.value();
-          auto obj_res = item_val.get_object();
-          if (obj_res.error() != simdjson::SUCCESS) continue;
-          auto kv = obj_res.value();
-          auto k_res = kv.find_field_unordered("key");
-          if (k_res.error() != simdjson::SUCCESS) continue;
-          auto k_str_res = k_res.value().get_string();
-          if (k_str_res.error() != simdjson::SUCCESS) continue;
-          std::string_view k = k_str_res.value();
-
-          auto v_res = kv.find_field_unordered("value");
-          if (v_res.error() != simdjson::SUCCESS) continue;
-          auto v = v_res.value();
-
-          writer.Key(k);
-          WriteAnyValueJson(writer, v);
-        }
-      }
-    } else if (type_res.value() == simdjson::ondemand::json_type::object) {
-      auto obj_res = attrs_val.get_object();
-      if (obj_res.error() == simdjson::SUCCESS) {
-        for (auto field_res : obj_res.value()) {
-          if (field_res.error() != simdjson::SUCCESS) continue;
-          auto k_res = field_res.unescaped_key();
-          if (k_res.error() != simdjson::SUCCESS) continue;
-          auto v_res = field_res.value();
-          if (v_res.error() != simdjson::SUCCESS) continue;
-          auto fv = v_res.value();
-
-          writer.Key(k_res.value());
-          WriteAnyValueJson(writer, fv);
-        }
-      }
-    }
-  }
-  writer.EndObject();
-}
-
 void SerializeSpanEventsValue(simdjson::ondemand::value& events_val, core::FastJsonWriter& writer) {
   writer.StartArray();
   auto type_res = events_val.type();
@@ -206,7 +67,7 @@ void SerializeSpanEventsValue(simdjson::ondemand::value& events_val, core::FastJ
         auto attrs_res = ev_obj.find_field_unordered("attributes");
         if (attrs_res.error() == simdjson::SUCCESS) {
           auto aval = attrs_res.value();
-          WriteAttributesJson(writer, aval);
+          core::WriteAttributesJson(writer, aval);
         } else {
           writer.StartObject();
           writer.EndObject();
@@ -257,7 +118,7 @@ void SerializeSpanLinksValue(simdjson::ondemand::value& links_val, core::FastJso
         auto attrs_res = link_obj.find_field_unordered("attributes");
         if (attrs_res.error() == simdjson::SUCCESS) {
           auto aval = attrs_res.value();
-          WriteAttributesJson(writer, aval);
+          core::WriteAttributesJson(writer, aval);
         } else {
           writer.StartObject();
           writer.EndObject();
@@ -341,18 +202,17 @@ std::string_view ParseStatusCodeValue(simdjson::ondemand::value& code_val) {
   return "STATUS_CODE_UNSET";
 }
 
-using core::AnchorSlot;
 using core::ErrorCode;
 using core::OperationContext;
 
 // Reusable per-thread staging buffers: capacity is retained between invocations, so the steady
 // state performs no C++ allocation per span.
 struct TracesScratch {
-  core::FastJsonWriter attr_writer;    // attribute / AnyValue serialisation
-  core::FastJsonWriter events_writer;  // span events as a JSON string
-  core::FastJsonWriter links_writer;   // span links as a JSON string
-  core::StagedRow row;                 // the record being built
-  core::StagedRow resource_tape;       // shared ResourceAttributes table, once per resource
+  core::FastJsonWriter res_attrs_writer;   // ResourceAttributes JSON, built once per resource
+  core::FastJsonWriter span_attrs_writer;  // SpanAttributes JSON, rebuilt per span
+  core::FastJsonWriter events_writer;      // span events as a JSON string
+  core::FastJsonWriter links_writer;       // span links as a JSON string
+  core::StagedRow row;                     // the record being built
 };
 
 TracesScratch& Scratch() {
@@ -377,7 +237,8 @@ int64_t SpanDuration(uint64_t start_time, uint64_t end_time) {
 bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
                        simdjson::padded_string_view admitted) {
   TracesScratch& s = Scratch();
-  s.attr_writer.Reset();
+  s.res_attrs_writer.Reset();
+  s.span_attrs_writer.Reset();
   s.events_writer.Reset();
   s.links_writer.Reset();
   struct TrimGuard {
@@ -385,7 +246,8 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
     TrimGuard(const TrimGuard&) = delete;
     TrimGuard& operator=(const TrimGuard&) = delete;
     ~TrimGuard() noexcept {
-      s.attr_writer.Trim();
+      s.res_attrs_writer.Trim();
+      s.span_attrs_writer.Trim();
       s.events_writer.Trim();
       s.links_writer.Trim();
       core::ResetServiceNameScratch();
@@ -436,10 +298,10 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
     }
     auto res_span_obj = res_span_obj_res.value();
 
-    // Resource service name and attributes (staged once, materialised lazily)
+    // Resource service name and attributes (serialised once per resource)
     std::string_view service_name = "unknown_service";
-    s.resource_tape.Reset();
-    bool resource_ready = false;
+    s.res_attrs_writer.Reset();
+    bool has_res_attrs = false;
     auto res_field = res_span_obj.find_field_unordered("resource");
     if (res_field.error() == simdjson::SUCCESS) {
       auto res_val = res_field.value();
@@ -449,7 +311,8 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
         auto attrs_field = res_obj.find_field_unordered("attributes");
         if (attrs_field.error() == simdjson::SUCCESS) {
           auto attrs_val = attrs_field.value();
-          core::StageAttributeFields(s.resource_tape, attrs_val, s.attr_writer, &service_name);
+          core::WriteAttributesJson(s.res_attrs_writer, attrs_val, &service_name);
+          has_res_attrs = true;
         } else if (attrs_field.error() != simdjson::NO_SUCH_FIELD) {
           return FailJson(ctx, attrs_field.error());
         }
@@ -457,6 +320,7 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
     } else if (res_field.error() != simdjson::NO_SUCH_FIELD) {
       return FailJson(ctx, res_field.error());
     }
+    const std::string_view res_attrs_json = has_res_attrs ? s.res_attrs_writer.Str() : "{}";
 
     auto scope_spans_field = res_span_obj.find_field_unordered("scopeSpans");
     if (scope_spans_field.error() == simdjson::NO_SUCH_FIELD) {
@@ -542,8 +406,8 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
 
         s.events_writer.Reset();
         s.links_writer.Reset();
+        s.span_attrs_writer.Reset();
 
-        // The row is started first: SpanAttributes is staged straight into it when met.
         emitter.StartRecord();
 
         for (auto field_res : span_obj) {
@@ -621,7 +485,8 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
             SerializeSpanLinksValue(fv, s.links_writer);
             has_links = true;
           } else if (k == "attributes") {
-            core::StageAttributes(s.row, "SpanAttributes", fv, s.attr_writer);
+            s.span_attrs_writer.Reset();
+            core::WriteAttributesJson(s.span_attrs_writer, fv);
             has_span_attrs = true;
           }
         }
@@ -638,10 +503,7 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
         std::array<char, 32> ts_buf;
         core::FormatIso8601Nano(start_time, ts_buf.data());
 
-        if (!core::EnsureSharedAnchor(ctx, s.resource_tape, AnchorSlot::kResourceAttrs,
-                                      resource_ready)) {
-          return false;
-        }
+        const std::string_view span_attrs_json = has_span_attrs ? s.span_attrs_writer.Str() : "{}";
 
         emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
         emitter.SetString("TraceId", trace_id);
@@ -651,13 +513,10 @@ bool ExtractTracesJson(OperationContext& ctx, core::OtelParser& parser,
         emitter.SetString("SpanName", span_name);
         emitter.SetString("SpanKind", span_kind);
         emitter.SetString("ServiceName", service_name);
-        s.row.Anchor("ResourceAttributes", AnchorSlot::kResourceAttrs);
+        emitter.SetString("ResourceAttributes", res_attrs_json);
         emitter.SetString("ScopeName", scope_name);
         emitter.SetString("ScopeVersion", scope_version);
-        if (!has_span_attrs) {
-          s.row.BeginMap("SpanAttributes");
-          s.row.End();
-        }
+        emitter.SetString("SpanAttributes", span_attrs_json);
         emitter.SetInt64("Duration", SpanDuration(start_time, end_time));
         emitter.SetString("StatusCode", status_code);
         emitter.SetString("StatusMessage", status_msg);
@@ -820,16 +679,18 @@ bool ExtractTracesTableImpl(OperationContext& ctx, TracesScratch& s, TableScratc
     const int rs_obj_idx = lua_absindex(L, -1);
 
     std::string_view service_name = "unknown_service";
-    s.resource_tape.Reset();
-    bool resource_ready = false;
+    s.res_attrs_writer.Reset();
+    bool has_res_attrs = false;
     if (core::GetTableField(L, rs_obj_idx, "resource")) {
       const int res_idx = lua_absindex(L, -1);
       if (core::GetTableField(L, res_idx, "attributes")) {
-        core::StageTableAttributeFields(s.resource_tape, L, -1, s.attr_writer, &service_name);
+        core::WriteTableAttributesJson(L, -1, s.res_attrs_writer, &service_name);
+        has_res_attrs = true;
         lua_pop(L, 1);
       }
       lua_pop(L, 1);
     }
+    const std::string_view res_attrs_json = has_res_attrs ? s.res_attrs_writer.Str() : "{}";
 
     if (!core::GetTableField(L, rs_obj_idx, "scopeSpans", "scope_spans")) {
       lua_pop(L, 1);
@@ -901,11 +762,6 @@ bool ExtractTracesTableImpl(OperationContext& ctx, TracesScratch& s, TableScratc
               s.links_writer.EndArray();
             }
 
-            if (!core::EnsureSharedAnchor(ctx, s.resource_tape, AnchorSlot::kResourceAttrs,
-                                          resource_ready)) {
-              return false;
-            }
-
             emitter.StartRecord();
             emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
             core::CopyIdField(L, span_obj_idx, "traceId", "trace_id", core::kTraceIdBinaryLen,
@@ -919,16 +775,17 @@ bool ExtractTracesTableImpl(OperationContext& ctx, TracesScratch& s, TableScratc
             core::CopyStringField(L, span_obj_idx, "name", nullptr, emitter, "SpanName");
             emitter.SetString("SpanKind", span_kind);
             emitter.SetString("ServiceName", service_name);
-            s.row.Anchor("ResourceAttributes", AnchorSlot::kResourceAttrs);
+            emitter.SetString("ResourceAttributes", res_attrs_json);
             emitter.SetString("ScopeName", scope_name);
             emitter.SetString("ScopeVersion", scope_version);
+            s.span_attrs_writer.Reset();
+            bool has_span_attrs = false;
             if (core::GetTableField(L, span_obj_idx, "attributes")) {
-              core::StageTableAttributes(s.row, "SpanAttributes", L, -1, s.attr_writer);
+              core::WriteTableAttributesJson(L, -1, s.span_attrs_writer);
+              has_span_attrs = true;
               lua_pop(L, 1);
-            } else {
-              s.row.BeginMap("SpanAttributes");
-              s.row.End();
             }
+            emitter.SetString("SpanAttributes", has_span_attrs ? s.span_attrs_writer.Str() : "{}");
             emitter.SetInt64("Duration", SpanDuration(start_time, end_time));
             emitter.SetString("StatusCode", status_code);
             emitter.SetString("StatusMessage", status_msg);
@@ -960,7 +817,8 @@ bool ExtractTracesTableImpl(OperationContext& ctx, TracesScratch& s, TableScratc
 bool ExtractTracesTable(OperationContext& ctx) {
   TracesScratch& s = Scratch();
   TableScratch& t = TScratch();
-  s.attr_writer.Reset();
+  s.res_attrs_writer.Reset();
+  s.span_attrs_writer.Reset();
   core::ReserveScratchString(t.scope_name, 128);
   core::ReserveScratchString(t.scope_version, 64);
   core::ReserveScratchString(t.status_msg, 128);
@@ -973,7 +831,8 @@ bool ExtractTracesTable(OperationContext& ctx) {
     Guard& operator=(const Guard&) = delete;
     ~Guard() noexcept {
       lua_settop(L, entry_top);
-      s.attr_writer.Trim();
+      s.res_attrs_writer.Trim();
+      s.span_attrs_writer.Trim();
       s.events_writer.Trim();
       s.links_writer.Trim();
       core::ResetScratchString(t.scope_name);

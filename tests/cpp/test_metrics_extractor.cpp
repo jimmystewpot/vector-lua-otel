@@ -87,17 +87,21 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e1.MetricUnit == "By", "e1 MetricUnit mismatch")
     assert(e1.MetricType == "gauge", "e1 MetricType mismatch: " .. tostring(e1.MetricType))
     assert(e1.ServiceName == "payment-service", "e1 ServiceName mismatch: " .. tostring(e1.ServiceName))
-    assert(e1.ResourceAttributes ~= nil, "e1 ResourceAttributes missing")
-    assert(e1.ResourceAttributes["deployment.environment"] == "production", "e1 ResourceAttributes value mismatch")
+    assert(e1.ResourceAttributes == '{"service.name":"payment-service","deployment.environment":"production"}',
+           "e1 ResourceAttributes mismatch: " .. tostring(e1.ResourceAttributes))
     assert(e1.ScopeName == "com.acme.metrics", "e1 ScopeName mismatch")
     assert(e1.ScopeVersion == "1.2.3", "e1 ScopeVersion mismatch")
-    assert(e1.ScopeAttributes ~= nil and e1.ScopeAttributes["scope.key"] == "scope.val", "e1 ScopeAttributes mismatch")
-    assert(e1.Attributes ~= nil and e1.Attributes["host"] == "node1", "e1 Attributes mismatch")
+    assert(e1.ScopeAttributes == '{"scope.key":"scope.val"}',
+           "e1 ScopeAttributes mismatch: " .. tostring(e1.ScopeAttributes))
+    assert(e1.Attributes == '{"host":"node1"}', "e1 Attributes mismatch: " .. tostring(e1.Attributes))
     assert(e1.StartTimeUnix == "2021-08-26T17:45:00.000000000Z", "e1 StartTimeUnix mismatch: " .. tostring(e1.StartTimeUnix))
     assert(e1.TimeUnix == "2021-08-26T17:46:40.000000000Z", "e1 TimeUnix mismatch: " .. tostring(e1.TimeUnix))
     assert(math.abs(e1.Value - 1048576.5) < 0.001, "e1 Value mismatch: " .. tostring(e1.Value))
     assert(e1.Flags == 0, "e1 Flags mismatch")
     assert(e1.Histogram == nil, "e1 Histogram should be nil")
+    assert(e1.ExponentialHistogram == nil, "e1 ExponentialHistogram should be nil")
+    assert(e1.Summary == nil, "e1 Summary should be nil")
+    assert(e1.Exemplars == "[]", "e1 Exemplars should be '[]': " .. tostring(e1.Exemplars))
     assert(type(e1.processed_at) == "string" and string.len(e1.processed_at) > 0, "e1 processed_at missing")
 
     -- Event 2: Gauge (asInt)
@@ -105,9 +109,10 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e2 ~= nil, "event 2 log table missing")
     assert(e2.MetricName == "memory_usage", "e2 MetricName mismatch")
     assert(e2.MetricType == "gauge", "e2 MetricType mismatch")
-    assert(e2.Attributes["host"] == "node2", "e2 Attributes mismatch")
+    assert(e2.Attributes == '{"host":"node2"}', "e2 Attributes mismatch: " .. tostring(e2.Attributes))
     assert(e2.Value == 2097152, "e2 Value mismatch: " .. tostring(e2.Value))
     assert(e2.Flags == 1, "e2 Flags mismatch")
+    assert(e2.Exemplars == "[]", "e2 Exemplars should be '[]': " .. tostring(e2.Exemplars))
 
     -- Event 3: Sum with Exemplar
     local e3 = emitted[3].log
@@ -117,15 +122,10 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e3.MetricUnit == "1", "e3 MetricUnit mismatch")
     assert(e3.MetricType == "sum", "e3 MetricType mismatch")
     assert(e3.Value == 5000, "e3 Value mismatch: " .. tostring(e3.Value))
-    assert(e3.Attributes["status"] == 200, "e3 Attributes status mismatch")
+    assert(e3.Attributes == '{"status":200}', "e3 Attributes status mismatch: " .. tostring(e3.Attributes))
     assert(e3.Flags == 0, "e3 Flags mismatch")
-    assert(e3.Exemplars ~= nil and #e3.Exemplars == 1, "e3 Exemplars count mismatch")
-    local ex3 = e3.Exemplars[1]
-    assert(math.abs(ex3.Value - 1.25) < 0.001, "e3 Exemplar Value mismatch")
-    assert(ex3.TraceId == "0123456789abcdef0123456789abcdef", "e3 Exemplar TraceId mismatch")
-    assert(ex3.SpanId == "0123456789abcdef", "e3 Exemplar SpanId mismatch")
-    assert(ex3.FilteredAttributes ~= nil and ex3.FilteredAttributes["user_id"] == "usr_99", "e3 Exemplar FilteredAttributes mismatch")
-    assert(type(ex3.TimeUnix) == "string" and string.len(ex3.TimeUnix) > 0, "e3 Exemplar TimeUnix missing")
+    assert(e3.Exemplars == '[{"FilteredAttributes":{"user_id":"usr_99"},"TimeUnix":"2021-08-26T17:46:41.500000000Z","Value":1.25,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]',
+           "e3 Exemplars mismatch: " .. tostring(e3.Exemplars))
 
     -- Event 4: Histogram with Buckets and Bounds
     local e4 = emitted[4].log
@@ -133,25 +133,14 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e4.MetricName == "request_duration_seconds", "e4 MetricName mismatch")
     assert(e4.MetricType == "histogram", "e4 MetricType mismatch")
     assert(e4.Value == nil, "e4 Value must be nil for histogram")
-    assert(e4.Attributes["method"] == "POST", "e4 Attributes method mismatch")
-    assert(e4.Histogram ~= nil, "e4 Histogram table missing")
-    assert(e4.Histogram.count == 100, "e4 Histogram count mismatch: " .. tostring(e4.Histogram.count))
-    assert(math.abs(e4.Histogram.sum - 25.5) < 0.001, "e4 Histogram sum mismatch: " .. tostring(e4.Histogram.sum))
-    assert(math.abs(e4.Histogram.min - 0.05) < 0.001, "e4 Histogram min mismatch: " .. tostring(e4.Histogram.min))
-    assert(math.abs(e4.Histogram.max - 5.2) < 0.001, "e4 Histogram max mismatch: " .. tostring(e4.Histogram.max))
-    assert(#e4.Histogram.bucketCounts == 5, "e4 bucketCounts length mismatch: " .. tostring(#e4.Histogram.bucketCounts))
-    assert(e4.Histogram.bucketCounts[1] == 10 and e4.Histogram.bucketCounts[2] == 40 and e4.Histogram.bucketCounts[3] == 30 and e4.Histogram.bucketCounts[4] == 15 and e4.Histogram.bucketCounts[5] == 5, "e4 bucketCounts values mismatch")
-    assert(#e4.Histogram.explicitBounds == 4, "e4 explicitBounds length mismatch: " .. tostring(#e4.Histogram.explicitBounds))
-    assert(math.abs(e4.Histogram.explicitBounds[1] - 0.1) < 0.001, "e4 explicitBounds[1] mismatch")
-    assert(math.abs(e4.Histogram.explicitBounds[2] - 0.5) < 0.001, "e4 explicitBounds[2] mismatch")
-    assert(math.abs(e4.Histogram.explicitBounds[3] - 1.0) < 0.001, "e4 explicitBounds[3] mismatch")
-    assert(math.abs(e4.Histogram.explicitBounds[4] - 2.5) < 0.001, "e4 explicitBounds[4] mismatch")
-    assert(e4.Exemplars ~= nil and #e4.Exemplars == 1, "e4 Exemplars count mismatch")
-    local ex4 = e4.Exemplars[1]
-    assert(math.abs(ex4.Value - 2.45) < 0.001, "e4 Exemplar Value mismatch")
-    assert(ex4.TraceId == "fedcba9876543210fedcba9876543210", "e4 Exemplar TraceId mismatch")
-    assert(ex4.SpanId == "fedcba9876543210", "e4 Exemplar SpanId mismatch")
-    assert(ex4.FilteredAttributes["client_ip"] == "192.168.1.1", "e4 Exemplar FilteredAttributes mismatch")
+    assert(e4.Attributes == '{"method":"POST"}', "e4 Attributes method mismatch: " .. tostring(e4.Attributes))
+    assert(e4.Histogram ==
+      '{"aggregationTemporality":0,"count":100,"sum":25.5,"min":0.05,"max":5.2,"bucketCounts":[10,40,30,15,5],"explicitBounds":[0.1,0.5,1,2.5]}',
+      "e4 Histogram mismatch: " .. tostring(e4.Histogram))
+    assert(e4.ExponentialHistogram == nil, "e4 ExponentialHistogram must be nil")
+    assert(e4.Summary == nil, "e4 Summary must be nil")
+    assert(e4.Exemplars == '[{"FilteredAttributes":{"client_ip":"192.168.1.1"},"TimeUnix":"2021-08-26T17:46:42.800000000Z","Value":2.45,"SpanId":"fedcba9876543210","TraceId":"fedcba9876543210fedcba9876543210"}]',
+           "e4 Exemplars mismatch: " .. tostring(e4.Exemplars))
 
     -- Event 5: Summary
     local e5 = emitted[5].log
@@ -159,23 +148,13 @@ TEST_F(MetricsExtractorTest, SampleFixtureAllMetricTypes) {
     assert(e5.MetricName == "rpc_latency", "e5 MetricName mismatch")
     assert(e5.MetricType == "summary", "e5 MetricType mismatch")
     assert(e5.Value == nil, "e5 Value should be nil for summary")
-    assert(e5.Attributes["service"] == "auth", "e5 Attributes mismatch")
-    assert(e5.Summary ~= nil, "e5 Summary sub-table missing")
-    assert(e5.Summary.count == 50, "e5 Summary.count mismatch: " .. tostring(e5.Summary.count))
-    assert(e5.Summary.Count == 50, "e5 Summary.Count mismatch: " .. tostring(e5.Summary.Count))
-    assert(math.abs(e5.Summary.sum - 1234.5) < 0.001, "e5 Summary.sum mismatch: " .. tostring(e5.Summary.sum))
-    assert(math.abs(e5.Summary.Sum - 1234.5) < 0.001, "e5 Summary.Sum mismatch: " .. tostring(e5.Summary.Sum))
-    assert(e5.Summary.quantileValues ~= nil, "e5 Summary.quantileValues missing")
-    assert(e5.Summary.QuantileValues == e5.Summary.quantileValues, "e5 Summary.QuantileValues must alias quantileValues")
-    assert(#e5.Summary.quantileValues == 2, "e5 Summary.quantileValues length mismatch: " .. tostring(#e5.Summary.quantileValues))
-    assert(math.abs(e5.Summary.quantileValues[1].quantile - 0.5) < 0.001, "e5 q1 quantile mismatch")
-    assert(math.abs(e5.Summary.quantileValues[1].Quantile - 0.5) < 0.001, "e5 q1 Quantile mismatch")
-    assert(math.abs(e5.Summary.quantileValues[1].value - 12.0) < 0.001, "e5 q1 value mismatch")
-    assert(math.abs(e5.Summary.quantileValues[1].Value - 12.0) < 0.001, "e5 q1 Value mismatch")
-    assert(math.abs(e5.Summary.quantileValues[2].quantile - 0.99) < 0.001, "e5 q2 quantile mismatch")
-    assert(math.abs(e5.Summary.quantileValues[2].Quantile - 0.99) < 0.001, "e5 q2 Quantile mismatch")
-    assert(math.abs(e5.Summary.quantileValues[2].value - 85.0) < 0.001, "e5 q2 value mismatch")
-    assert(math.abs(e5.Summary.quantileValues[2].Value - 85.0) < 0.001, "e5 q2 Value mismatch")
+    assert(e5.Histogram == nil, "e5 Histogram should be nil for summary")
+    assert(e5.ExponentialHistogram == nil, "e5 ExponentialHistogram should be nil for summary")
+    assert(e5.Attributes == '{"service":"auth"}', "e5 Attributes mismatch: " .. tostring(e5.Attributes))
+    assert(e5.Summary ==
+      '{"count":50,"sum":1234.5,"quantileValues":[{"quantile":0.5,"value":12},{"quantile":0.99,"value":85}]}',
+      "e5 Summary mismatch: " .. tostring(e5.Summary))
+    assert(e5.Exemplars == "[]", "e5 Exemplars mismatch: " .. tostring(e5.Exemplars))
   )";
 
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -253,6 +232,10 @@ TEST_F(MetricsExtractorTest, MissingServiceNameDefaultsToUnknownService) {
     assert(#emitted == 1, "expected 1 emitted event")
     local e = emitted[1].log
     assert(e.ServiceName == "unknown_service", "expected unknown_service, got " .. tostring(e.ServiceName))
+    assert(e.ResourceAttributes == '{"cluster":"prod-1"}', "ResourceAttributes mismatch: " .. tostring(e.ResourceAttributes))
+    assert(e.ScopeAttributes == "{}", "ScopeAttributes mismatch: " .. tostring(e.ScopeAttributes))
+    assert(e.Attributes == "{}", "Attributes mismatch: " .. tostring(e.Attributes))
+    assert(e.Exemplars == "[]", "Exemplars mismatch: " .. tostring(e.Exemplars))
     assert(e.Value == 42, "expected 42, got " .. tostring(e.Value))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -353,8 +336,10 @@ TEST_F(MetricsExtractorTest, UnorderedKeysAndSnakeCase) {
     assert(e.ServiceName == "unordered_svc", "ServiceName mismatch")
     assert(e.ScopeName == "unordered_scope", "ScopeName mismatch")
     assert(e.ScopeVersion == "0.9.0", "ScopeVersion mismatch")
-    assert(e.ScopeAttributes["scope_attr"] == "val", "ScopeAttributes mismatch")
-    assert(e.Attributes["env"] == "staging", "Attributes mismatch")
+    assert(e.ResourceAttributes == '{"service.name":"unordered_svc"}', "ResourceAttributes mismatch: " .. tostring(e.ResourceAttributes))
+    assert(e.ScopeAttributes == '{"scope_attr":"val"}', "ScopeAttributes mismatch: " .. tostring(e.ScopeAttributes))
+    assert(e.Attributes == '{"env":"staging"}', "Attributes mismatch: " .. tostring(e.Attributes))
+    assert(e.Exemplars == "[]", "Exemplars mismatch: " .. tostring(e.Exemplars))
     assert(math.abs(e.Value - 99.9) < 0.001, "Value mismatch")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -431,11 +416,9 @@ TEST_F(MetricsExtractorTest, ExemplarsFilteredAttributesScopedRefLifecycle) {
   const char* verify_script = R"(
     local e = emitted[#emitted].log
     assert(e ~= nil)
-    assert(e.Attributes["cluster"] == "prod-1")
-    assert(e.Exemplars ~= nil and #e.Exemplars == 1)
-    local ex = e.Exemplars[1]
-    assert(ex.FilteredAttributes["tenant"] == "acme")
-    assert(math.abs(ex.Value - 3.14) < 1e-5)
+    assert(e.Attributes == '{"cluster":"prod-1"}', "Attributes mismatch: " .. tostring(e.Attributes))
+    assert(e.Exemplars == '[{"FilteredAttributes":{"tenant":"acme"},"TimeUnix":"1970-01-01T00:00:01.000000000Z","Value":3.14,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]',
+           "Exemplars mismatch: " .. tostring(e.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -477,20 +460,20 @@ TEST_F(MetricsExtractorTest, InvalidDoubleStringDoesNotSetMetricValueKind) {
     local gauge_event = emitted[#emitted - 1].log
     assert(gauge_event ~= nil)
     assert(gauge_event.Value == nil, "DataPoint Value should not be set when asDouble is invalid")
-    assert(gauge_event.Exemplars ~= nil and #gauge_event.Exemplars == 1)
-    local ex = gauge_event.Exemplars[1]
-    assert(ex.Value == nil, "Exemplar Value should not be set when asDouble is invalid")
+    assert(gauge_event.Exemplars == '[{"FilteredAttributes":{},"TimeUnix":"1970-01-01T00:00:01.000000000Z","SpanId":"","TraceId":""}]',
+           "Exemplar Value should not be set when asDouble is invalid: " .. tostring(gauge_event.Exemplars))
 
     local hist_event = emitted[#emitted].log
     assert(hist_event ~= nil)
-    assert(hist_event.Min == nil, "Histogram Min should not be set when min is invalid")
-    assert(hist_event.Max == nil, "Histogram Max should not be set when max is invalid")
+    assert(hist_event.Histogram ==
+      '{"aggregationTemporality":0,"count":1,"sum":0,"bucketCounts":[],"explicitBounds":[]}',
+      "Histogram min/max should not be set when invalid: " .. tostring(hist_event.Histogram))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
 TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsHistogramCount) {
-  // 1. Test histogram count clamping in ProcessMetrics (JSON path)
+  // 1. Test exact uint64_t histogram count preservation in ProcessMetrics (JSON path)
   const std::string json_payload = R"({
     "resourceMetrics": [{
       "scopeMetrics": [{
@@ -557,20 +540,23 @@ TEST_F(MetricsExtractorTest, ProcessMetricsTablePreservesLuaStackDepthAndClampsH
   lua_pop(L_, 1);
   EXPECT_EQ(lua_gettop(L_), initial_top);
 
-  // Verify both JSON and Table histogram counts were clamped to INT64_MAX
-  // (9223372036854775807)
+  // Verify both JSON and Table histogram counts preserve exact UINT64_MAX (18446744073709551615)
   const char* verify_clamp = R"(
     assert(#emitted == 2, "expected 2 emitted events, got " .. #emitted)
     local h1 = emitted[1].log.Histogram
-    assert(h1 ~= nil, "h1 missing")
-    assert(h1.count == 9223372036854775807, "h1.count not clamped: " .. tostring(h1.count))
-    assert(h1.Count == 9223372036854775807, "h1.Count not clamped: " .. tostring(h1.Count))
+    assert(h1 ==
+      '{"aggregationTemporality":0,"count":18446744073709551615,"sum":10,"bucketCounts":[],"explicitBounds":[]}',
+      "h1 mismatch: " .. tostring(h1))
 
     local e2 = emitted[2].log
     local h2 = e2.Histogram
-    assert(h2 ~= nil, "h2 missing")
-    assert(h2.count == 9223372036854775807, "h2.count not clamped: " .. tostring(h2.count))
-    assert(h2.Count == 9223372036854775807, "h2.Count not clamped: " .. tostring(h2.Count))
+    assert(h2 ==
+      '{"aggregationTemporality":0,"count":18446744073709551615,"sum":20,"bucketCounts":[],"explicitBounds":[]}',
+      "h2 mismatch: " .. tostring(h2))
+    assert(e2.ResourceAttributes == '{"service.name":"tbl-svc"}', "e2.ResourceAttributes mismatch: " .. tostring(e2.ResourceAttributes))
+    assert(e2.ScopeAttributes == "{}", "e2.ScopeAttributes mismatch")
+    assert(e2.Attributes == "{}", "e2.Attributes mismatch")
+    assert(e2.Exemplars == "[]", "e2.Exemplars mismatch")
     assert(e2.StartTimeUnix == "2021-08-26T17:46:40.000000000Z", "StartTimeUnix mismatch: " .. tostring(e2.StartTimeUnix))
     assert(e2.TimeUnix == "2021-08-26T17:46:41.000000000Z", "TimeUnix mismatch: " .. tostring(e2.TimeUnix))
   )";
@@ -695,30 +681,18 @@ TEST_F(MetricsExtractorTest, HistogramWithoutMinAndMax) {
     -- Event 1: JSON histogram without min/max
     local e1 = emitted[1].log
     assert(e1.MetricName == "hist_no_min_max")
-    assert(e1.Histogram ~= nil, "e1 Histogram table missing")
-    assert(e1.Histogram.count == 50)
-    assert(math.abs(e1.Histogram.sum - 12.5) < 0.001)
-    assert(e1.Histogram.min == nil, "e1.Histogram.min must be nil")
-    assert(e1.Histogram.max == nil, "e1.Histogram.max must be nil")
-    assert(e1.Histogram.Min == nil, "e1.Histogram.Min must be nil")
-    assert(e1.Histogram.Max == nil, "e1.Histogram.Max must be nil")
-    assert(#e1.Histogram.bucketCounts == 2)
-    assert(e1.Histogram.bucketCounts[1] == 10 and e1.Histogram.bucketCounts[2] == 40)
-    assert(#e1.Histogram.explicitBounds == 1 and math.abs(e1.Histogram.explicitBounds[1] - 1.0) < 0.001)
+    assert(e1.Histogram ==
+      '{"aggregationTemporality":0,"count":50,"sum":12.5,"bucketCounts":[10,40],"explicitBounds":[1]}',
+      "e1 Histogram mismatch: " .. tostring(e1.Histogram))
+    assert(e1.Exemplars == "[]", "e1 Exemplars mismatch: " .. tostring(e1.Exemplars))
 
     -- Event 2: Table histogram without min/max
     local e2 = emitted[2].log
     assert(e2.MetricName == "table_hist_no_min_max")
-    assert(e2.Histogram ~= nil, "e2 Histogram table missing")
-    assert(e2.Histogram.count == 60)
-    assert(math.abs(e2.Histogram.sum - 18.0) < 0.001)
-    assert(e2.Histogram.min == nil, "e2.Histogram.min must be nil")
-    assert(e2.Histogram.max == nil, "e2.Histogram.max must be nil")
-    assert(e2.Histogram.Min == nil, "e2.Histogram.Min must be nil")
-    assert(e2.Histogram.Max == nil, "e2.Histogram.Max must be nil")
-    assert(#e2.Histogram.bucketCounts == 2)
-    assert(e2.Histogram.bucketCounts[1] == 20 and e2.Histogram.bucketCounts[2] == 40)
-    assert(#e2.Histogram.explicitBounds == 1 and math.abs(e2.Histogram.explicitBounds[1] - 2.5) < 0.001)
+    assert(e2.Histogram ==
+      '{"aggregationTemporality":0,"count":60,"sum":18,"bucketCounts":[20,40],"explicitBounds":[2.5]}',
+      "e2 Histogram mismatch: " .. tostring(e2.Histogram))
+    assert(e2.Exemplars == "[]", "e2 Exemplars mismatch: " .. tostring(e2.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -814,7 +788,7 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
   const char* verify_script = R"(
     assert(#emitted == 4, "expected 4 emitted events, got " .. #emitted)
 
-    -- Event 1: JSON Summary with quantiles and clamped count
+    -- Event 1: JSON Summary with quantiles and exact UINT64_MAX count
     local e1 = emitted[1].log
     assert(e1.MetricName == "rpc_latency_summary")
     assert(e1.MetricDescription == "RPC latency summary test")
@@ -826,36 +800,24 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
     assert(e1.Value == nil, "Summary Value must be nil")
     assert(e1.Histogram == nil, "Summary Histogram must be nil")
     assert(e1.ExponentialHistogram == nil, "Summary ExponentialHistogram must be nil")
-    assert(e1.Attributes["endpoint"] == "/api/v1/checkout")
+    assert(e1.ResourceAttributes == '{"service.name":"summary-svc"}', "e1 ResourceAttributes mismatch: " .. tostring(e1.ResourceAttributes))
+    assert(e1.ScopeAttributes == "{}", "e1 ScopeAttributes mismatch: " .. tostring(e1.ScopeAttributes))
+    assert(e1.Attributes == '{"endpoint":"/api/v1/checkout"}', "e1 Attributes mismatch: " .. tostring(e1.Attributes))
     assert(e1.Flags == 1)
     assert(e1.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
     assert(e1.TimeUnix == "2021-08-26T17:46:42.000000000Z")
-    assert(e1.Summary ~= nil, "e1 Summary sub-table missing")
-    assert(e1.Summary.count == 9223372036854775807)
-    assert(e1.Summary.Count == 9223372036854775807)
-    assert(math.abs(e1.Summary.sum - 50000.0) < 0.001)
-    assert(math.abs(e1.Summary.Sum - 50000.0) < 0.001)
-    assert(e1.Summary.quantileValues ~= nil)
-    assert(e1.Summary.QuantileValues == e1.Summary.quantileValues)
-    assert(#e1.Summary.quantileValues == 3)
-    assert(math.abs(e1.Summary.quantileValues[1].quantile - 0.5) < 0.001)
-    assert(math.abs(e1.Summary.quantileValues[1].Quantile - 0.5) < 0.001)
-    assert(math.abs(e1.Summary.quantileValues[1].value - 45.0) < 0.001)
-    assert(math.abs(e1.Summary.quantileValues[1].Value - 45.0) < 0.001)
-    assert(math.abs(e1.Summary.quantileValues[2].quantile - 0.9) < 0.001)
-    assert(math.abs(e1.Summary.quantileValues[2].value - 90.0) < 0.001)
-    assert(math.abs(e1.Summary.quantileValues[3].quantile - 0.99) < 0.001)
-    assert(math.abs(e1.Summary.quantileValues[3].value - 150.0) < 0.001)
+    assert(e1.Summary ==
+      '{"count":18446744073709551615,"sum":50000,"quantileValues":[{"quantile":0.5,"value":45},{"quantile":0.9,"value":90},{"quantile":0.99,"value":150}]}',
+      "e1 Summary mismatch: " .. tostring(e1.Summary))
+    assert(e1.Exemplars == "[]", "e1 Exemplars mismatch: " .. tostring(e1.Exemplars))
 
     -- Event 2: JSON Summary with empty quantileValues
     local e2 = emitted[2].log
-    assert(e2.Summary ~= nil)
-    assert(e2.Summary.count == 0 and e2.Summary.Count == 0)
-    assert(e2.Summary.sum == 0.0 and e2.Summary.Sum == 0.0)
-    assert(type(e2.Summary.quantileValues) == "table" and #e2.Summary.quantileValues == 0)
-    assert(e2.Summary.QuantileValues == e2.Summary.quantileValues)
+    assert(e2.Summary == '{"count":0,"sum":0,"quantileValues":[]}', "e2 Summary mismatch: " .. tostring(e2.Summary))
+    assert(e2.Attributes == "{}", "e2 Attributes mismatch")
+    assert(e2.Exemplars == "[]", "e2 Exemplars mismatch")
 
-    -- Event 3: Table Summary with quantiles and clamped count
+    -- Event 3: Table Summary with quantiles and exact UINT64_MAX count
     local e3 = emitted[3].log
     assert(e3.MetricName == "table_summary_metric")
     assert(e3.MetricDescription == "Table summary metric test")
@@ -864,31 +826,20 @@ TEST_F(MetricsExtractorTest, SummaryDataPointsWithQuantilesSumCount) {
     assert(e3.Value == nil, "Table summary Value must be nil")
     assert(e3.Histogram == nil, "Table summary Histogram must be nil")
     assert(e3.ExponentialHistogram == nil, "Table summary ExponentialHistogram must be nil")
-    assert(e3.Attributes["handler"] == "login")
+    assert(e3.Attributes == '{"handler":"login"}', "e3 Attributes mismatch: " .. tostring(e3.Attributes))
     assert(e3.Flags == 0)
     assert(e3.StartTimeUnix == "2021-08-26T17:46:40.000000000Z")
     assert(e3.TimeUnix == "2021-08-26T17:46:43.000000000Z")
-    assert(e3.Summary ~= nil, "e3 Summary sub-table missing")
-    assert(e3.Summary.count == 9223372036854775807)
-    assert(e3.Summary.Count == 9223372036854775807)
-    assert(math.abs(e3.Summary.sum - 600.0) < 0.001)
-    assert(math.abs(e3.Summary.Sum - 600.0) < 0.001)
-    assert(#e3.Summary.quantileValues == 2)
-    assert(e3.Summary.QuantileValues == e3.Summary.quantileValues)
-    assert(math.abs(e3.Summary.quantileValues[1].quantile - 0.5) < 0.001)
-    assert(math.abs(e3.Summary.quantileValues[1].Quantile - 0.5) < 0.001)
-    assert(math.abs(e3.Summary.quantileValues[1].value - 2.5) < 0.001)
-    assert(math.abs(e3.Summary.quantileValues[1].Value - 2.5) < 0.001)
-    assert(math.abs(e3.Summary.quantileValues[2].quantile - 0.95) < 0.001)
-    assert(math.abs(e3.Summary.quantileValues[2].value - 5.0) < 0.001)
+    assert(e3.Summary ==
+      '{"count":18446744073709551615,"sum":600,"quantileValues":[{"quantile":0.5,"value":2.5},{"quantile":0.95,"value":5}]}',
+      "e3 Summary mismatch: " .. tostring(e3.Summary))
+    assert(e3.Exemplars == "[]", "e3 Exemplars mismatch")
 
     -- Event 4: Table Summary with omitted quantileValues
     local e4 = emitted[4].log
-    assert(e4.Summary ~= nil)
-    assert(e4.Summary.count == 0 and e4.Summary.Count == 0)
-    assert(e4.Summary.sum == 0.0 and e4.Summary.Sum == 0.0)
-    assert(type(e4.Summary.quantileValues) == "table" and #e4.Summary.quantileValues == 0)
-    assert(e4.Summary.QuantileValues == e4.Summary.quantileValues)
+    assert(e4.Summary == '{"count":0,"sum":0,"quantileValues":[]}', "e4 Summary mismatch: " .. tostring(e4.Summary))
+    assert(e4.Attributes == "{}", "e4 Attributes mismatch")
+    assert(e4.Exemplars == "[]", "e4 Exemplars mismatch")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1047,84 +998,105 @@ TEST_F(MetricsExtractorTest, ExponentialHistogramFullFidelityAndEdgeCases) {
   EXPECT_EQ(tbl_res.emitted_count, 3);
   lua_pop(L_, 1);
 
-  const char* verify_script = R"(
-    assert(#emitted == 6, "expected 6 emitted events, got " .. #emitted)
+  // 4. JSON mode: exponentialHistogram with reversed key order
+  const std::string reversed_exp_json = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "exp_hist_reversed_keys",
+          "exponentialHistogram": {
+            "dataPoints": [{
+              "exemplars": [{
+                "filteredAttributes": [{"key": "region", "value": {"stringValue": "us-east-1"}}],
+                "spanId": "0123456789abcdef",
+                "traceId": "0123456789abcdef0123456789abcdef",
+                "asDouble": 3.25,
+                "timeUnixNano": "1630000000500000000"
+              }],
+              "negative": {
+                "bucket_counts": [4, 5],
+                "offset": 2
+              },
+              "positive": {
+                "bucketCounts": ["1", "9007199254740993", "18446744073709551615"],
+                "offset": -3
+              },
+              "zeroThreshold": 0.001,
+              "zeroCount": "9007199254740993",
+              "scale": -2,
+              "max": 10.5,
+              "min": 0.1,
+              "sum": 25.0,
+              "count": "18446744073709551615",
+              "timeUnixNano": "1630000001000000000",
+              "startTimeUnixNano": "1630000000000000000"
+            }],
+            "aggregationTemporality": 2
+          }
+        }]
+      }]
+    }]
+  })";
+  auto rev_res = ProcessMetrics(L_, reversed_exp_json, 1);
+  EXPECT_TRUE(rev_res.success) << rev_res.error;
+  EXPECT_EQ(rev_res.emitted_count, 1);
 
-    local function check_full_exp(e, expected_name)
+  const char* verify_script = R"(
+    assert(#emitted == 7, "expected 7 emitted events, got " .. #emitted)
+
+    local expected_full_eh =
+      '{"aggregationTemporality":2,' ..
+      '"count":18446744073709551615,' ..
+      '"sum":25,"min":0.1,"max":10.5,' ..
+      '"scale":-2,' ..
+      '"zeroCount":9007199254740993,' ..
+      '"zeroThreshold":0.001,' ..
+      '"positive":{"offset":-3,"bucketCounts":[1,9007199254740993,18446744073709551615]},' ..
+      '"negative":{"offset":2,"bucketCounts":[4,5]}}'
+
+    local function check_full_exp(e, expected_name, is_table_mode, is_reversed_json)
       assert(e.MetricName == expected_name)
       assert(e.MetricType == "exponential_histogram")
       assert(e.Value == nil, "Value must be nil for exponential_histogram")
       assert(e.Histogram == nil, "Histogram must be nil for exponential_histogram")
       assert(e.Summary == nil, "Summary must be nil for exponential_histogram")
       assert(e.AggregationTemporality == 2)
-      local eh = e.ExponentialHistogram
-      assert(eh ~= nil, "ExponentialHistogram missing")
-      assert(eh.aggregationTemporality == 2 and eh.AggregationTemporality == 2)
-      assert(eh.count == 9223372036854775807 and eh.Count == 9223372036854775807)
-      assert(math.abs(eh.sum - 25.0) < 0.001 and math.abs(eh.Sum - 25.0) < 0.001)
-      assert(math.abs(eh.min - 0.1) < 0.001 and math.abs(eh.Min - 0.1) < 0.001)
-      assert(math.abs(eh.max - 10.5) < 0.001 and math.abs(eh.Max - 10.5) < 0.001)
-      assert(eh.scale == -2 and eh.Scale == -2)
-      assert(eh.zeroCount == 9007199254740993 and eh.ZeroCount == 9007199254740993)
-      assert(math.type(eh.zeroCount) == "integer")
-      assert(math.abs(eh.zeroThreshold - 0.001) < 1e-6 and math.abs(eh.ZeroThreshold - 0.001) < 1e-6)
-      assert(eh.positive ~= nil and eh.Positive ~= nil and eh.Positive.bucketCounts == eh.positive.bucketCounts)
-      assert(eh.positive.offset == -3 and eh.positive.Offset == -3)
-      assert(eh.positive.bucketCounts == eh.positive.BucketCounts)
-      assert(#eh.positive.bucketCounts == 3)
-      assert(eh.positive.bucketCounts[1] == 1)
-      assert(eh.positive.bucketCounts[2] == 9007199254740993)
-      assert(math.type(eh.positive.bucketCounts[2]) == "integer")
-      assert(eh.positive.bucketCounts[3] == 9223372036854775807)
-      assert(eh.negative ~= nil and eh.Negative ~= nil and eh.Negative.bucketCounts == eh.negative.bucketCounts)
-      assert(eh.negative.offset == 2 and eh.negative.Offset == 2)
-      assert(eh.negative.bucketCounts == eh.negative.BucketCounts)
-      assert(#eh.negative.bucketCounts == 2)
-      assert(eh.negative.bucketCounts[1] == 4 and eh.negative.bucketCounts[2] == 5)
-      assert(e.Exemplars ~= nil and #e.Exemplars == 1)
-      local ex = e.Exemplars[1]
-      assert(math.abs(ex.Value - 3.25) < 0.001)
-      assert(ex.TraceId == "0123456789abcdef0123456789abcdef")
-      assert(ex.SpanId == "0123456789abcdef")
-      assert(ex.FilteredAttributes["region"] == "us-east-1")
+      assert(e.ExponentialHistogram == expected_full_eh,
+             "ExponentialHistogram mismatch: " .. tostring(e.ExponentialHistogram))
+      assert(type(e.Exemplars) == "string")
+      assert(e.Exemplars ==
+        '[{"FilteredAttributes":{"region":"us-east-1"},"TimeUnix":"2021-08-26T17:46:40.500000000Z","Value":3.25,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]',
+        "Exemplars mismatch: " .. tostring(e.Exemplars))
     end
 
-    local function check_sparse_exp(e, expected_name, is_table_mode)
+    local expected_sparse_eh =
+      '{"aggregationTemporality":0,' ..
+      '"count":5,' ..
+      '"scale":3,' ..
+      '"zeroCount":1,' ..
+      '"zeroThreshold":0,' ..
+      '"positive":{"offset":0,"bucketCounts":[]},' ..
+      '"negative":{"offset":0,"bucketCounts":[]}}'
+
+    local function check_sparse_exp(e, expected_name)
       assert(e.MetricName == expected_name)
       assert(e.MetricType == "exponential_histogram")
       assert(e.Value == nil)
       assert(e.AggregationTemporality == 0)
-      local eh = e.ExponentialHistogram
-      assert(eh ~= nil)
-      assert(eh.aggregationTemporality == 0 and eh.AggregationTemporality == 0)
-      assert(eh.count == 5 and eh.Count == 5)
-      assert(eh.scale == 3 and eh.Scale == 3)
-      assert(eh.zeroCount == 1 and eh.ZeroCount == 1)
-      assert(eh.zeroThreshold == 0.0 and eh.ZeroThreshold == 0.0)
-      assert(eh.sum == nil and eh.Sum == nil, "omitted sum must be nil")
-      assert(eh.min == nil and eh.Min == nil, "omitted min must be nil")
-      assert(eh.max == nil and eh.Max == nil, "omitted max must be nil")
-      assert(eh.positive ~= nil and eh.Positive ~= nil and eh.Positive.bucketCounts == eh.positive.bucketCounts)
-      assert(eh.positive.offset == 0 and eh.positive.Offset == 0)
-      assert(type(eh.positive.bucketCounts) == "table" and #eh.positive.bucketCounts == 0)
-      assert(eh.negative ~= nil and eh.Negative ~= nil and eh.Negative.bucketCounts == eh.negative.bucketCounts)
-      assert(eh.negative.offset == 0 and eh.negative.Offset == 0)
-      assert(type(eh.negative.bucketCounts) == "table" and #eh.negative.bucketCounts == 0)
-      if is_table_mode then
-        assert(type(e.Exemplars) == "table" and #e.Exemplars == 0)
-      else
-        assert(e.Exemplars == nil)
-      end
+      assert(e.ExponentialHistogram == expected_sparse_eh,
+             "Sparse ExponentialHistogram mismatch: " .. tostring(e.ExponentialHistogram))
+      assert(e.Exemplars == "[]", "Sparse Exemplars mismatch: " .. tostring(e.Exemplars))
     end
 
-    check_full_exp(emitted[1].log, "exp_hist_full")
+    check_full_exp(emitted[1].log, "exp_hist_full", false, false)
     assert(emitted[2].log.MetricName == "valid_gauge_alongside")
     assert(math.abs(emitted[2].log.Value - 77.5) < 0.001)
-    check_sparse_exp(emitted[3].log, "only_exp_hist_sparse", false)
-    check_full_exp(emitted[4].log, "table_exp_hist_full")
-    check_sparse_exp(emitted[5].log, "table_exp_hist_sparse", true)
+    check_sparse_exp(emitted[3].log, "only_exp_hist_sparse")
+    check_full_exp(emitted[4].log, "table_exp_hist_full", true, false)
+    check_sparse_exp(emitted[5].log, "table_exp_hist_sparse")
     assert(emitted[6].log.MetricName == "table_valid_sum")
     assert(emitted[6].log.Value == 500)
+    check_full_exp(emitted[7].log, "exp_hist_reversed_keys", false, true)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1214,33 +1186,11 @@ TEST_F(MetricsExtractorTest, ExemplarsWithAsDoubleAndAsInt) {
   const char* verify_script = R"(
     local e = emitted[1].log
     assert(e.MetricName == "metric_exemplars_mix")
-    assert(e.Exemplars ~= nil and #e.Exemplars == 3, "expected 3 exemplars, got " .. tostring(#e.Exemplars))
-
-    -- Exemplar 1: asDouble
-    local ex1 = e.Exemplars[1]
-    assert(math.abs(ex1.Value - 12.345) < 0.001)
-    assert(math.type(ex1.Value) == "float", "ex1 Value must be float")
-    assert(ex1.TimeUnix == "2021-08-26T17:46:40.000000000Z")
-    assert(ex1.TraceId == "0123456789abcdef0123456789abcdef")
-    assert(ex1.SpanId == "0123456789abcdef")
-    assert(ex1.FilteredAttributes["tag_dbl"] == "val_dbl")
-
-    -- Exemplar 2: asInt string
-    local ex2 = e.Exemplars[2]
-    assert(ex2.Value == 8888)
-    assert(math.type(ex2.Value) == "integer", "ex2 Value must be integer")
-    assert(ex2.TimeUnix == "2021-08-26T17:46:41.000000000Z")
-    assert(ex2.TraceId == "fedcba9876543210fedcba9876543210")
-    assert(ex2.SpanId == "fedcba9876543210")
-    assert(ex2.FilteredAttributes["tag_int"] == 99)
-
-    -- Exemplar 3: as_int snake_case negative
-    local ex3 = e.Exemplars[3]
-    assert(ex3.Value == -42)
-    assert(math.type(ex3.Value) == "integer", "ex3 Value must be integer")
-    assert(ex3.TimeUnix == "")
-    assert(ex3.TraceId == "")
-    assert(ex3.SpanId == "")
+    assert(e.Exemplars ==
+      '[{"FilteredAttributes":{"tag_dbl":"val_dbl"},"TimeUnix":"2021-08-26T17:46:40.000000000Z","Value":12.345,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"},' ..
+      '{"FilteredAttributes":{"tag_int":99},"TimeUnix":"2021-08-26T17:46:41.000000000Z","Value":8888,"SpanId":"fedcba9876543210","TraceId":"fedcba9876543210fedcba9876543210"},' ..
+      '{"FilteredAttributes":{},"TimeUnix":"","Value":-42,"SpanId":"","TraceId":""}]',
+      "Exemplars mismatch: " .. tostring(e.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1378,21 +1328,24 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
     local e3 = emitted[3].log
     assert(e3.MetricName == "cumulative_hist")
     assert(e3.AggregationTemporality == 2)
-    assert(e3.Histogram.aggregationTemporality == 2)
-    assert(e3.Histogram.AggregationTemporality == 2)
+    assert(e3.Histogram ==
+      '{"aggregationTemporality":2,"count":25,"sum":100,"bucketCounts":[],"explicitBounds":[]}',
+      "e3.Histogram mismatch: " .. tostring(e3.Histogram))
     assert(e3.Flags == 4)
 
     local e4 = emitted[4].log
     assert(e4.MetricName == "delta_exp_hist")
     assert(e4.AggregationTemporality == 1)
-    assert(e4.ExponentialHistogram.aggregationTemporality == 1)
-    assert(e4.ExponentialHistogram.AggregationTemporality == 1)
+    assert(e4.ExponentialHistogram ==
+      '{"aggregationTemporality":1,"count":10,"scale":1,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
+      "e4.ExponentialHistogram mismatch: " .. tostring(e4.ExponentialHistogram))
 
     local e5 = emitted[5].log
     assert(e5.MetricName == "unspec_exp_hist")
     assert(e5.AggregationTemporality == 0)
-    assert(e5.ExponentialHistogram.aggregationTemporality == 0)
-    assert(e5.ExponentialHistogram.AggregationTemporality == 0)
+    assert(e5.ExponentialHistogram ==
+      '{"aggregationTemporality":0,"count":5,"scale":0,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
+      "e5.ExponentialHistogram mismatch: " .. tostring(e5.ExponentialHistogram))
 
     local e6 = emitted[6].log
     assert(e6.MetricName == "tbl_sum_delta")
@@ -1408,14 +1361,16 @@ TEST_F(MetricsExtractorTest, MetricsAggregationTemporalityAndFlags) {
     local e8 = emitted[8].log
     assert(e8.MetricName == "tbl_hist_cum")
     assert(e8.AggregationTemporality == 2)
-    assert(e8.Histogram.aggregationTemporality == 2)
-    assert(e8.Histogram.AggregationTemporality == 2)
+    assert(e8.Histogram ==
+      '{"aggregationTemporality":2,"count":5,"sum":15,"bucketCounts":[],"explicitBounds":[]}',
+      "e8.Histogram mismatch: " .. tostring(e8.Histogram))
 
     local e9 = emitted[9].log
     assert(e9.MetricName == "tbl_exp_delta")
     assert(e9.AggregationTemporality == 1)
-    assert(e9.ExponentialHistogram.aggregationTemporality == 1)
-    assert(e9.ExponentialHistogram.AggregationTemporality == 1)
+    assert(e9.ExponentialHistogram ==
+      '{"aggregationTemporality":1,"count":7,"scale":2,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
+      "e9.ExponentialHistogram mismatch: " .. tostring(e9.ExponentialHistogram))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1647,9 +1602,9 @@ TEST_F(MetricsExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
       local e = gc_emitted[i].log
       assert(e.ServiceName == "unknown_service",
              "Event " .. i .. " ServiceName mismatch: " .. tostring(e.ServiceName))
-      assert(e.ResourceAttributes["service.name"] == 42,
-             "Event " .. i .. " ResourceAttributes['service.name'] mismatch: " ..
-             tostring(e.ResourceAttributes["service.name"]))
+      assert(type(e.ResourceAttributes) == "string" and e.ResourceAttributes:find('"service.name":42', 1, true) ~= nil,
+             "Event " .. i .. " ResourceAttributes mismatch: " ..
+             tostring(e.ResourceAttributes))
     end
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -1687,8 +1642,10 @@ TEST_F(MetricsExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnd
     assert(#uaf_emitted == 2)
     assert(uaf_emitted[1].log.ServiceName == "unknown_service")
     assert(uaf_emitted[2].log.ServiceName == "unknown_service")
-    assert(uaf_emitted[1].log.ResourceAttributes["service.name"] == 42)
-    assert(uaf_emitted[2].log.ResourceAttributes["service.name"] == 42)
+    assert(type(uaf_emitted[1].log.ResourceAttributes) == "string" and
+           uaf_emitted[1].log.ResourceAttributes:find('"service.name":42', 1, true) ~= nil)
+    assert(type(uaf_emitted[2].log.ResourceAttributes) == "string" and
+           uaf_emitted[2].log.ResourceAttributes:find('"service.name":42', 1, true) ~= nil)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1698,7 +1655,7 @@ TEST_F(MetricsExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResource
     uaf_emitted = {}
     function uaf_cb(event)
       table.insert(uaf_emitted, event)
-      event.log.ResourceAttributes["service.name"] = nil
+      event.log.ResourceAttributes = nil
       collectgarbage("collect")
       collectgarbage("collect")
       for i = 1, 200 do
@@ -1807,8 +1764,8 @@ TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
   //    - `asDouble = "invalid_double"`, `asInt = "bad"`, `value = "bad"` omit Value (nil)
   //    - bucketCounts with -5, "-5", math.huge, "99999999999999999999", "99999999999999999999abc",
   //    "18446744073709551615"
-  //    - explicitBounds = "not_a_table" -> {} and explicitBounds = {1.0, "2.5"} -> fresh table
-  //    {1.0, 2.5}
+  //    - explicitBounds = "not_a_table" -> {} and explicitBounds = {1.0, "2.5"} -> fresh JSON
+  //    [1,2.5]
   //    - negative flags = -1 -> Flags == 0
   const char* push_table = R"(
     shared_bounds_input = { 1.0, "2.5" }
@@ -1881,27 +1838,28 @@ TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
     local e1 = emitted[1].log
     assert(e1.MetricName == "null_oneof")
     assert(e1.MetricType == "exponential_histogram")
-    assert(e1.ExponentialHistogram.count == 3)
-    assert(e1.ExponentialHistogram.scale == 1)
+    assert(e1.ExponentialHistogram ==
+      '{"aggregationTemporality":0,"count":3,"scale":1,"zeroCount":0,"zeroThreshold":0,"positive":{"offset":0,"bucketCounts":[]},"negative":{"offset":0,"bucketCounts":[]}}',
+      "e1.ExponentialHistogram mismatch: " .. tostring(e1.ExponentialHistogram))
 
     -- Event 2: json_bucket_edge_cases
-    local bc_json = emitted[2].log.Histogram.bucketCounts
-    assert(#bc_json == 6)
-    assert(bc_json[1] == 0 and bc_json[2] == 0 and bc_json[3] == 0 and bc_json[4] == 0 and bc_json[5] == 0)
-    assert(bc_json[6] == 9223372036854775807)
+    assert(emitted[2].log.Histogram ==
+      '{"aggregationTemporality":0,"count":1,"sum":0,"bucketCounts":[0,0,0,0,0,18446744073709551615],"explicitBounds":[]}',
+      "emitted[2].log.Histogram mismatch: " .. tostring(emitted[2].log.Histogram))
 
     -- Event 3: table value = "9007199254740993", flags = -1, exemplars
     local e3 = emitted[3].log
     assert(e3.Value == 9007199254740993)
     assert(math.type(e3.Value) == "integer")
     assert(e3.Flags == 0, "negative flags must normalize to 0, got " .. tostring(e3.Flags))
-    assert(#e3.Exemplars == 6)
-    assert(e3.Exemplars[1].Value == 9007199254740993 and math.type(e3.Exemplars[1].Value) == "integer")
-    assert(math.abs(e3.Exemplars[2].Value - 45.2) < 0.001 and math.type(e3.Exemplars[2].Value) == "float")
-    assert(math.abs(e3.Exemplars[3].Value - 45.2) < 0.001 and math.type(e3.Exemplars[3].Value) == "float")
-    assert(e3.Exemplars[4].Value == nil)
-    assert(e3.Exemplars[5].Value == nil)
-    assert(e3.Exemplars[6].Value == nil)
+    assert(e3.Exemplars ==
+      '[{"FilteredAttributes":{},"TimeUnix":"1970-01-01T00:00:00.000000001Z","Value":9007199254740993,"SpanId":"","TraceId":""},' ..
+      '{"FilteredAttributes":{},"TimeUnix":"1970-01-01T00:00:00.000000001Z","Value":45.2,"SpanId":"","TraceId":""},' ..
+      '{"FilteredAttributes":{},"TimeUnix":"1970-01-01T00:00:00.000000001Z","Value":45.2,"SpanId":"","TraceId":""},' ..
+      '{"FilteredAttributes":{},"TimeUnix":"1970-01-01T00:00:00.000000001Z","SpanId":"","TraceId":""},' ..
+      '{"FilteredAttributes":{},"TimeUnix":"1970-01-01T00:00:00.000000001Z","SpanId":"","TraceId":""},' ..
+      '{"FilteredAttributes":{},"TimeUnix":"1970-01-01T00:00:00.000000001Z","SpanId":"","TraceId":""}]',
+      "e3.Exemplars mismatch: " .. tostring(e3.Exemplars))
 
     -- Events 4..8: table Value variants
     assert(math.abs(emitted[4].log.Value - 45.2) < 0.001 and math.type(emitted[4].log.Value) == "float")
@@ -1912,20 +1870,15 @@ TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
 
     -- Event 9: table bucketCounts and explicitBounds = "not_a_table"
     local h9 = emitted[9].log.Histogram
-    local bc_tbl = h9.bucketCounts
-    assert(#bc_tbl == 6)
-    assert(bc_tbl[1] == 0 and bc_tbl[2] == 0 and bc_tbl[3] == 0 and bc_tbl[4] == 0 and bc_tbl[5] == 0)
-    assert(bc_tbl[6] == 9223372036854775807)
-    assert(type(h9.explicitBounds) == "table" and #h9.explicitBounds == 0)
-    assert(h9.ExplicitBounds == h9.explicitBounds)
+    assert(h9 ==
+      '{"aggregationTemporality":0,"count":1,"sum":0,"bucketCounts":[0,0,0,0,0,18446744073709551615],"explicitBounds":[]}',
+      "h9 mismatch: " .. tostring(h9))
 
-    -- Event 10: valid explicitBounds = {1.0, "2.5"} is a fresh non-aliased table
+    -- Event 10: valid explicitBounds = {1.0, "2.5"} serialized to JSON
     local h10 = emitted[10].log.Histogram
-    assert(type(h10.explicitBounds) == "table" and #h10.explicitBounds == 2)
-    assert(h10.explicitBounds ~= shared_bounds_input, "explicitBounds must not alias input table")
-    assert(math.abs(h10.explicitBounds[1] - 1.0) < 0.001)
-    assert(math.abs(h10.explicitBounds[2] - 2.5) < 0.001)
-    assert(math.type(h10.explicitBounds[2]) == "float")
+    assert(h10 ==
+      '{"aggregationTemporality":0,"count":2,"sum":0,"bucketCounts":[],"explicitBounds":[1,2.5]}',
+      "h10 mismatch: " .. tostring(h10))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 
@@ -1936,6 +1889,32 @@ TEST_F(MetricsExtractorTest, ReviewHardeningEdgeCases) {
   EXPECT_FALSE(mid_res.success);
   EXPECT_FALSE(mid_res.error.empty());
   EXPECT_EQ(mid_res.emitted_count, 1);
+
+  // 4. Mid-array syntax errors in histogram bucketCounts, explicitBounds, and summary
+  // quantileValues
+  const std::string mid_bucket_err_json =
+      R"({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"mid_bucket","histogram":{"dataPoints":[{"count":1,"bucketCounts":[1,2,]}]}}]}]}]})";
+  auto mid_bucket_res = ProcessMetrics(L_, mid_bucket_err_json, 1);
+  EXPECT_FALSE(mid_bucket_res.success);
+  EXPECT_FALSE(mid_bucket_res.error.empty());
+
+  const std::string mid_bounds_err_json =
+      R"({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"mid_bounds","histogram":{"dataPoints":[{"count":1,"explicitBounds":[1.0,]}]}}]}]}]})";
+  auto mid_bounds_res = ProcessMetrics(L_, mid_bounds_err_json, 1);
+  EXPECT_FALSE(mid_bounds_res.success);
+  EXPECT_FALSE(mid_bounds_res.error.empty());
+
+  const std::string mid_quantile_err_json =
+      R"({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"mid_q","summary":{"dataPoints":[{"count":1,"quantileValues":[{"quantile":0.5,"value":1.0},{"quantile":0.9,"value":}]}]}}]}]}]})";
+  auto mid_q_res = ProcessMetrics(L_, mid_quantile_err_json, 1);
+  EXPECT_FALSE(mid_q_res.success);
+  EXPECT_FALSE(mid_q_res.error.empty());
+
+  const std::string mid_atom_bucket_err_json =
+      R"({"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"mid_atom_b","histogram":{"dataPoints":[{"count":1,"bucketCounts":["1","2",tru]}]}}]}]}]})";
+  auto mid_atom_b_res = ProcessMetrics(L_, mid_atom_bucket_err_json, 1);
+  EXPECT_FALSE(mid_atom_b_res.success);
+  EXPECT_FALSE(mid_atom_b_res.error.empty());
 }
 
 TEST_F(MetricsExtractorTest, JsonModeExemplarIdsNormalizedToLowercaseHex) {
@@ -2014,44 +1993,23 @@ TEST_F(MetricsExtractorTest, JsonModeExemplarIdsNormalizedToLowercaseHex) {
     -- Event 1: Gauge exemplar
     local e1 = emitted[1].log
     assert(e1.MetricName == "cpu_gauge")
-    assert(e1.Exemplars ~= nil and #e1.Exemplars == 1)
-    local ex1 = e1.Exemplars[1]
-    assert(ex1.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
-           "Gauge exemplar TraceId must be lowercase hex, got: " .. tostring(ex1.TraceId))
-    assert(ex1.SpanId == "00f067aa0ba902b7",
-           "Gauge exemplar SpanId must be lowercase hex, got: " .. tostring(ex1.SpanId))
-    assert(ex1.TimeUnix == "2023-11-14T22:13:20.123456789Z",
-           "Gauge exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex1.TimeUnix))
-    assert(math.abs(ex1.Value - 85.5) < 0.001, "Gauge exemplar Value mismatch")
-    assert(ex1.FilteredAttributes ~= nil and ex1.FilteredAttributes["user"] == "alice")
+    assert(e1.Exemplars ==
+      '[{"FilteredAttributes":{"user":"alice"},"TimeUnix":"2023-11-14T22:13:20.123456789Z","Value":85.5,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"}]',
+      "Gauge exemplar mismatch: " .. tostring(e1.Exemplars))
 
     -- Event 2: Sum exemplar
     local e2 = emitted[2].log
     assert(e2.MetricName == "request_sum")
-    assert(e2.Exemplars ~= nil and #e2.Exemplars == 1)
-    local ex2 = e2.Exemplars[1]
-    assert(ex2.TraceId == "0123456789abcdef0123456789abcdef",
-           "Sum exemplar TraceId must be lowercase hex, got: " .. tostring(ex2.TraceId))
-    assert(ex2.SpanId == "0123456789abcdef",
-           "Sum exemplar SpanId must be lowercase hex, got: " .. tostring(ex2.SpanId))
-    assert(ex2.TimeUnix == "2023-11-14T22:13:20.987654321Z",
-           "Sum exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex2.TimeUnix))
-    assert(ex2.Value == 42, "Sum exemplar Value mismatch: " .. tostring(ex2.Value))
-    assert(ex2.FilteredAttributes ~= nil and ex2.FilteredAttributes["tenant"] == "acme")
+    assert(e2.Exemplars ==
+      '[{"FilteredAttributes":{"tenant":"acme"},"TimeUnix":"2023-11-14T22:13:20.987654321Z","Value":42,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]',
+      "Sum exemplar mismatch: " .. tostring(e2.Exemplars))
 
     -- Event 3: Histogram exemplar
     local e3 = emitted[3].log
     assert(e3.MetricName == "latency_hist")
-    assert(e3.Exemplars ~= nil and #e3.Exemplars == 1)
-    local ex3 = e3.Exemplars[1]
-    assert(ex3.TraceId == "aabbccddeeff00112233445566778899",
-           "Hist exemplar TraceId must be lowercase hex, got: " .. tostring(ex3.TraceId))
-    assert(ex3.SpanId == "aabbccddeeff0011",
-           "Hist exemplar SpanId must be lowercase hex, got: " .. tostring(ex3.SpanId))
-    assert(ex3.TimeUnix == "2023-11-14T22:13:20.555555555Z",
-           "Hist exemplar TimeUnix mismatch: " .. tostring(ex3.TimeUnix))
-    assert(math.abs(ex3.Value - 0.5) < 0.001, "Hist exemplar Value mismatch")
-    assert(ex3.FilteredAttributes ~= nil, "Hist exemplar FilteredAttributes must be a table")
+    assert(e3.Exemplars ==
+      '[{"FilteredAttributes":{},"TimeUnix":"2023-11-14T22:13:20.555555555Z","Value":0.5,"SpanId":"aabbccddeeff0011","TraceId":"aabbccddeeff00112233445566778899"}]',
+      "Hist exemplar mismatch: " .. tostring(e3.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2160,51 +2118,29 @@ TEST_F(MetricsExtractorTest, TableModeExemplarIdsNormalizedFromBinaryAndSchemaPa
     -- Event 1: Gauge exemplar with binary IDs
     local e1 = emitted[1].log
     assert(e1.MetricName == "mem_gauge")
-    assert(type(e1.Exemplars) == "table" and #e1.Exemplars == 1)
-    local ex1 = e1.Exemplars[1]
-    assert(ex1.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
-           "Gauge exemplar TraceId must be 32 lowercase hex chars, got: " .. tostring(ex1.TraceId))
-    assert(ex1.SpanId == "00f067aa0ba902b7",
-           "Gauge exemplar SpanId must be 16 lowercase hex chars, got: " .. tostring(ex1.SpanId))
-    assert(ex1.TimeUnix == "2023-11-14T22:13:20.123456789Z",
-           "Gauge exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex1.TimeUnix))
-    assert(math.abs(ex1.Value - 512.5) < 0.001, "Gauge exemplar Value mismatch")
-    assert(ex1.FilteredAttributes ~= nil and ex1.FilteredAttributes["pool"] == "heap")
+    assert(e1.Exemplars ==
+      '[{"FilteredAttributes":{"pool":"heap"},"TimeUnix":"2023-11-14T22:13:20.123456789Z","Value":512.5,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"}]',
+      "Gauge exemplar mismatch: " .. tostring(e1.Exemplars))
 
     -- Event 2: Sum exemplar with uppercase snake_case IDs
     local e2 = emitted[2].log
     assert(e2.MetricName == "conn_sum")
-    assert(type(e2.Exemplars) == "table" and #e2.Exemplars == 1)
-    local ex2 = e2.Exemplars[1]
-    assert(ex2.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
-           "Sum exemplar TraceId must be lowercase hex, got: " .. tostring(ex2.TraceId))
-    assert(ex2.SpanId == "00f067aa0ba902b7",
-           "Sum exemplar SpanId must be lowercase hex, got: " .. tostring(ex2.SpanId))
-    assert(ex2.TimeUnix == "2023-11-14T22:13:20.987654321Z",
-           "Sum exemplar TimeUnix ISO-8601 mismatch: " .. tostring(ex2.TimeUnix))
-    assert(ex2.Value == 10, "Sum exemplar Value mismatch: " .. tostring(ex2.Value))
-    assert(ex2.FilteredAttributes ~= nil and ex2.FilteredAttributes["protocol"] == "http")
+    assert(e2.Exemplars ==
+      '[{"FilteredAttributes":{"protocol":"http"},"TimeUnix":"2023-11-14T22:13:20.987654321Z","Value":10,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"}]',
+      "Sum exemplar mismatch: " .. tostring(e2.Exemplars))
 
     -- Event 3: Histogram exemplar with binary IDs
     local e3 = emitted[3].log
     assert(e3.MetricName == "dur_hist")
-    assert(type(e3.Exemplars) == "table" and #e3.Exemplars == 1)
-    local ex3 = e3.Exemplars[1]
-    assert(ex3.TraceId == "0123456789abcdef0123456789abcdef",
-           "Hist exemplar TraceId must be 32 lowercase hex chars, got: " .. tostring(ex3.TraceId))
-    assert(ex3.SpanId == "0123456789abcdef",
-           "Hist exemplar SpanId must be 16 lowercase hex chars, got: " .. tostring(ex3.SpanId))
-    assert(ex3.TimeUnix == "2023-11-14T22:13:20.555555555Z",
-           "Hist exemplar TimeUnix mismatch: " .. tostring(ex3.TimeUnix))
-    assert(math.abs(ex3.Value - 1.5) < 0.001, "Hist exemplar Value mismatch")
-    assert(ex3.FilteredAttributes ~= nil, "Hist exemplar FilteredAttributes must be a table")
+    assert(e3.Exemplars ==
+      '[{"FilteredAttributes":{},"TimeUnix":"2023-11-14T22:13:20.555555555Z","Value":1.5,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]',
+      "Hist exemplar mismatch: " .. tostring(e3.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
 TEST_F(MetricsExtractorTest, TableModeAbsentExemplarsRetainsEmptyTableContract) {
-  // Test Table mode: absent exemplars field or empty exemplars array emits an empty table {}
-  // matching the existing contract.
+  // Test Table mode: absent exemplars field or empty exemplars array emits "[]"
   ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
   const char* script = R"(
     return {
@@ -2256,15 +2192,11 @@ TEST_F(MetricsExtractorTest, TableModeAbsentExemplarsRetainsEmptyTableContract) 
     assert(#emitted == 2)
     local e1 = emitted[1].log
     assert(e1.MetricName == "gauge_no_ex")
-    assert(e1.Exemplars ~= nil, "Exemplars table must not be nil when absent")
-    assert(type(e1.Exemplars) == "table", "Exemplars must be a table")
-    assert(#e1.Exemplars == 0, "Exemplars must be empty array")
+    assert(e1.Exemplars == "[]", "Exemplars must be '[]' when absent, got: " .. tostring(e1.Exemplars))
 
     local e2 = emitted[2].log
     assert(e2.MetricName == "sum_empty_ex")
-    assert(e2.Exemplars ~= nil, "Exemplars table must not be nil when empty")
-    assert(type(e2.Exemplars) == "table", "Exemplars must be a table")
-    assert(#e2.Exemplars == 0, "Exemplars must be empty array")
+    assert(e2.Exemplars == "[]", "Exemplars must be '[]' when empty, got: " .. tostring(e2.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2298,9 +2230,9 @@ TEST_F(MetricsExtractorTest, ExemplarMissingTraceIdAndSpanIdEmitEmptyString) {
 
   const char* verify_json = R"(
     assert(#emitted == 1)
-    local ex = emitted[1].log.Exemplars[1]
-    assert(ex.TraceId == "", "Missing TraceId must be empty string in JSON mode, got: " .. tostring(ex.TraceId))
-    assert(ex.SpanId == "", "Missing SpanId must be empty string in JSON mode, got: " .. tostring(ex.SpanId))
+    assert(emitted[1].log.Exemplars ==
+      '[{"FilteredAttributes":{},"TimeUnix":"2023-11-14T22:13:20.111111111Z","Value":1,"SpanId":"","TraceId":""}]',
+      "JSON mode Exemplars mismatch: " .. tostring(emitted[1].log.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_json), LUA_OK) << lua_tostring(L_, -1);
 
@@ -2348,9 +2280,9 @@ TEST_F(MetricsExtractorTest, ExemplarMissingTraceIdAndSpanIdEmitEmptyString) {
 
   const char* verify_table = R"(
     assert(#emitted == 1)
-    local ex = emitted[1].log.Exemplars[1]
-    assert(ex.TraceId == "", "Missing TraceId must be empty string in Table mode, got: " .. tostring(ex.TraceId))
-    assert(ex.SpanId == "", "Missing SpanId must be empty string in Table mode, got: " .. tostring(ex.SpanId))
+    assert(emitted[1].log.Exemplars ==
+      '[{"FilteredAttributes":{},"TimeUnix":"2023-11-14T22:13:20.222222222Z","Value":2,"SpanId":"","TraceId":""}]',
+      "Table mode Exemplars mismatch: " .. tostring(emitted[1].log.Exemplars))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_table), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2410,12 +2342,12 @@ TEST_F(MetricsExtractorTest, MetricAttributesNotAlteredByIdNormalization) {
   const char* verify_script = R"(
     assert(#emitted == 1)
     local r = emitted[1].log
-    assert(r.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
-           "ResourceAttributes string must not be altered")
-    assert(r.ScopeAttributes["scope.exact_16"] == "1234567812345678",
-           "ScopeAttributes string must not be altered")
-    assert(r.Attributes["dp.raw_upper"] == "UPPERCASE_AND_HEX_4BF9",
-           "DataPoint Attributes string must not be altered")
+    assert(r.ResourceAttributes:find('"res.hex":"4BF92F3577B34DA6A3CE929D0E0E4736"', 1, true) ~= nil,
+           "ResourceAttributes string must not be altered: " .. tostring(r.ResourceAttributes))
+    assert(r.ScopeAttributes == '{"scope.exact_16":"1234567812345678"}',
+           "ScopeAttributes string must not be altered: " .. tostring(r.ScopeAttributes))
+    assert(r.Attributes == '{"dp.raw_upper":"UPPERCASE_AND_HEX_4BF9"}',
+           "DataPoint Attributes string must not be altered: " .. tostring(r.Attributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }

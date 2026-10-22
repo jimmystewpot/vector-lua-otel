@@ -10,11 +10,13 @@ namespace vector_otel::core {
 FastJsonWriter::FastJsonWriter() {
   buffer_.reserve(4096);
   stack_.reserve(32);
+  fields_.reserve(64);
 }
 
 void FastJsonWriter::Reset() {
   buffer_.clear();
   stack_.clear();
+  fields_.clear();
 }
 
 void FastJsonWriter::Trim() noexcept {
@@ -32,6 +34,14 @@ void FastJsonWriter::Trim() noexcept {
     std::vector<ContainerState>().swap(stack_);
     try {
       stack_.reserve(32);
+    } catch (...) {
+    }
+  }
+  fields_.clear();
+  if (fields_.capacity() > 1024) {
+    std::vector<ObjectField>().swap(fields_);
+    try {
+      fields_.reserve(64);
     } catch (...) {
     }
   }
@@ -105,11 +115,12 @@ void FastJsonWriter::WriteEscapedString(std::string_view sv) {
 void FastJsonWriter::StartObject() {
   BeforeValue();
   buffer_.push_back('{');
-  stack_.push_back({ContainerType::kObject, true});
+  stack_.push_back({ContainerType::kObject, true, fields_.size()});
 }
 
 void FastJsonWriter::EndObject() {
   if (!stack_.empty() && stack_.back().type == ContainerType::kObject) [[likely]] {
+    fields_.resize(stack_.back().fields_start);
     stack_.pop_back();
   }
   buffer_.push_back('}');
@@ -118,7 +129,7 @@ void FastJsonWriter::EndObject() {
 void FastJsonWriter::StartArray() {
   BeforeValue();
   buffer_.push_back('[');
-  stack_.push_back({ContainerType::kArray, true});
+  stack_.push_back({ContainerType::kArray, true, fields_.size()});
 }
 
 void FastJsonWriter::EndArray() {
@@ -130,10 +141,44 @@ void FastJsonWriter::EndArray() {
 
 void FastJsonWriter::Key(std::string_view key) {
   if (!stack_.empty() && stack_.back().type == ContainerType::kObject) [[likely]] {
-    if (!stack_.back().empty) {
+    auto& top = stack_.back();
+    if (!top.empty) {
+      if (fields_.size() > top.fields_start) [[likely]] {
+        fields_.back().entry_end = buffer_.size();
+      }
       buffer_.push_back(',');
     }
-    stack_.back().empty = false;
+    top.empty = false;
+
+    size_t new_key_start = buffer_.size();
+    WriteEscapedString(key);
+    size_t new_key_end = buffer_.size();
+    const std::string_view new_escaped_key(buffer_.data() + new_key_start,
+                                           new_key_end - new_key_start);
+
+    for (size_t i = top.fields_start; i < fields_.size(); ++i) {
+      const auto& f = fields_[i];
+      const std::string_view existing_key(buffer_.data() + f.entry_start,
+                                          f.key_end - f.entry_start);
+      if (existing_key == new_escaped_key) [[unlikely]] {
+        const size_t erase_pos = (i == top.fields_start) ? f.entry_start : (f.entry_start - 1);
+        const size_t delta = (f.entry_end - f.entry_start) + 1;
+        buffer_.erase(erase_pos, delta);
+        fields_.erase(fields_.begin() + static_cast<std::ptrdiff_t>(i));
+        for (size_t j = i; j < fields_.size(); ++j) {
+          fields_[j].entry_start -= delta;
+          fields_[j].key_end -= delta;
+          fields_[j].entry_end -= delta;
+        }
+        new_key_start -= delta;
+        new_key_end -= delta;
+        break;
+      }
+    }
+
+    buffer_.push_back(':');
+    fields_.push_back({new_key_start, new_key_end, 0});
+    return;
   }
   WriteEscapedString(key);
   buffer_.push_back(':');

@@ -39,7 +39,7 @@ static int MockEmit(lua_State* L) {
 
 // Exemplars are staged straight into the emitted row now, so there is no standalone "push" helper.
 // Runs a one-point gauge carrying `raw_idx` as its exemplars through ProcessMetricsTable and leaves
-// the emitted row's Exemplars table on top of the stack.
+// the emitted row's Exemplars JSON string on top of the stack.
 void PushExemplarsViaMetrics(lua_State* L, int raw_idx) {
   lua_pushvalue(L, raw_idx);
   lua_setglobal(L, "__ex_input");
@@ -1230,23 +1230,25 @@ TEST_F(TableModeTest, MetricsHistogramAndSummaryDataPoints) {
 
   ASSERT_EQ(luaL_dostring(L_, R"(
     assert(#emitted_metrics == 4, "expected 4 events, got " .. #emitted_metrics)
+    local h1 = emitted_metrics[1].log
+    assert(h1.Histogram ==
+      '{"aggregationTemporality":2,"count":100,"sum":5250,"min":1.2,"max":250,"bucketCounts":[10,30,40,15,5],"explicitBounds":[5,25,50,100]}',
+      "h1.Histogram mismatch: " .. tostring(h1.Histogram))
+    assert(h1.Attributes == '{"http.status_code":200}')
+    assert(h1.Exemplars ==
+      '[{"FilteredAttributes":{},"TimeUnix":"2023-11-14T22:13:20.100000000Z","Value":45.2,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]')
+
     local s = emitted_metrics[3].log.Summary
-    assert(s ~= nil, "Summary sub-table missing")
-    assert(s.count == 42 and s.Count == 42)
-    assert(math.abs(s.sum - 840.5) < 0.001 and math.abs(s.Sum - 840.5) < 0.001)
-    assert(#s.quantileValues == 2)
-    assert(math.abs(s.quantileValues[1].quantile - 0.5) < 0.001)
-    assert(math.abs(s.quantileValues[1].value - 10.0) < 0.001)
+    assert(s ==
+      '{"count":42,"sum":840.5,"quantileValues":[{"quantile":0.5,"value":10},{"quantile":0.99,"value":120}]}',
+      "Summary mismatch: " .. tostring(s))
+    assert(emitted_metrics[3].log.Attributes == '{"rpc.method":"GetUser"}')
 
     local eh = emitted_metrics[4].log.ExponentialHistogram
-    assert(eh ~= nil, "ExponentialHistogram sub-table missing")
     assert(emitted_metrics[4].log.AggregationTemporality == 1)
-    assert(eh.aggregationTemporality == 1 and eh.AggregationTemporality == 1)
-    assert(eh.count == 15 and eh.Count == 15)
-    assert(eh.scale == -1 and eh.Scale == -1)
-    assert(eh.zeroCount == 2 and eh.ZeroCount == 2)
-    assert(eh.positive.offset == -2 and #eh.positive.bucketCounts == 3)
-    assert(eh.negative.offset == 0 and #eh.negative.bucketCounts == 0)
+    assert(eh ==
+      '{"aggregationTemporality":1,"count":15,"sum":75.5,"scale":-1,"zeroCount":2,"zeroThreshold":0,"positive":{"offset":-2,"bucketCounts":[3,5,5]},"negative":{"offset":0,"bucketCounts":[]}}',
+      "ExponentialHistogram mismatch: " .. tostring(eh))
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
@@ -1828,32 +1830,8 @@ TEST_F(TableModeTest, AttributeIntAndDoubleValueStrictness) {
   lua_rawgeti(L_, -1, 1);
   lua_getfield(L_, -1, "log");
   lua_getfield(L_, -1, "LogAttributes");
-  ASSERT_TRUE(lua_istable(L_, -1));
-  int attrs_idx = lua_gettop(L_);
-
-  lua_getfield(L_, attrs_idx, "a");
-  EXPECT_EQ(lua_tointeger(L_, -1), 0);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "b");
-  EXPECT_EQ(lua_tointeger(L_, -1), 7);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "c");
-  EXPECT_EQ(lua_tointeger(L_, -1), 0);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "d");
-  EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 0.0);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "e");
-  EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 2.5);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "arr");
-  EXPECT_STREQ(lua_tostring(L_, -1), "[0,7,0,0,2.5]");
-  lua_pop(L_, 1);
+  ASSERT_EQ(lua_type(L_, -1), LUA_TSTRING);
+  EXPECT_STREQ(lua_tostring(L_, -1), R"({"a":0,"b":7,"c":0,"d":0,"e":2.5,"arr":[0,7,0,0,2.5]})");
 
   lua_pop(L_, 4);  // pop LogAttributes, log, emitted[1], emitted
 }
@@ -2045,6 +2023,9 @@ TEST_F(TableModeTest, TableModeLogsStringsSurviveInputMutationInEmit) {
       assert(r.ServiceName == string.rep("S", 80), "ServiceName " .. i .. ": " .. tostring(r.ServiceName))
       assert(r.ScopeName == string.rep("N", 80), "ScopeName " .. i .. ": " .. tostring(r.ScopeName))
       assert(r.ScopeVersion == string.rep("V", 80), "ScopeVersion " .. i .. ": " .. tostring(r.ScopeVersion))
+      assert(type(r.ResourceAttributes) == "string", "ResourceAttributes must be string")
+      assert(type(r.ScopeAttributes) == "string", "ScopeAttributes must be string")
+      assert(type(r.LogAttributes) == "string", "LogAttributes must be string")
     end
   )"),
             LUA_OK)
@@ -2092,6 +2073,8 @@ TEST_F(TableModeTest, TableModeTracesStringsSurviveInputMutationInEmit) {
       assert(r.ServiceName == string.rep("S", 80), "ServiceName " .. i .. ": " .. tostring(r.ServiceName))
       assert(r.ScopeName == string.rep("N", 80), "ScopeName " .. i .. ": " .. tostring(r.ScopeName))
       assert(r.ScopeVersion == string.rep("V", 80), "ScopeVersion " .. i .. ": " .. tostring(r.ScopeVersion))
+      assert(type(r.ResourceAttributes) == "string", "ResourceAttributes must be string")
+      assert(type(r.SpanAttributes) == "string", "SpanAttributes must be string")
     end
   )"),
             LUA_OK)
@@ -2150,6 +2133,10 @@ TEST_F(TableModeTest, TableModeMetricStringsSurviveInputMutationInEmit) {
       assert(r.MetricName == string.rep("M", 80), "MetricName " .. i .. ": " .. tostring(r.MetricName))
       assert(r.MetricDescription == string.rep("D", 80), "MetricDescription " .. i)
       assert(r.MetricUnit == string.rep("U", 80), "MetricUnit " .. i)
+      assert(type(r.ResourceAttributes) == "string" and r.ResourceAttributes:find('"service.name":"' .. string.rep("S", 80) .. '"', 1, true) ~= nil)
+      assert(r.ScopeAttributes == "{}")
+      assert(r.Attributes == "{}")
+      assert(r.Exemplars == "[]")
     end
   )"),
             LUA_OK)
@@ -2458,40 +2445,17 @@ TEST_F(TableModeTest, PushTableExemplarsNormalization) {
   PushExemplarsViaMetrics(L_, raw_idx);
   int norm_idx = lua_gettop(L_);
 
-  // Verify result is a table of 3 elements
-  ASSERT_TRUE(lua_istable(L_, norm_idx));
-  lua_setglobal(L_, "norm_exemplars");
-  lua_pop(L_, 1);  // pop raw_exemplars
-
-  ASSERT_EQ(luaL_dostring(L_, R"(
-    assert(#norm_exemplars == 3, "expected 3 exemplars, got " .. #norm_exemplars)
-    local e1 = norm_exemplars[1]
-    assert(e1.TimeUnix == "2023-11-14T22:13:20.123456789Z",
-           "e1 TimeUnix mismatch: " .. tostring(e1.TimeUnix))
-    assert(e1.TraceId == "000102030405060708090a0b0c0d0e0f",
-           "e1 TraceId mismatch: " .. tostring(e1.TraceId))
-    assert(e1.SpanId == "00f067aa0ba902b7", "e1 SpanId mismatch: " .. tostring(e1.SpanId))
-    assert(math.abs(e1.Value - 3.1415) < 0.0001, "e1 Value mismatch: " .. tostring(e1.Value))
-    assert(e1.FilteredAttributes.region == "us-east-1", "e1 FilteredAttributes mismatch")
-
-    local e2 = norm_exemplars[2]
-    assert(e2.TimeUnix == "2024-01-01T00:00:00.000000000Z",
-           "e2 TimeUnix mismatch: " .. tostring(e2.TimeUnix))
-    assert(e2.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
-           "e2 TraceId mismatch: " .. tostring(e2.TraceId))
-    assert(e2.SpanId == "00f067aa0ba902b7", "e2 SpanId mismatch: " .. tostring(e2.SpanId))
-    assert(e2.Value == 999, "e2 Value mismatch: " .. tostring(e2.Value))
-    assert(e2.FilteredAttributes.zone == "zone-a", "e2 FilteredAttributes mismatch")
-
-    local e3 = norm_exemplars[3]
-    assert(e3.TimeUnix == "", "e3 TimeUnix mismatch: " .. tostring(e3.TimeUnix))
-    assert(e3.TraceId == "", "e3 TraceId mismatch: " .. tostring(e3.TraceId))
-    assert(e3.SpanId == "", "e3 SpanId mismatch: " .. tostring(e3.SpanId))
-    assert(math.abs(e3.Value - 42.5) < 0.0001, "e3 Value mismatch: " .. tostring(e3.Value))
-    assert(type(e3.FilteredAttributes) == "table", "e3 FilteredAttributes must be table")
-  )"),
-            LUA_OK)
-      << lua_tostring(L_, -1);
+  // The row carries exemplars as one deterministic JSON string.
+  ASSERT_EQ(lua_type(L_, norm_idx), LUA_TSTRING);
+  const std::string_view exemplars_json(lua_tostring(L_, norm_idx));
+  EXPECT_EQ(
+      exemplars_json,
+      R"([{"FilteredAttributes":{"region":"us-east-1"},"TimeUnix":"2023-11-14T22:13:20.123456789Z",)"
+      R"("Value":3.1415,"SpanId":"00f067aa0ba902b7","TraceId":"000102030405060708090a0b0c0d0e0f"},)"
+      R"({"FilteredAttributes":{"zone":"zone-a"},"TimeUnix":"2024-01-01T00:00:00.000000000Z",)"
+      R"("Value":999,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"},)"
+      R"({"FilteredAttributes":{},"TimeUnix":"","Value":42.5,"SpanId":"","TraceId":""}])");
+  lua_pop(L_, 2);  // pop the string and raw_exemplars
 }
 
 TEST_F(TableModeTest, StackSafetyCheck) {
@@ -2545,18 +2509,12 @@ TEST_F(TableModeTest, StackSafetyCheck) {
   lua_pop(L_, 1);
   EXPECT_EQ(lua_gettop(L_), before_links);
 
-  // StageTableExemplars: leaves the stack unchanged
-  {
-    core::StagedRow ex_row;
-    ex_row.Reset();
-    int before_ex = lua_gettop(L_);
-    EXPECT_TRUE(core::GetTableField(L_, t_idx, "exemplars"));
-    const int ex_idx = lua_gettop(L_);
-    core::StageTableExemplars(ex_row, "exemplars", L_, ex_idx, writer);
-    EXPECT_EQ(lua_gettop(L_), ex_idx);
-    lua_pop(L_, 1);
-    EXPECT_EQ(lua_gettop(L_), before_ex);
-  }
+  // SerializeTableExemplarsToJson: stack top balanced
+  int before_ex = lua_gettop(L_);
+  EXPECT_TRUE(core::GetTableField(L_, t_idx, "exemplars"));
+  core::SerializeTableExemplarsToJson(L_, -1, writer);
+  lua_pop(L_, 1);
+  EXPECT_EQ(lua_gettop(L_), before_ex);
 
   lua_pop(L_, 1);  // pop table_sample
 }
@@ -2648,7 +2606,17 @@ TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
   )"),
             LUA_OK);
   PushExemplarsViaMetrics(L_, lua_gettop(L_));
-  EXPECT_EQ(lua_rawlen(L_, -1), 3U);
+  {
+    // Non-table entries are skipped; the three table entries each become one JSON object.
+    ASSERT_EQ(lua_type(L_, -1), LUA_TSTRING);
+    const std::string_view json(lua_tostring(L_, -1));
+    size_t objects = 0;
+    for (size_t pos = json.find(R"({"FilteredAttributes")"); pos != std::string_view::npos;
+         pos = json.find(R"({"FilteredAttributes")", pos + 1)) {
+      ++objects;
+    }
+    EXPECT_EQ(objects, 3U) << json;
+  }
   lua_pop(L_, 2);
 
   // 3. JSON mode: ProcessTraces with uintValue in event/link attributes, ProcessLogs with string
@@ -2720,9 +2688,11 @@ TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
     local t1 = collected_events[1].log
     assert(t1.SpanKind == "SPAN_KIND_SERVER", "SpanKind mismatch: " .. tostring(t1.SpanKind))
     assert(t1.StatusCode == "STATUS_CODE_OK", "StatusCode mismatch: " .. tostring(t1.StatusCode))
-    assert(t1.ResourceAttributes.u1 == 42)
-    assert(t1.ResourceAttributes.u2 == 9223372036854775807)
-    assert(string.find(t1.ResourceAttributes.nested, '"inner_u":77', 1, true) ~= nil)
+    assert(type(t1.ResourceAttributes) == "string", "ResourceAttributes must be string")
+    assert(string.find(t1.ResourceAttributes, '"u1":42', 1, true) ~= nil)
+    assert(string.find(t1.ResourceAttributes, '"u2":18446744073709551615', 1, true) ~= nil)
+    assert(string.find(t1.ResourceAttributes, '"nested":{"inner_u":77}', 1, true) ~= nil)
+    assert(t1.SpanAttributes == "{}")
     assert(string.find(t1.Events, '"ev_u":123', 1, true) ~= nil)
     assert(string.find(t1.Events, '"map_u":456', 1, true) ~= nil)
     assert(string.find(t1.Links, '"lk_u":789', 1, true) ~= nil)
@@ -2739,10 +2709,160 @@ TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
 
     local m1 = collected_events[5].log
     assert(m1.Value == nil, "invalid asInt must omit Value")
-    assert(m1.Exemplars[1].Value == nil, "invalid exemplar asInt must omit Value")
+    assert(m1.Exemplars == '[{"FilteredAttributes":{},"TimeUnix":"","SpanId":"","TraceId":""}]',
+           "invalid exemplar asInt must omit Value: " .. tostring(m1.Exemplars))
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
+}
+
+TEST_F(TableModeTest, WriteTableAttributesJson_CapturesServiceName) {
+  core::FastJsonWriter writer;
+
+  // 1. OTLP array-of-KeyValue: captures first valid string service.name
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { stringValue = "tbl-kv-svc" } },
+      { key = "env", value = { stringValue = "prod" } },
+      { key = "arr", value = { arrayValue = { values = { { stringValue = "x" }, { intValue = 2 } } } } }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc1 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc1);
+  EXPECT_EQ(svc1, "tbl-kv-svc");
+  EXPECT_EQ(writer.Str(), R"({"service.name":"tbl-kv-svc","env":"prod","arr":["x",2]})");
+  lua_pop(L_, 1);
+
+  // 2. Flat Lua map: captures service_name and prefers service.name when both exist
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      ["service.name"] = "dot-svc",
+      ["service_name"] = "snake-svc"
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc2 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc2);
+  EXPECT_EQ(svc2, "dot-svc");
+  lua_pop(L_, 1);
+
+  // 3. Non-string or empty service.name is ignored
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { intValue = 123 } },
+      { key = "service_name", value = "" }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc3 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc3);
+  EXPECT_EQ(svc3, "unknown_service");
+  EXPECT_EQ(writer.Str(), R"({"service.name":123,"service_name":""})");
+  lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest, SerializeTableExemplarsToJson_FullAndMalformed) {
+  core::FastJsonWriter writer;
+
+  // 1. Non-table and empty table serialize to "[]"
+  lua_pushstring(L_, "not_a_table");
+  writer.Reset();
+  core::SerializeTableExemplarsToJson(L_, -1, writer);
+  EXPECT_EQ(writer.Str(), "[]");
+  lua_pop(L_, 1);
+
+  lua_newtable(L_);
+  writer.Reset();
+  core::SerializeTableExemplarsToJson(L_, -1, writer);
+  EXPECT_EQ(writer.Str(), "[]");
+  lua_pop(L_, 1);
+
+  // 2. Full exemplars with binary IDs, asInt/asDouble/value, filteredAttributes, and non-table
+  // elements
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      "skip_non_table",
+      {
+        timeUnixNano = 1700000000123456789,
+        asInt = "99",
+        spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+        traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+        filteredAttributes = {
+          { key = "host", value = { stringValue = "n1" } }
+        }
+      },
+      {
+        TimeUnix = "2026-10-22T00:00:00.000000000Z",
+        asDouble = 2.5,
+        spanId = "00F067AA0BA902B7",
+        traceId = "4BF92F3577B34DA6A3CE929D0E0E4736"
+      },
+      {
+        value = "77",
+        asInt = "bad_int"
+      }
+    }
+  )"),
+            LUA_OK);
+  writer.Reset();
+  core::SerializeTableExemplarsToJson(L_, -1, writer);
+  EXPECT_EQ(
+      writer.Str(),
+      R"([{"FilteredAttributes":{"host":"n1"},"TimeUnix":"2023-11-14T22:13:20.123456789Z","Value":99,"SpanId":"00f067aa0ba902b7","TraceId":"000102030405060708090a0b0c0d0e0f"},{"FilteredAttributes":{},"TimeUnix":"2026-10-22T00:00:00.000000000Z","Value":2.5,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"},{"FilteredAttributes":{},"TimeUnix":"","Value":77,"SpanId":"","TraceId":""}])");
+  lua_pop(L_, 1);
+}
+
+TEST_F(TableModeTest, WriteTableAttributesJson_DeduplicatesAndPreservesMultiKeyAndDepth20Parity) {
+  core::FastJsonWriter writer;
+
+  // 1. Duplicate keys in OTLP KeyValue array, multi-key table with stringValue, and service.name
+  // precedence
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { stringValue = "canonical-svc" } },
+      { key = "service_name", value = { stringValue = "" } },
+      { key = "dup", value = { intValue = 1 } },
+      { key = "keep", value = { stringValue = "mid" } },
+      { key = "dup", value = { intValue = 2 } },
+      { key = "multi", value = { stringValue = "v", other = 1 } },
+      { key = "kv_dup", value = { kvlistValue = { values = {
+        { key = "x", value = { intValue = 10 } },
+        { key = "x", value = { intValue = 20 } }
+      } } } }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc);
+  EXPECT_EQ(svc, "canonical-svc");
+  std::string_view out = writer.Str();
+  EXPECT_EQ(out.find(R"("dup":1)"), std::string_view::npos) << out;
+  EXPECT_NE(out.find(R"("dup":2)"), std::string_view::npos) << out;
+  EXPECT_NE(out.find(R"("other":1)"), std::string_view::npos) << out;
+  EXPECT_NE(out.find(R"("stringValue":"v")"), std::string_view::npos) << out;
+  EXPECT_NE(out.find(R"("kv_dup":{"x":20})"), std::string_view::npos) << out;
+  lua_pop(L_, 1);
+
+  // 2. Depth-20 nested table must serialize without hitting [max_depth_exceeded] (matching JSON
+  // mode kMaxJsonDepth == 32)
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    local root = { leaf = "ok" }
+    for i = 1, 20 do
+      root = { n = root }
+    end
+    return { { key = "d20", value = root } }
+  )"),
+            LUA_OK);
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer);
+  EXPECT_EQ(writer.Str().find("[max_depth_exceeded]"), std::string_view::npos) << writer.Str();
+  EXPECT_NE(writer.Str().find(R"("leaf":"ok")"), std::string_view::npos) << writer.Str();
+  lua_pop(L_, 1);
 }
 
 TEST_F(TableModeTest, SerializeLuaValueToJsonEdgeCasesCoverage) {
@@ -2751,7 +2871,7 @@ TEST_F(TableModeTest, SerializeLuaValueToJsonEdgeCasesCoverage) {
   // 1. Max depth exceeded
   luaL_dostring(L_, "return { a = 1 }");
   writer.Reset();
-  core::SerializeLuaValueToJson(L_, -1, writer, 16);
+  core::SerializeLuaValueToJson(L_, -1, writer, 32);
   EXPECT_EQ(writer.Str(), "\"[max_depth_exceeded]\"");
   lua_pop(L_, 1);
 
@@ -2926,6 +3046,40 @@ TEST_F(TableModeTest, OtlpTableWrappersLogAndTraceAndMetric) {
   lua_pop(L_, 1);
   EXPECT_TRUE(res_m2.success) << res_m2.error;
   EXPECT_EQ(res_m2.emitted_count, 1);
+}
+
+TEST_F(TableModeTest,
+       WriteTableAttributesJson_RetainsSnakeCaseFallbackWhenDotServiceInvalidatedLater) {
+  core::FastJsonWriter writer;
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { stringValue = "first-dot-svc" } },
+      { key = "service_name", value = { stringValue = "fallback-snake-svc-longer-than-sso-buffer" } },
+      { key = "service.name", value = { stringValue = "" } }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc1 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc1);
+  EXPECT_EQ(svc1, "fallback-snake-svc-longer-than-sso-buffer");
+  lua_pop(L_, 1);
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { stringValue = "first-dot-svc" } },
+      { key = "service_name", value = { stringValue = "fallback-snake-svc" } },
+      { key = "service_name", value = { intValue = 1 } },
+      { key = "service.name", value = { intValue = 2 } }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc2 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc2);
+  EXPECT_EQ(svc2, "unknown_service");
+  lua_pop(L_, 1);
 }
 
 }  // namespace
