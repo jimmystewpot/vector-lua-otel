@@ -4,6 +4,8 @@ message MetricRecord {
   optional binary MetricUnit (STRING);
   required binary MetricType (STRING);
   required binary ServiceName (STRING);
+  optional int64 AggregationTemporality;
+  optional boolean IsMonotonic;
   optional binary ResourceAttributes (STRING);
   optional binary ScopeName (STRING);
   optional binary ScopeVersion (STRING);
@@ -13,6 +15,8 @@ message MetricRecord {
   required binary TimeUnix (STRING);
   optional double Value;
   optional binary Histogram (STRING);
+  optional binary ExponentialHistogram (STRING);
+  optional binary Summary (STRING);
   optional int64 Flags;
   optional binary Exemplars (STRING);
   required binary processed_at (STRING);

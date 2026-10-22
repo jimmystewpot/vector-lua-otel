@@ -353,7 +353,7 @@ sinks:
 > **Parquet Schema Definitions:** Production Parquet schema definitions aligned with OpenTelemetry ClickHouse schemas are located in [`schemas/parquet/`](schemas/parquet/):
 > - [`logs.schema`](schemas/parquet/logs.schema) — Canonical log records with exact 64-bit nanosecond timestamps
 > - [`traces.schema`](schemas/parquet/traces.schema) — Distributed trace spans and parent-child hierarchy
-> - [`metrics.schema`](schemas/parquet/metrics.schema) — Gauges, sums, histograms, and exemplars
+> - [`metrics.schema`](schemas/parquet/metrics.schema) — Gauges, sums, histograms, exponential histograms, summaries, and exemplars
 >
 > Sinks such as ClickHouse (`type = "clickhouse"`) and Kafka (`type = "kafka"`) are also fully supported.
 
@@ -547,8 +547,10 @@ All extracted columns are aligned with canonical OpenTelemetry ClickHouse export
 | `MetricName` | `string` | `metric.name` | Metric name |
 | `MetricDescription` | `string` | `metric.description` | Metric description |
 | `MetricUnit` | `string` | `metric.unit` | Metric unit of measurement |
-| `MetricType` | `string` | Data point type | Discriminator: `"gauge"`, `"sum"`, `"histogram"`, `"summary"` |
+| `MetricType` | `string` | Data point type | Discriminator: `"gauge"`, `"sum"`, `"histogram"`, `"exponential_histogram"`, `"summary"` |
 | `ServiceName` | `string` | `resource.attributes["service.name"]` | Service name (defaults to `"unknown_service"`) |
+| `AggregationTemporality` | `integer` | `aggregationTemporality` | Aggregation temporality (`1` = DELTA, `2` = CUMULATIVE, `0` = UNSPECIFIED) for Sum / Histogram / ExponentialHistogram |
+| `IsMonotonic` | `boolean` | `sum.isMonotonic` | Monotonicity flag emitted for `"sum"` metrics when present |
 | `ResourceAttributes` | `table` | `resource.attributes` | Resource key-value attributes |
 | `ScopeName` | `string` | `scope.name` | Instrumentation scope name |
 | `ScopeVersion` | `string` | `scope.version` | Instrumentation scope version |
@@ -556,8 +558,10 @@ All extracted columns are aligned with canonical OpenTelemetry ClickHouse export
 | `Attributes` | `table` | `dataPoint.attributes` | Data point label dimensions |
 | `StartTimeUnix` | `string` | `dataPoint.startTimeUnixNano` | Metric start time (ISO-8601 UTC string) |
 | `TimeUnix` | `string` | `dataPoint.timeUnixNano` | Data point time (ISO-8601 UTC string) |
-| `Value` | `number` | `asDouble` / `asInt` | Metric value for Gauge / Sum (or null for Histogram) |
-| `Histogram` | `table` | `dataPoint` (Histogram) | `{ count, sum, min, max, bucketCounts, explicitBounds }` |
+| `Value` | `number` | `asDouble` / `asInt` / `value` | Metric value for Gauge / Sum (omitted / `nil` for Histogram, ExponentialHistogram, and Summary) |
+| `Histogram` | `table` | `dataPoint` (Histogram) | `{ aggregationTemporality, count, sum, min, max, bucketCounts, explicitBounds }` |
+| `ExponentialHistogram` | `table` | `dataPoint` (ExponentialHistogram) | `{ aggregationTemporality, count, sum, min, max, scale, zeroCount, zeroThreshold, positive = { offset, bucketCounts }, negative = { offset, bucketCounts } }` |
+| `Summary` | `table` | `dataPoint` (Summary) | `{ count, sum, quantileValues = [ { quantile, value }, ... ] }` |
 | `Flags` | `integer` | `flags` | Unsigned 32-bit flags |
 | `Exemplars` | `table` | `exemplars` | Array of `{ FilteredAttributes, TimeUnix, Value, SpanId, TraceId }` |
 | `processed_at` | `string` | `std::chrono::system_clock` | Transform ISO-8601 UTC nanosecond timestamp |
