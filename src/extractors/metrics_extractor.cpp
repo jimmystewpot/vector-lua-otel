@@ -48,6 +48,8 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
     size_t time_iso_len = 0;
     std::string_view span_id;
     std::string_view trace_id;
+    core::IdHexBuffer span_id_buf;
+    core::IdHexBuffer trace_id_buf;
     enum class ExValKind { kNone, kDouble, kInt64 } ex_val_kind = ExValKind::kNone;
     double ex_double_val = 0.0;
     int64_t ex_int_val = 0;
@@ -114,11 +116,13 @@ int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
     }
 
     // Set SpanId
-    lua_pushlstring(L, span_id.data(), span_id.size());
+    std::string_view norm_span_id = core::NormalizeSpanId(span_id, span_id_buf);
+    lua_pushlstring(L, norm_span_id.data(), norm_span_id.size());
     lua_setfield(L, -2, "SpanId");
 
     // Set TraceId
-    lua_pushlstring(L, trace_id.data(), trace_id.size());
+    std::string_view norm_trace_id = core::NormalizeTraceId(trace_id, trace_id_buf);
+    lua_pushlstring(L, norm_trace_id.data(), norm_trace_id.size());
     lua_setfield(L, -2, "TraceId");
 
     // Put into exemplars array table at ex_idx
@@ -888,7 +892,9 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
 
               emitter.SetInt64("Flags", core::ReadTableInt64(L, dp_obj_idx, "flags"));
 
-              if (core::GetTableField(L, dp_obj_idx, "exemplars")) {
+              if (core::GetTableField(L, dp_obj_idx, "exemplars", "Exemplars")) {
+                core::PushTableExemplars(L, -1, json_writer);
+                lua_remove(L, -2);  // remove raw input exemplars table
                 emitter.SetTableFromStack("Exemplars");
               } else {
                 lua_newtable(L);
