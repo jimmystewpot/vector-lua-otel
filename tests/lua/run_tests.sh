@@ -4,8 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# VECTOR_OTEL_BUILD_DIR selects an alternate build directory (default: <repo>/build).
-BUILD_DIR="${VECTOR_OTEL_BUILD_DIR:-${PROJECT_ROOT}/build}"
+# BUILD_DIR selects an alternate build directory (default: <repo>/build);
+# VECTOR_OTEL_BUILD_DIR is accepted as an alias.
+BUILD_DIR="${BUILD_DIR:-${VECTOR_OTEL_BUILD_DIR:-${PROJECT_ROOT}/build}}"
 export LUA_CPATH="${BUILD_DIR}/?.so;;"
 
 LUA_BIN="${LUA_BIN:-lua5.4}"

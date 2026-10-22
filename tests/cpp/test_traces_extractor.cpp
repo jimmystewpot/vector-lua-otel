@@ -2026,6 +2026,73 @@ TEST_F(TracesExtractorTest, AttributesStringsAreNotAlteredByNormalization) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(TracesExtractorTest, SnakeCaseJsonOtlpFieldsCoverage) {
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  std::string json = R"({
+    "resource_spans": [
+      {
+        "resource": {
+          "attributes": [
+            {"key": "service.name", "value": {"string_value": "snake-trace-svc"}}
+          ]
+        },
+        "scope_spans": [
+          {
+            "scope": {"name": "snake-tracer", "version": "3.0.0"},
+            "spans": [
+              {
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00f067aa0ba902b7",
+                "parent_span_id": "5fb397be34d23b0f",
+                "name": "snake_span",
+                "kind": 1,
+                "start_time_unix_nano": "1700000000000000000",
+                "end_time_unix_nano": "1700000000100000000",
+                "status": {"code": 1, "message": "snake ok"},
+                "events": [
+                  {
+                    "name": "ev_with_double",
+                    "timeUnixNano": "1700000000050000000",
+                    "attributes": [
+                      {"key": "pi", "value": {"doubleValue": 3.14159}},
+                      {"key": "cnt", "value": {"intValue": 42}}
+                    ]
+                  }
+                ],
+                "links": [
+                  {
+                    "traceId": "4bf92f3577b34da6a3ce929d0e0e4738",
+                    "spanId": "00f067aa0ba902b9",
+                    "attributes": [
+                      {"key": "ratio", "value": {"doubleValue": 0.75}}
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  })";
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.ServiceName == "snake-trace-svc")
+    assert(r.ScopeName == "snake-tracer")
+    assert(r.SpanName == "snake_span")
+    assert(r.StatusCode == "STATUS_CODE_OK")
+    assert(r.StatusMessage == "snake ok")
+    assert(r.Events:find("3.14159") ~= nil)
+    assert(r.Links:find("0.75") ~= nil)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel

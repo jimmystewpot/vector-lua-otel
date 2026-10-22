@@ -1397,6 +1397,1094 @@ TEST_F(NativeExtractorsTest, JsonWrapperRecognizedOuterFieldBeforeInnerAndNonZer
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(NativeExtractorsTest, NativeLogsNumericSeverityCodes) {
+  // Test numeric severity codes 1 to 24 and string severity name tokens
+  std::string json = R"([
+    {"message":"m1","severity_number":1,"severity_text":"TRACE"},
+    {"message":"m2","severity_number":"SEVERITY_NUMBER_DEBUG3"},
+    {"message":"m3","severity_number":9,"severity_text":"INFO"},
+    {"message":"m4","severity_number":13},
+    {"message":"m5","severity_number":17,"severity_text":"ERROR"},
+    {"message":"m6","severity_number":"SEVERITY_NUMBER_FATAL4"}
+  ])";
+  auto res = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 6);
+
+  const char* verify = R"(
+    assert(#emitted == 6, "Expected 6 emitted events, got " .. #emitted)
+    assert(emitted[1].log.SeverityNumber == 1, "m1 SeverityNumber mismatch")
+    assert(emitted[1].log.SeverityText == "TRACE", "m1 SeverityText mismatch")
+    assert(emitted[2].log.SeverityNumber == 7, "m2 SeverityNumber mismatch")
+    assert(emitted[3].log.SeverityNumber == 9, "m3 SeverityNumber mismatch")
+    assert(emitted[3].log.SeverityText == "INFO", "m3 SeverityText mismatch")
+    assert(emitted[4].log.SeverityNumber == 13, "m4 SeverityNumber mismatch")
+    assert(emitted[5].log.SeverityNumber == 17, "m5 SeverityNumber mismatch")
+    assert(emitted[5].log.SeverityText == "ERROR", "m5 SeverityText mismatch")
+    assert(emitted[6].log.SeverityNumber == 24, "m6 SeverityNumber mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsArrayWrapperJsonAndTable) {
+  // 1. JSON array wrapper: {"log":
+  // [{"message":"m1","severity_number":9},{"message":"m2","severity_number":13}]}
+  std::string json_wrapped =
+      R"({"log":[{"message":"m1","severity_number":9},{"message":"m2","severity_number":13}]})";
+  auto res1 = ProcessNativeLogs(L_, json_wrapped, emit_idx_);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 2);
+
+  // 2. Table array wrapper: { log = { { message = "m3" }, { message = "m4" } } }
+  const char* script = R"(
+    return {
+      log = {
+        { message = "m3", severity_number = 5 },
+        { message = "m4", severity_number = 17 }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 2);
+
+  const char* verify = R"(
+    assert(#emitted == 4, "Expected 4 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Body == "m1", "m1 Body mismatch")
+    assert(emitted[2].log.Body == "m2", "m2 Body mismatch")
+    assert(emitted[3].log.Body == "m3", "m3 Body mismatch")
+    assert(emitted[4].log.Body == "m4", "m4 Body mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsTimestampFallbackToProcessedAt) {
+  // When no timestamps are provided, fall back to processed_at (ISO-8601 UTC nano)
+  const char* script = R"(
+    return {
+      message = "pure fallback record"
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  std::string json = R"({"message":"json fallback"})";
+  auto res2 = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 2, "Expected 2 emitted events, got " .. #emitted)
+    local r1 = emitted[1].log
+    assert(r1.Timestamp ~= nil and #r1.Timestamp == 30, "r1.Timestamp missing or invalid: " .. tostring(r1.Timestamp))
+    assert(r1.Timestamp == r1.processed_at, "r1.Timestamp must match processed_at")
+
+    local r2 = emitted[2].log
+    assert(r2.Timestamp ~= nil and #r2.Timestamp == 30, "r2.Timestamp missing or invalid: " .. tostring(r2.Timestamp))
+    assert(r2.Timestamp == r2.processed_at, "r2.Timestamp must match processed_at")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsBodyFormatsAndScopeJson) {
+  // Test body stringValue in table mode and scope_schema_url in JSON mode
+  const char* script = R"(
+    return {
+      body = { stringValue = "nested string value" },
+      scope = { schema_url = "https://schemas.example.com/scope" }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  std::string json = R"({
+    "message": "scoped log",
+    "scope": {
+      "name": "my-logger",
+      "version": "2.0.0",
+      "schema_url": "https://opentelemetry.io/schemas/scope-v2"
+    },
+    "resource_schema_url": "https://opentelemetry.io/schemas/resource-v2",
+    "trace_flags": 1,
+    "event_name": "custom.log.event"
+  })";
+  auto res2 = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  std::string json_bodies = R"([
+    {"body": {"stringValue": "json stringValue"}},
+    {"body": null},
+    {"body": {"complex": true}}
+  ])";
+  auto res3 = ProcessNativeLogs(L_, json_bodies, emit_idx_);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 3);
+
+  const char* verify = R"(
+    assert(#emitted == 5, "Expected 5 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Body == "nested string value", "Table stringValue Body mismatch: " .. tostring(emitted[1].log.Body))
+    assert(emitted[1].log.ScopeSchemaUrl == "https://schemas.example.com/scope", "ScopeSchemaUrl mismatch")
+
+    local r2 = emitted[2].log
+    assert(r2.ScopeName == "my-logger", "ScopeName mismatch")
+    assert(r2.ScopeVersion == "2.0.0", "ScopeVersion mismatch")
+    assert(r2.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope-v2", "ScopeSchemaUrl mismatch")
+    assert(r2.ResourceSchemaUrl == "https://opentelemetry.io/schemas/resource-v2", "ResourceSchemaUrl mismatch")
+    assert(r2.TraceFlags == 1, "TraceFlags mismatch")
+    assert(r2.EventName == "custom.log.event", "EventName mismatch")
+
+    assert(emitted[3].log.Body == "json stringValue", "r3 Body mismatch: " .. tostring(emitted[3].log.Body))
+    assert(emitted[4].log.Body == "", "r4 Body mismatch: " .. tostring(emitted[4].log.Body))
+    assert(emitted[5].log.Body == '{"complex":true}', "r5 Body mismatch: " .. tostring(emitted[5].log.Body))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, TracesStatusCodesAndMessages) {
+  // Test numeric and string status codes, status message fields, and span kinds
+  std::string json = R"([
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "name": "span-ok",
+      "kind": 1,
+      "status": {"code": 1, "message": "everything ok"}
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b8",
+      "name": "span-err",
+      "kind": "PRODUCER",
+      "status_code": "STATUS_CODE_ERROR",
+      "status_message": "failed to connect"
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b9",
+      "name": "span-client",
+      "kind": "client",
+      "status_code": 0
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902ba",
+      "name": "span-consumer",
+      "kind": "consumer"
+    }
+  ])";
+  auto res = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 4);
+
+  // Also test table mode with status table and kind strings/numbers
+  const char* script = R"(
+    return {
+      {
+        trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+        span_id = "00f067aa0ba902bb",
+        name = "tbl-span-ok",
+        kind = "SPAN_KIND_INTERNAL",
+        status = { code = "STATUS_CODE_OK", message = "table ok" }
+      },
+      {
+        trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+        span_id = "00f067aa0ba902bc",
+        name = "tbl-span-err",
+        kind = 4,
+        status = { code = 2, message = "table err" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeTracesTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 2);
+
+  const char* verify = R"(
+    assert(#emitted == 6, "Expected 6 emitted events, got " .. #emitted)
+    assert(emitted[1].log.StatusCode == "STATUS_CODE_OK", "s1 StatusCode mismatch")
+    assert(emitted[1].log.StatusMessage == "everything ok", "s1 StatusMessage mismatch")
+    assert(emitted[1].log.SpanKind == "SPAN_KIND_INTERNAL", "s1 SpanKind mismatch")
+
+    assert(emitted[2].log.StatusCode == "STATUS_CODE_ERROR", "s2 StatusCode mismatch")
+    assert(emitted[2].log.StatusMessage == "failed to connect", "s2 StatusMessage mismatch")
+    assert(emitted[2].log.SpanKind == "SPAN_KIND_PRODUCER", "s2 SpanKind mismatch")
+
+    assert(emitted[3].log.StatusCode == "STATUS_CODE_UNSET", "s3 StatusCode mismatch")
+    assert(emitted[3].log.SpanKind == "SPAN_KIND_CLIENT", "s3 SpanKind mismatch")
+
+    assert(emitted[4].log.SpanKind == "SPAN_KIND_CONSUMER", "s4 SpanKind mismatch")
+
+    assert(emitted[5].log.StatusCode == "STATUS_CODE_OK", "s5 StatusCode mismatch")
+    assert(emitted[5].log.StatusMessage == "table ok", "s5 StatusMessage mismatch")
+    assert(emitted[5].log.SpanKind == "SPAN_KIND_INTERNAL", "s5 SpanKind mismatch")
+
+    assert(emitted[6].log.StatusCode == "STATUS_CODE_ERROR", "s6 StatusCode mismatch")
+    assert(emitted[6].log.StatusMessage == "table err", "s6 StatusMessage mismatch")
+    assert(emitted[6].log.SpanKind == "SPAN_KIND_PRODUCER", "s6 SpanKind mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, TracesSpanEventsAndLinksAttributes) {
+  // Test spans containing events and links with various attribute types
+  std::string json = R"({
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "name": "span-events-links",
+    "events": [
+      {
+        "name": "cache_lookup",
+        "time_unix_nano": 1729598400000000000,
+        "attributes": {
+          "hit": {"boolValue": true},
+          "keys": {"intValue": 42},
+          "score": {"doubleValue": 99.5},
+          "msg": {"stringValue": "found"}
+        }
+      }
+    ],
+    "links": [
+      {
+        "trace_id": "5b8efff798038103d269b633813fc60c",
+        "span_id": "eee19b7ec3c1b174",
+        "attributes": {
+          "relation": "parent_context"
+        }
+      }
+    ]
+  })";
+  auto res = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 1, "Expected 1 emitted event")
+    local r = emitted[1].log
+    assert(type(r.Events) == "string", "Events must be a string")
+    assert(r.Events:find("cache_lookup") ~= nil, "Events must contain cache_lookup")
+    assert(r.Events:find('"hit":true') ~= nil, "Events must contain hit:true")
+    assert(r.Events:find('"keys":42') ~= nil, "Events must contain keys:42")
+    assert(r.Events:find('"msg":"found"') ~= nil, "Events must contain msg:found")
+
+    assert(type(r.Links) == "string", "Links must be a string")
+    assert(r.Links:find("5b8efff798038103d269b633813fc60c") ~= nil, "Links must contain trace_id")
+    assert(r.Links:find("eee19b7ec3c1b174") ~= nil, "Links must contain span_id")
+    assert(r.Links:find('"relation":"parent_context"') ~= nil, "Links must contain relation:parent_context")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+
+  // Also test table mode events and links serialization
+  const char* script = R"(
+    return {
+      trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+      span_id = "00f067aa0ba902b7",
+      name = "table-events-links",
+      resources = {
+        attributes = {
+          ["service.name"] = "nested-svc"
+        }
+      },
+      events = {
+        {
+          name = "tbl_event",
+          timestamp = "2026-10-22T10:00:00.000000000Z",
+          attributes = {
+            num_k = 100,
+            str_k = "v",
+            [123] = "numeric_key_val"
+          }
+        }
+      },
+      links = {
+        {
+          trace_id = "5b8efff798038103d269b633813fc60c",
+          span_id = "eee19b7ec3c1b174",
+          trace_state = "congo=t61rcWkgMzE",
+          attributes = {
+            link_k = "link_v"
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeTracesTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  const char* verify_tbl = R"(
+    assert(#emitted == 2, "Expected 2 emitted events, got " .. #emitted)
+    local r2 = emitted[2].log
+    assert(r2.ServiceName == "nested-svc", "Nested service name mismatch: " .. tostring(r2.ServiceName))
+    assert(type(r2.Events) == "string", "r2.Events must be string")
+    assert(r2.Events:find("tbl_event") ~= nil, "r2.Events missing tbl_event")
+    assert(r2.Events:find("numeric_key_val") ~= nil, "r2.Events missing numeric key value")
+    assert(type(r2.Links) == "string", "r2.Links must be string")
+    assert(r2.Links:find("congo=t61rcWkgMzE") ~= nil, "r2.Links missing trace state")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_tbl), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, TracesArrayWrapperBatch) {
+  // Test JSON array wrapper {"trace": [ ... ]}
+  std::string json_wrapped = R"({
+    "trace": [
+      {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b1",
+        "name": "wrapped-span-1"
+      },
+      {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b2",
+        "name": "wrapped-span-2"
+      }
+    ]
+  })";
+  auto res = ProcessNativeTraces(L_, json_wrapped, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify = R"(
+    assert(#emitted == 2, "Expected 2 emitted events")
+    assert(emitted[1].log.SpanName == "wrapped-span-1", "s1 SpanName mismatch")
+    assert(emitted[2].log.SpanName == "wrapped-span-2", "s2 SpanName mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsSummaryQuantileObjectsAndFlatArrays) {
+  // 1. Table mode with object quantiles
+  const char* script1 = R"(
+    return {
+      metric = {
+        name = "http.latency.summary",
+        kind = "aggregated_summary",
+        timestamp = "2026-10-22T10:00:00.000000000Z",
+        aggregated_summary = {
+          count = 100,
+          sum = 5000.0,
+          quantiles = {
+            { quantile = 0.5, value = 40.0 },
+            { quantile = 0.99, value = 120.0 }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script1), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx1 = lua_gettop(L_);
+  auto res1 = ProcessNativeMetricsTable(L_, table_idx1, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 1);
+
+  // 2. Table mode with flat quantiles
+  const char* script2 = R"(
+    return {
+      metric = {
+        name = "flat.quantiles.summary",
+        kind = "aggregated_summary",
+        aggregated_summary = {
+          count = 10,
+          sum = 100.0,
+          quantiles = { 0.5, 0.9 },
+          values = { 5.0, 95.0 }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script2), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx2 = lua_gettop(L_);
+  auto res2 = ProcessNativeMetricsTable(L_, table_idx2, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  // 3. JSON mode with object quantiles
+  std::string json = R"({
+    "metric": {
+      "name": "json.summary",
+      "kind": "aggregated_summary",
+      "aggregated_summary": {
+        "count": 50,
+        "sum": 250.0,
+        "quantiles": [
+          {"quantile": 0.5, "value": 5.0},
+          {"quantile": 0.95, "value": 15.0}
+        ]
+      }
+    }
+  })";
+  auto res3 = ProcessNativeMetrics(L_, json, emit_idx_);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 3, "Expected 3 emitted events, got " .. #emitted)
+    local r1 = emitted[1].log
+    assert(r1.Summary ~= nil, "r1.Summary table missing")
+    assert(r1.Summary.Count == 100, "r1.Summary.Count mismatch: " .. tostring(r1.Summary.Count))
+    assert(r1.Summary.Sum == 5000.0, "r1.Summary.Sum mismatch")
+    assert(#r1.Summary.QuantileValues == 2, "r1.Summary.QuantileValues count mismatch: " .. #r1.Summary.QuantileValues)
+    assert(math.abs(r1.Summary.QuantileValues[1].Quantile - 0.5) < 1e-6, "Quantile[1] mismatch")
+    assert(math.abs(r1.Summary.QuantileValues[1].Value - 40.0) < 1e-6, "Value[1] mismatch")
+    assert(math.abs(r1.Summary.QuantileValues[2].Quantile - 0.99) < 1e-6, "Quantile[2] mismatch")
+    assert(math.abs(r1.Summary.QuantileValues[2].Value - 120.0) < 1e-6, "Value[2] mismatch")
+
+    local r2 = emitted[2].log
+    assert(r2.Summary.Count == 10, "r2.Summary.Count mismatch")
+    assert(#r2.Summary.QuantileValues == 2, "r2.Summary.QuantileValues count mismatch")
+    assert(math.abs(r2.Summary.QuantileValues[2].Value - 95.0) < 1e-6, "r2 Value[2] mismatch")
+
+    local r3 = emitted[3].log
+    assert(r3.Summary.Count == 50, "r3.Summary.Count mismatch")
+    assert(#r3.Summary.QuantileValues == 2, "r3.Summary.QuantileValues count mismatch")
+    assert(math.abs(r3.Summary.QuantileValues[2].Value - 15.0) < 1e-6, "r3 Value[2] mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsJsonScopeAndResourceAttributes) {
+  // Test JSON with resource, scope, and typed tags (int, double, bool, object)
+  std::string json = R"({
+    "metric": {
+      "name": "system.cpu.load",
+      "kind": "gauge",
+      "gauge": {"value": 1.75},
+      "resources": {
+        "service.name": "custom-srv",
+        "host.name": "host-42"
+      },
+      "scope": {
+        "name": "system.metrics",
+        "version": "1.0.1",
+        "attributes": {
+          "scope_lib": "cpu_watcher"
+        }
+      },
+      "tags": {
+        "cpu_core": 4,
+        "load_ratio": 0.875,
+        "is_idle": false,
+        "extra_info": {"model": "x86"}
+      }
+    }
+  })";
+  auto res = ProcessNativeMetrics(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 1, "Expected 1 emitted event")
+    local r = emitted[1].log
+    assert(r.MetricName == "system.cpu.load", "MetricName mismatch")
+    assert(r.ServiceName == "custom-srv", "ServiceName mismatch")
+    assert(r.ScopeName == "system.metrics", "ScopeName mismatch")
+    assert(r.ScopeVersion == "1.0.1", "ScopeVersion mismatch")
+    assert(r.ResourceAttributes["service.name"] == "custom-srv", "ResourceAttributes service.name mismatch")
+    assert(r.ResourceAttributes["host.name"] == "host-42", "ResourceAttributes host.name mismatch")
+    assert(r.Attributes.cpu_core == 4, "Attributes.cpu_core mismatch")
+    assert(math.abs(r.Attributes.load_ratio - 0.875) < 1e-6, "Attributes.load_ratio mismatch")
+    assert(r.Attributes.is_idle == false, "Attributes.is_idle mismatch")
+    assert(r.Attributes.extra_info:find('"model"') ~= nil and r.Attributes.extra_info:find('"x86"') ~= nil, "Attributes.extra_info mismatch: " .. tostring(r.Attributes.extra_info))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsSpecialFloatValuesAndHistogramBounds) {
+  // 1. Test string numbers in table mode
+  const char* script = R"(
+    return {
+      {
+        name = "int.string.gauge",
+        kind = "gauge",
+        gauge = { value = "42" }
+      },
+      {
+        name = "double.string.gauge",
+        kind = "gauge",
+        gauge = { value = "3.14159" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res1 = ProcessNativeMetricsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 2);
+
+  // 2. Test JSON histogram with string explicit bounds: NaN, Infinity, -Infinity (filtered out by
+  // TryParseJsonFiniteBound)
+  std::string json_hist = R"({
+    "name": "hist.with.special.bounds",
+    "kind": "aggregated_histogram",
+    "aggregated_histogram": {
+      "count": 10,
+      "sum": 55.0,
+      "bucket_counts": [2, 3, 5],
+      "explicit_bounds": [1.0, "Infinity", 5.0, "NaN", "+Infinity", 10.0]
+    }
+  })";
+  auto res2 = ProcessNativeMetrics(L_, json_hist, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 3, "Expected 3 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Value == 42, "emitted[1].log.Value mismatch")
+    assert(math.abs(emitted[2].log.Value - 3.14159) < 1e-5, "emitted[2].log.Value mismatch")
+
+    local h = emitted[3].log.Histogram
+    assert(h ~= nil, "Histogram table missing")
+    assert(h.Count == 10, "Histogram Count mismatch")
+    -- The finite bounds must only include 1.0, 5.0, 10.0 (Infinity, NaN, +Infinity filtered)
+    assert(#h.ExplicitBounds == 3, "ExplicitBounds count mismatch: " .. #h.ExplicitBounds)
+    assert(math.abs(h.ExplicitBounds[1] - 1.0) < 1e-6)
+    assert(math.abs(h.ExplicitBounds[2] - 5.0) < 1e-6)
+    assert(math.abs(h.ExplicitBounds[3] - 10.0) < 1e-6)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+
+  // 3. Table mode with resource, scope, and float counter
+  const char* script_scope = R"(
+    return {
+      name = "table.scoped.counter",
+      kind = "counter",
+      counter = { value = 15.5 },
+      resource = {
+        attributes = {
+          ["service.name"] = "table-metric-svc",
+          cluster = "eu-west-1"
+        }
+      },
+      scope = {
+        name = "meter.lib",
+        version = "3.2.1",
+        attributes = {
+          scope_tag = "prod"
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_scope), LUA_OK) << lua_tostring(L_, -1);
+  int scope_tbl_idx = lua_gettop(L_);
+  auto res3 = ProcessNativeMetricsTable(L_, scope_tbl_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 1);
+
+  // 4. JSON mode array wrapper with top-level attributes
+  std::string json_wrapped_metrics = R"({
+    "metric": [
+      {
+        "name": "arr.gauge.1",
+        "kind": "gauge",
+        "gauge": {"value": 10},
+        "attributes": {"attr_k": "attr_v"}
+      },
+      {
+        "name": "arr.gauge.2",
+        "kind": "gauge",
+        "gauge": {"value": 20}
+      }
+    ]
+  })";
+  auto res4 = ProcessNativeMetrics(L_, json_wrapped_metrics, emit_idx_);
+  EXPECT_TRUE(res4.success) << res4.error;
+  EXPECT_EQ(res4.emitted_count, 2);
+
+  // 5. JSON mode histogram with string and uint bucket counts
+  std::string json_hist_types = R"({
+    "name": "hist.types",
+    "kind": "aggregated_histogram",
+    "aggregated_histogram": {
+      "count": 3,
+      "sum": 12.0,
+      "bucket_counts": [1, "2"],
+      "explicit_bounds": ["2.5", 5.0]
+    }
+  })";
+  auto res5 = ProcessNativeMetrics(L_, json_hist_types, emit_idx_);
+  EXPECT_TRUE(res5.success) << res5.error;
+  EXPECT_EQ(res5.emitted_count, 1);
+
+  const char* verify_more = R"(
+    assert(#emitted == 7, "Expected 7 emitted events, got " .. #emitted)
+    local r4 = emitted[4].log
+    assert(r4.MetricName == "table.scoped.counter", "r4 MetricName mismatch")
+    assert(r4.ServiceName == "table-metric-svc", "r4 ServiceName mismatch")
+    assert(r4.ScopeName == "meter.lib", "r4 ScopeName mismatch")
+    assert(r4.ScopeVersion == "3.2.1", "r4 ScopeVersion mismatch")
+    assert(math.abs(r4.Value - 15.5) < 1e-6, "r4 Value mismatch")
+    assert(r4.ResourceAttributes["service.name"] == "table-metric-svc", "r4 ResourceAttributes mismatch")
+
+    local r5 = emitted[5].log
+    assert(r5.MetricName == "arr.gauge.1", "r5 MetricName mismatch")
+    assert(r5.Attributes.attr_k == "attr_v", "r5 Attributes mismatch")
+
+    local r6 = emitted[6].log
+    assert(r6.MetricName == "arr.gauge.2", "r6 MetricName mismatch")
+
+    local r7 = emitted[7].log
+    assert(r7.Histogram.Count == 3, "r7 Histogram Count mismatch")
+    assert(#r7.Histogram.BucketCounts == 2, "r7 BucketCounts length mismatch")
+    assert(r7.Histogram.BucketCounts[2] == 2, "r7 string bucket count parsed mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_more), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsZeroBucketCountsAndNonOtlpExclusions) {
+  // 1. Aggregated histogram with empty bucket counts
+  const char* script = R"(
+    return {
+      name = "hist.empty.buckets",
+      kind = "aggregated_histogram",
+      aggregated_histogram = {
+        count = 0,
+        sum = 0.0,
+        bucket_counts = {},
+        explicit_bounds = {}
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res1 = ProcessNativeMetricsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 1);
+
+  // 2. Non-OTLP metric variants (distribution, set, sketch) in table mode
+  const char* script_unsupported = R"(
+    return {
+      name = "dist.metric",
+      kind = "distribution",
+      distribution = {
+        samples = { 1.0, 2.0 }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_unsupported), LUA_OK) << lua_tostring(L_, -1);
+  int bad_tbl_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeMetricsTable(L_, bad_tbl_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_FALSE(res2.success);
+  EXPECT_NE(res2.error.find("Unsupported non-OTLP metric variant 'distribution'"),
+            std::string::npos);
+
+  // 3. Non-OTLP metric variants in JSON mode
+  std::string json_sketch = R"({
+    "name": "sketch.metric",
+    "kind": "sketch",
+    "sketch": {"bins": []}
+  })";
+  auto res3 = ProcessNativeMetrics(L_, json_sketch, emit_idx_);
+  EXPECT_FALSE(res3.success);
+  EXPECT_NE(res3.error.find("Unsupported non-OTLP metric variant 'sketch'"), std::string::npos);
+}
+
+TEST_F(NativeExtractorsTest, MetricsOtelPrefixTagsAndParallelQuantilesJson) {
+  // 1. JSON metric with otel prefix tags and array tags
+  std::string json_tags = R"({
+    "name": "rpc.calls",
+    "tags": {
+      "otel.unit": "requests",
+      "otel.description": "Number of RPC requests",
+      "otel.scope.name": "rpc.meter",
+      "otel.scope.version": "1.5.0",
+      "endpoints": ["/api/v1", "/api/v2"]
+    },
+    "counter": {"value": 100}
+  })";
+  auto res1 = ProcessNativeMetrics(L_, json_tags, emit_idx_);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 1);
+
+  // 2. JSON summary with parallel quantiles and values
+  std::string json_summary = R"({
+    "name": "rpc.duration",
+    "aggregated_summary": {
+      "count": 50,
+      "sum": 125.5,
+      "quantiles": [0.5, 0.95, 0.99],
+      "values": [1.0, 5.0, 10.0]
+    }
+  })";
+  auto res2 = ProcessNativeMetrics(L_, json_summary, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  // 3. JSON histogram with min, max, counts, and explicitBounds
+  std::string json_hist = R"({
+    "name": "rpc.payload_size",
+    "aggregated_histogram": {
+      "count": 20,
+      "sum": 2048.0,
+      "min": 10.0,
+      "max": 500.0,
+      "counts": [5, 10, 5],
+      "explicitBounds": [50.0, 200.0]
+    }
+  })";
+  auto res3 = ProcessNativeMetrics(L_, json_hist, emit_idx_);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted >= 3)
+    local m1 = emitted[#emitted - 2].log
+    assert(m1.MetricUnit == "requests")
+    assert(m1.MetricDescription == "Number of RPC requests")
+    assert(m1.ScopeName == "rpc.meter")
+    assert(m1.ScopeVersion == "1.5.0")
+    assert(type(m1.Attributes.endpoints) == "string")
+
+    local m2 = emitted[#emitted - 1].log
+    assert(m2.MetricType == "summary")
+    assert(type(m2.Summary) == "table")
+    assert(#m2.Summary.QuantileValues == 3)
+    assert(m2.Summary.QuantileValues[1].Quantile == 0.5)
+    assert(m2.Summary.QuantileValues[1].Value == 1.0)
+
+    local m3 = emitted[#emitted].log
+    assert(m3.MetricType == "histogram")
+    assert(type(m3.Histogram) == "table")
+    assert(m3.Histogram.Min == 10.0)
+    assert(m3.Histogram.Max == 500.0)
+    assert(#m3.Histogram.BucketCounts == 3)
+    assert(#m3.Histogram.ExplicitBounds == 2)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsJsonFullAllFieldsCoverage) {
+  std::string json = R"({
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "flags": 1,
+    "severity_text": "WARN",
+    "severity_number": "SEVERITY_NUMBER_WARN",
+    "body": {"stringValue": "log body via stringValue"},
+    "event_name": "app.boot",
+    "resource_schema_url": "https://opentelemetry.io/schemas/1.21.0",
+    "resources": {
+      "service.name": "full-svc",
+      "env": "prod"
+    },
+    "scope": {
+      "name": "app.logger",
+      "version": "1.0.0",
+      "schema_url": "https://opentelemetry.io/schemas/scope/1.0",
+      "attributes": {"sc_key": "sc_val"}
+    },
+    "attributes": {
+      "http.status": 200,
+      "user": "alice"
+    }
+  })";
+  auto res = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    local l = emitted[#emitted].log
+    assert(l.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert(l.SpanId == "00f067aa0ba902b7")
+    assert(l.TraceFlags == 1)
+    assert(l.SeverityText == "WARN")
+    assert(l.SeverityNumber == 13)
+    assert(l.Body == "log body via stringValue")
+    assert(l.EventName == "app.boot")
+    assert(l.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.21.0")
+    assert(l.ServiceName == "full-svc")
+    assert(l.ResourceAttributes["service.name"] == "full-svc")
+    assert(l.ScopeName == "app.logger")
+    assert(l.ScopeVersion == "1.0.0")
+    assert(l.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope/1.0")
+    assert(l.ScopeAttributes.sc_key == "sc_val")
+    assert(l.LogAttributes["http.status"] == 200)
+    assert(l.LogAttributes.user == "alice")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeTracesJsonFullAllFieldsCoverage) {
+  std::string json = R"({
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "parent_span_id": "5fb397be34d23b0f",
+    "name": "full_trace_span",
+    "kind": "client",
+    "start_time_unix_nano": "1700000000000000000",
+    "end_time_unix_nano": "1700000000050000000",
+    "status": {"code": "STATUS_CODE_UNSET", "message": "unset status"},
+    "resources": {"service.name": "trace-client-svc"},
+    "scope": {"name": "client.tracer", "version": "2.0"},
+    "attributes": {"req.header": "custom"},
+    "events": [
+      {
+        "name": "cache_lookup",
+        "time_unix_nano": "1700000000010000000",
+        "attributes": {
+          "hit": true,
+          "u_val": {"uint_value": 100},
+          "arr_val": {"array_value": {"values": []}},
+          "kv_val": {"kvlist_value": {"values": []}}
+        }
+      }
+    ],
+    "links": [
+      {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4737",
+        "span_id": "00f067aa0ba902b8",
+        "attributes": {"link.reason": "parent_job"}
+      }
+    ]
+  })";
+  auto res = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    local t = emitted[#emitted].log
+    assert(t.SpanKind == "SPAN_KIND_CLIENT")
+    assert(t.StatusCode == "STATUS_CODE_UNSET")
+    assert(t.ServiceName == "trace-client-svc")
+    assert(t.ScopeName == "client.tracer")
+    assert(type(t.Events) == "string" and t.Events:find("cache_lookup") ~= nil)
+    assert(type(t.Links) == "string" and t.Links:find("parent_job") ~= nil)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsAll24SeverityStringsJson) {
+  const char* sev_names[] = {
+      "SEVERITY_NUMBER_TRACE",  "SEVERITY_NUMBER_TRACE2", "SEVERITY_NUMBER_TRACE3",
+      "SEVERITY_NUMBER_TRACE4", "SEVERITY_NUMBER_DEBUG",  "SEVERITY_NUMBER_DEBUG2",
+      "SEVERITY_NUMBER_DEBUG3", "SEVERITY_NUMBER_DEBUG4", "SEVERITY_NUMBER_INFO",
+      "SEVERITY_NUMBER_INFO2",  "SEVERITY_NUMBER_INFO3",  "SEVERITY_NUMBER_INFO4",
+      "SEVERITY_NUMBER_WARN",   "SEVERITY_NUMBER_WARN2",  "SEVERITY_NUMBER_WARN3",
+      "SEVERITY_NUMBER_WARN4",  "SEVERITY_NUMBER_ERROR",  "SEVERITY_NUMBER_ERROR2",
+      "SEVERITY_NUMBER_ERROR3", "SEVERITY_NUMBER_ERROR4", "SEVERITY_NUMBER_FATAL",
+      "SEVERITY_NUMBER_FATAL2", "SEVERITY_NUMBER_FATAL3", "SEVERITY_NUMBER_FATAL4"};
+
+  std::string json = "[";
+  for (int i = 0; i < 24; ++i) {
+    if (i > 0) json += ",";
+    json += R"({"severity_number":")" + std::string(sev_names[i]) + R"(","message":"msg"})";
+  }
+  json += "]";
+
+  auto res = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 24);
+
+  const char* verify = R"(
+    assert(#emitted >= 24)
+    for i = 1, 24 do
+      local l = emitted[#emitted - 24 + i].log
+      assert(l.SeverityNumber == i, "Expected severity " .. i .. ", got " .. tostring(l.SeverityNumber))
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsNestedResourceAttributesAndTopLevelServiceTable) {
+  // Test nested attributes table in resources, top-level scope_attributes, and service_name
+  const char* script = R"(
+    return {
+      message = "nested res test",
+      service_name = "top-level-svc",
+      resources = {
+        schema_url = "https://schema.example.com",
+        attributes = {
+          ["env"] = "staging"
+        }
+      },
+      scope_attributes = {
+        ["scope_k"] = "scope_v"
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  auto res = ProcessNativeLogsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    local l = emitted[#emitted].log
+    assert(l.ServiceName == "top-level-svc")
+    assert(l.ResourceSchemaUrl == "https://schema.example.com")
+    assert(l.ResourceAttributes["env"] == "staging")
+    assert(l.ScopeAttributes["scope_k"] == "scope_v")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeTracesAllSpanKindsAndStatusCodesJsonAndTable) {
+  // Test kinds 1..5 and status codes 0..2 in JSON and table modes
+  std::string json = R"([
+    {"trace_id":"1","span_id":"1","name":"k1","kind":1,"status":{"code":0}},
+    {"trace_id":"2","span_id":"2","name":"k2","kind":2,"status":{"code":1}},
+    {"trace_id":"3","span_id":"3","name":"k3","kind":3,"status":{"code":2}},
+    {"trace_id":"4","span_id":"4","name":"k4","kind":4,"status":{"code":"STATUS_CODE_OK"}},
+    {"trace_id":"5","span_id":"5","name":"k5","kind":5,"status":{"code":"STATUS_CODE_ERROR"}},
+    {"trace_id":"6","span_id":"6","name":"k0","kind":0,"status":{"code":99}}
+  ])";
+  auto res_json = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res_json.success) << res_json.error;
+  EXPECT_EQ(res_json.emitted_count, 6);
+
+  const char* verify = R"(
+    local s1 = emitted[#emitted - 5].log
+    assert(s1.SpanKind == "SPAN_KIND_INTERNAL")
+    assert(s1.StatusCode == "STATUS_CODE_UNSET")
+
+    local s2 = emitted[#emitted - 4].log
+    assert(s2.SpanKind == "SPAN_KIND_SERVER")
+    assert(s2.StatusCode == "STATUS_CODE_OK")
+
+    local s3 = emitted[#emitted - 3].log
+    assert(s3.SpanKind == "SPAN_KIND_CLIENT")
+    assert(s3.StatusCode == "STATUS_CODE_ERROR")
+
+    local s4 = emitted[#emitted - 2].log
+    assert(s4.SpanKind == "SPAN_KIND_PRODUCER")
+    assert(s4.StatusCode == "STATUS_CODE_OK")
+
+    local s5 = emitted[#emitted - 1].log
+    assert(s5.SpanKind == "SPAN_KIND_CONSUMER")
+    assert(s5.StatusCode == "STATUS_CODE_ERROR")
+
+    local s6 = emitted[#emitted].log
+    assert(s6.SpanKind == "SPAN_KIND_UNSPECIFIED")
+    assert(s6.StatusCode == "STATUS_CODE_UNSET")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsMergeTagsAndResourcesAttributesJsonAndStringBoundsTable) {
+  // 1. JSON metric with tags AND resources/scope/attributes/service_name merging
+  std::string json = R"({
+    "name": "merged.metric",
+    "service_name": "top-svc-metric",
+    "tags": {
+      "resource.k1": "v1",
+      "scope.s1": "sv1",
+      "attr1": "val1"
+    },
+    "resources": {
+      "k2": "v2"
+    },
+    "scope": {
+      "name": "scope-merged",
+      "attributes": {
+        "s2": "sv2"
+      }
+    },
+    "attributes": {
+      "attr2": "val2"
+    },
+    "counter": {"value": "99.9"}
+  })";
+  auto res_json = ProcessNativeMetrics(L_, json, emit_idx_);
+  EXPECT_TRUE(res_json.success) << res_json.error;
+  EXPECT_EQ(res_json.emitted_count, 1);
+
+  // 2. Table metric with string explicit bounds and string counter
+  const char* script_bounds = R"(
+    return {
+      name = "hist.str.bounds",
+      histogram = {
+        count = 10,
+        sum = 25.0,
+        bucket_counts = { 2, 8 },
+        explicit_bounds = { "1.5", "10.0" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_bounds), LUA_OK) << lua_tostring(L_, -1);
+  auto res_tbl = ProcessNativeMetricsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res_tbl.success) << res_tbl.error;
+  EXPECT_EQ(res_tbl.emitted_count, 1);
+
+  const char* verify = R"(
+    local m1 = emitted[#emitted - 1].log
+    assert(m1.ServiceName == "top-svc-metric")
+    assert(m1.ResourceAttributes.k1 == "v1")
+    assert(m1.ResourceAttributes.k2 == "v2")
+    assert(m1.ScopeAttributes.s1 == "sv1")
+    assert(m1.ScopeAttributes.s2 == "sv2")
+    assert(m1.Attributes.attr1 == "val1")
+    assert(m1.Attributes.attr2 == "val2")
+    assert(math.abs(m1.Value - 99.9) < 1e-4)
+
+    local m2 = emitted[#emitted].log
+    assert(type(m2.Histogram) == "table")
+    assert(#m2.Histogram.ExplicitBounds == 2)
+    assert(m2.Histogram.ExplicitBounds[1] == 1.5)
+    assert(m2.Histogram.ExplicitBounds[2] == 10.0)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricTableAsDoubleAndAsIntVariants) {
+  const char* script = R"(
+    return {
+      {
+        name = "m.as_double",
+        gauge = { as_double = 12.34 }
+      },
+      {
+        name = "m.as_int",
+        counter = { as_int = 5678 }
+      },
+      {
+        name = "m.asDouble",
+        gauge = { asDouble = "99.5" }
+      },
+      {
+        name = "m.asInt",
+        counter = { asInt = "4321" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  auto res = ProcessNativeMetricsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 4);
+
+  const char* verify = R"(
+    assert(math.abs(emitted[#emitted - 3].log.Value - 12.34) < 1e-4)
+    assert(emitted[#emitted - 2].log.Value == 5678)
+    assert(math.abs(emitted[#emitted - 1].log.Value - 99.5) < 1e-4)
+    assert(emitted[#emitted].log.Value == 4321)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace native_extractors
 }  // namespace vector_otel

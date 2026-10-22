@@ -2,6 +2,7 @@ docs/superpowers/
 .superpowers/
 .worktrees/
 build/
+build-*/
 build_bench/
 .cache/
 .vscode/

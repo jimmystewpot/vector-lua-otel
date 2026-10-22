@@ -162,7 +162,7 @@ sudo apt-get update && sudo apt-get install -y \
 Each tagged release on `main` publishes a deterministic source archive (`vector-lua-otel-<version>.tar.gz`) with vendored dependencies included, `SHA256SUMS`, keyless [Sigstore Cosign](https://docs.sigstore.dev/) bundles (`.sigstore.json`), and GitHub SLSA Build Provenance Attestations.
 
 ```bash
-VERSION="0.1.0"
+VERSION="0.2.0"
 BASE_URL="https://github.com/jimmystewpot/vector-lua-otel/releases/download/v${VERSION}"
 
 # 1. Download release archive, checksums, and Sigstore bundles
@@ -557,12 +557,12 @@ When required via `require("vector_otel")` or `require("vector_native")`, each m
 local vector_otel   = require("vector_otel")
 local vector_native = require("vector_native")
 
-vector_otel._VERSION     -- "0.1.0"
+vector_otel._VERSION     -- "0.2.0"
 vector_otel.logs         -- OTLP Logs extractor submodule
 vector_otel.traces       -- OTLP Traces extractor submodule
 vector_otel.metrics      -- OTLP Metrics extractor submodule
 
-vector_native._VERSION   -- "0.1.0"
+vector_native._VERSION   -- "0.2.0"
 vector_native.logs       -- Vector native Logs extractor submodule
 vector_native.traces     -- Vector native Traces (trace_to_log) extractor submodule
 vector_native.metrics    -- Vector native Metrics extractor submodule

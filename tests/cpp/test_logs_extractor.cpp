@@ -1167,6 +1167,52 @@ TEST_F(LogsExtractorTest, BodyAndLogAttributesNotAlteredByNormalization) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(LogsExtractorTest, SnakeCaseJsonOtlpFieldsAndNullBody) {
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  std::string json = R"({
+    "resource_logs": [
+      {
+        "resource": {
+          "attributes": [
+            {"key": "service.name", "value": {"string_value": "snake-log-svc"}}
+          ]
+        },
+        "scope_logs": [
+          {
+            "scope": {"name": "snake-scope", "version": "1.0.0"},
+            "log_records": [
+              {
+                "time_unix_nano": "1700000000000000000",
+                "severity_number": 9,
+                "severity_text": "INFO",
+                "body": null,
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00f067aa0ba902b7"
+              },
+              {
+                "time_unix_nano": 1700000000100000000,
+                "body": {"string_value": "rec2"}
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  })";
+  auto res = ProcessLogs(L_, json, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify_script = R"(
+    assert(#emitted == 2)
+    assert(emitted[1].log.ServiceName == "snake-log-svc")
+    assert(emitted[1].log.ScopeName == "snake-scope")
+    assert(emitted[1].log.Body == "")
+    assert(emitted[2].log.Body == "rec2")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel

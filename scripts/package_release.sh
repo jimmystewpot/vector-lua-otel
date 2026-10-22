@@ -44,12 +44,14 @@ fi
 FULL_VERSION="${BASE_VERSION}${PRERELEASE_SUFFIX}"
 ROCKSPEC_VERSION="${FULL_VERSION//-/.}-1"
 
-# 2. Verify BASE_VERSION matches CMakeLists.txt and src/module.cpp
+# 2. Verify BASE_VERSION matches CMakeLists.txt, src/module.cpp, and src/native_module.cpp
 CMAKE_FILE="$REPO_ROOT/CMakeLists.txt"
 MODULE_FILE="$REPO_ROOT/src/module.cpp"
+NATIVE_MODULE_FILE="$REPO_ROOT/src/native_module.cpp"
 
 CMAKE_VERSION="$(sed -nE 's/^project\(vector_lua_otel[[:space:]]+VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' "$CMAKE_FILE")"
 MODULE_VERSION="$(awk '/lua_setfield\(L, -2, "_VERSION"\)/ { print prev } { prev = $0 }' "$MODULE_FILE" | sed -nE 's/.*lua_pushstring\(L,[[:space:]]*"([^"]+)"\).*/\1/p')"
+NATIVE_MODULE_VERSION="$(awk '/lua_setfield\(L, -2, "_VERSION"\)/ { print prev } { prev = $0 }' "$NATIVE_MODULE_FILE" | sed -nE 's/.*lua_pushstring\(L,[[:space:]]*"([^"]+)"\).*/\1/p')"
 
 if [[ -z "$CMAKE_VERSION" ]]; then
   echo "ERROR: Failed to extract PROJECT_VERSION from $CMAKE_FILE" >&2
@@ -61,6 +63,11 @@ if [[ -z "$MODULE_VERSION" ]]; then
   exit 1
 fi
 
+if [[ -z "$NATIVE_MODULE_VERSION" ]]; then
+  echo "ERROR: Failed to extract _VERSION from $NATIVE_MODULE_FILE" >&2
+  exit 1
+fi
+
 if [[ "$BASE_VERSION" != "$CMAKE_VERSION" ]]; then
   echo "ERROR: Tag base version '$BASE_VERSION' ($TAG) does not match CMakeLists.txt version '$CMAKE_VERSION'" >&2
   exit 1
@@ -68,6 +75,11 @@ fi
 
 if [[ "$BASE_VERSION" != "$MODULE_VERSION" ]]; then
   echo "ERROR: Tag base version '$BASE_VERSION' ($TAG) does not match src/module.cpp _VERSION '$MODULE_VERSION'" >&2
+  exit 1
+fi
+
+if [[ "$BASE_VERSION" != "$NATIVE_MODULE_VERSION" ]]; then
+  echo "ERROR: Tag base version '$BASE_VERSION' ($TAG) does not match src/native_module.cpp _VERSION '$NATIVE_MODULE_VERSION'" >&2
   exit 1
 fi
 

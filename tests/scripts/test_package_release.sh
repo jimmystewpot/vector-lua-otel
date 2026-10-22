@@ -61,16 +61,16 @@ echo "   SemVer tag format validation passed."
 # 4. Version mismatch checks against CMakeLists.txt & src/module.cpp
 echo ">> Testing version alignment enforcement..."
 assert_exit_code 1 bash "$PACKAGE_SCRIPT" "v9.9.9" "$TEMP_ROOT/mismatch"
-assert_exit_code 1 bash "$PACKAGE_SCRIPT" "v0.2.0-rc.1" "$TEMP_ROOT/mismatch_rc"
+assert_exit_code 1 bash "$PACKAGE_SCRIPT" "v0.9.0-rc.1" "$TEMP_ROOT/mismatch_rc"
 echo "   Version alignment enforcement passed."
 
-# 5. Valid stable tag packaging (v0.1.0)
-echo ">> Testing valid stable release packaging (v0.1.0)..."
+# 5. Valid stable tag packaging (v0.2.0)
+echo ">> Testing valid stable release packaging (v0.2.0)..."
 OUT_STABLE="$TEMP_ROOT/stable"
-bash "$PACKAGE_SCRIPT" "v0.1.0" "$OUT_STABLE"
+bash "$PACKAGE_SCRIPT" "v0.2.0" "$OUT_STABLE"
 
-TARBALL_STABLE="$OUT_STABLE/vector-lua-otel-0.1.0.tar.gz"
-ROCKSPEC_STABLE="$OUT_STABLE/vector-otel-0.1.0-1.rockspec"
+TARBALL_STABLE="$OUT_STABLE/vector-lua-otel-0.2.0.tar.gz"
+ROCKSPEC_STABLE="$OUT_STABLE/vector-otel-0.2.0-1.rockspec"
 SUMS_STABLE="$OUT_STABLE/SHA256SUMS"
 META_STABLE="$OUT_STABLE/release-metadata.env"
 
@@ -80,10 +80,10 @@ META_STABLE="$OUT_STABLE/release-metadata.env"
 [[ -f "$META_STABLE" ]] || fail "Missing $META_STABLE"
 
 # Check metadata contents
-grep -q '^TAG=v0.1.0$' "$META_STABLE" || fail "Expected TAG=v0.1.0 in metadata"
-grep -q '^BASE_VERSION=0.1.0$' "$META_STABLE" || fail "Expected BASE_VERSION=0.1.0 in metadata"
-grep -q '^FULL_VERSION=0.1.0$' "$META_STABLE" || fail "Expected FULL_VERSION=0.1.0 in metadata"
-grep -q '^ROCKSPEC_VERSION=0.1.0-1$' "$META_STABLE" || fail "Expected ROCKSPEC_VERSION=0.1.0-1 in metadata"
+grep -q '^TAG=v0.2.0$' "$META_STABLE" || fail "Expected TAG=v0.2.0 in metadata"
+grep -q '^BASE_VERSION=0.2.0$' "$META_STABLE" || fail "Expected BASE_VERSION=0.2.0 in metadata"
+grep -q '^FULL_VERSION=0.2.0$' "$META_STABLE" || fail "Expected FULL_VERSION=0.2.0 in metadata"
+grep -q '^ROCKSPEC_VERSION=0.2.0-1$' "$META_STABLE" || fail "Expected ROCKSPEC_VERSION=0.2.0-1 in metadata"
 grep -q '^IS_PRERELEASE=false$' "$META_STABLE" || fail "Expected IS_PRERELEASE=false in metadata"
 
 # Check archive exclusions (.github, .superpowers, docs/superpowers, etc.)
@@ -94,10 +94,10 @@ fi
 
 # Check required files in archive
 for req in \
-  "vector-lua-otel-0.1.0/CMakeLists.txt" \
-  "vector-lua-otel-0.1.0/src/module.cpp" \
-  "vector-lua-otel-0.1.0/third_party/simdjson/src/simdjson.cpp" \
-  "vector-lua-otel-0.1.0/third_party/googletest/CMakeLists.txt"; do
+  "vector-lua-otel-0.2.0/CMakeLists.txt" \
+  "vector-lua-otel-0.2.0/src/module.cpp" \
+  "vector-lua-otel-0.2.0/third_party/simdjson/src/simdjson.cpp" \
+  "vector-lua-otel-0.2.0/third_party/googletest/CMakeLists.txt"; do
   grep -Fxq "$req" <<< "$TAR_LIST" || fail "Archive missing required file: $req"
 done
 
@@ -108,24 +108,24 @@ done
 if command -v luarocks >/dev/null 2>&1; then
   luarocks lint "$ROCKSPEC_STABLE" || fail "luarocks lint failed on $ROCKSPEC_STABLE"
 fi
-grep -q 'version = "0.1.0-1"' "$ROCKSPEC_STABLE" || fail "Rockspec missing version 0.1.0-1"
-grep -q 'tag = "v0.1.0"' "$ROCKSPEC_STABLE" || fail "Rockspec missing tag v0.1.0"
+grep -q 'version = "0.2.0-1"' "$ROCKSPEC_STABLE" || fail "Rockspec missing version 0.2.0-1"
+grep -q 'tag = "v0.2.0"' "$ROCKSPEC_STABLE" || fail "Rockspec missing tag v0.2.0"
 echo "   Valid stable release packaging passed."
 
-# 6. Valid pre-release tag packaging (v0.1.0-rc.1)
-echo ">> Testing pre-release packaging (v0.1.0-rc.1)..."
+# 6. Valid pre-release tag packaging (v0.2.0-rc.1)
+echo ">> Testing pre-release packaging (v0.2.0-rc.1)..."
 OUT_RC="$TEMP_ROOT/rc"
-bash "$PACKAGE_SCRIPT" "v0.1.0-rc.1" "$OUT_RC"
+bash "$PACKAGE_SCRIPT" "v0.2.0-rc.1" "$OUT_RC"
 
-TARBALL_RC="$OUT_RC/vector-lua-otel-0.1.0-rc.1.tar.gz"
-ROCKSPEC_RC="$OUT_RC/vector-otel-0.1.0.rc.1-1.rockspec"
+TARBALL_RC="$OUT_RC/vector-lua-otel-0.2.0-rc.1.tar.gz"
+ROCKSPEC_RC="$OUT_RC/vector-otel-0.2.0.rc.1-1.rockspec"
 META_RC="$OUT_RC/release-metadata.env"
 
 [[ -f "$TARBALL_RC" ]] || fail "Missing $TARBALL_RC"
 [[ -f "$ROCKSPEC_RC" ]] || fail "Missing $ROCKSPEC_RC"
 grep -q '^IS_PRERELEASE=true$' "$META_RC" || fail "Expected IS_PRERELEASE=true for pre-release tag"
-grep -q '^ROCKSPEC_VERSION=0.1.0.rc.1-1$' "$META_RC" || fail "Expected ROCKSPEC_VERSION=0.1.0.rc.1-1"
-grep -q 'tag = "v0.1.0-rc.1"' "$ROCKSPEC_RC" || fail "Expected tag = v0.1.0-rc.1 in pre-release rockspec"
+grep -q '^ROCKSPEC_VERSION=0.2.0.rc.1-1$' "$META_RC" || fail "Expected ROCKSPEC_VERSION=0.2.0.rc.1-1"
+grep -q 'tag = "v0.2.0-rc.1"' "$ROCKSPEC_RC" || fail "Expected tag = v0.2.0-rc.1 in pre-release rockspec"
 if command -v luarocks >/dev/null 2>&1; then
   luarocks lint "$ROCKSPEC_RC" || fail "luarocks lint failed on pre-release rockspec $ROCKSPEC_RC"
 fi
@@ -136,9 +136,9 @@ echo "   Pre-release packaging passed."
 echo ">> Testing deterministic tarball reproducibility..."
 OUT_REPRO="$TEMP_ROOT/repro"
 sleep 1
-bash "$PACKAGE_SCRIPT" "v0.1.0" "$OUT_REPRO"
+bash "$PACKAGE_SCRIPT" "v0.2.0" "$OUT_REPRO"
 HASH_1="$(sha256sum "$TARBALL_STABLE" | awk '{print $1}')"
-HASH_2="$(sha256sum "$OUT_REPRO/vector-lua-otel-0.1.0.tar.gz" | awk '{print $1}')"
+HASH_2="$(sha256sum "$OUT_REPRO/vector-lua-otel-0.2.0.tar.gz" | awk '{print $1}')"
 if [[ "$HASH_1" != "$HASH_2" ]]; then
   fail "Tarball is not reproducible across runs ($HASH_1 != $HASH_2)"
 fi
@@ -150,7 +150,7 @@ if [[ "$SKIP_TARBALL_BUILD" != "true" ]]; then
   UNPACK_DIR="$TEMP_ROOT/unpacked"
   mkdir -p "$UNPACK_DIR"
   tar -xzf "$TARBALL_STABLE" -C "$UNPACK_DIR"
-  SRC_DIR="$UNPACK_DIR/vector-lua-otel-0.1.0"
+  SRC_DIR="$UNPACK_DIR/vector-lua-otel-0.2.0"
   cmake -S "$SRC_DIR" -B "$SRC_DIR/build" -DCMAKE_BUILD_TYPE=Release
   cmake --build "$SRC_DIR/build" -j"$(nproc)"
   ctest --test-dir "$SRC_DIR/build" --output-on-failure
