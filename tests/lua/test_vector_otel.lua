@@ -604,6 +604,478 @@ assert(tbl_m1.Attributes["core"] == "0", "Metric attribute mismatch")
 print("   Table-mode schema validation passed.")
 
 --------------------------------------------------------------------------------
+-- Issue #8 Correlation ID Hex Normalization & Binary Decoding Regression Suite
+--------------------------------------------------------------------------------
+print(">> Testing Issue #8 correlation ID normalization and binary decoding...")
+
+local bin_trace_id_16 = string.rep(string.char(0xaa), 16)
+local bin_span_id_8 = string.rep(string.char(0xbb), 8)
+local bin_parent_span_id_8 = string.rep(string.char(0xcc), 8)
+local bin_link_trace_id_16 = string.rep(string.char(0x11), 16)
+local bin_link_span_id_8 = string.rep(string.char(0x22), 8)
+
+-- 1. Traces table with 16B traceId, 8B spanId, 8B parentSpanId, and binary links
+local binary_table_traces = {
+    resourceSpans = {
+        {
+            resource = {
+                attributes = {
+                    { key = "service.name", value = { stringValue = "bin-trace-svc" } },
+                    { key = "res.upper_hex", value = { stringValue = "4BF92F3577B34DA6A3CE929D0E0E4736" } },
+                }
+            },
+            scopeSpans = {
+                {
+                    scope = { name = "bin-tracer" },
+                    spans = {
+                        {
+                            traceId = bin_trace_id_16,
+                            spanId = bin_span_id_8,
+                            parentSpanId = bin_parent_span_id_8,
+                            name = "BINARY_SPAN_NAME_4BF9",
+                            startTimeUnixNano = "1700000000000000000",
+                            endTimeUnixNano = "1700000000100000000",
+                            attributes = {
+                                { key = "span.raw_hex", value = { stringValue = "UPPERCASE_AND_HEX_4BF9" } },
+                                { key = "span.exact_16", value = { stringValue = "1234567812345678" } },
+                            },
+                            links = {
+                                {
+                                    traceId = bin_link_trace_id_16,
+                                    spanId = bin_link_span_id_8,
+                                    traceState = "vendor=active",
+                                    attributes = {
+                                        { key = "link.key", value = { stringValue = "link.val" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+local bin_trace_events = {}
+local n_bin_traces, bin_t_err = vo.traces.process(binary_table_traces, function(ev)
+    table.insert(bin_trace_events, ev)
+end)
+assert(n_bin_traces == 1, "Expected 1 binary trace span emitted, got: " .. tostring(n_bin_traces))
+assert(bin_t_err == nil, "Expected no error, got: " .. tostring(bin_t_err))
+assert(#bin_trace_events == 1, "Expected 1 trace event in table")
+
+local b_span = bin_trace_events[1].log
+assert(b_span.TraceId == string.rep("aa", 16),
+    "TraceId must be 32 lowercase hex chars, got: " .. tostring(b_span.TraceId))
+assert(b_span.SpanId == string.rep("bb", 8),
+    "SpanId must be 16 lowercase hex chars, got: " .. tostring(b_span.SpanId))
+assert(b_span.ParentSpanId == string.rep("cc", 8),
+    "ParentSpanId must be 16 lowercase hex chars, got: " .. tostring(b_span.ParentSpanId))
+assert(b_span.SpanName == "BINARY_SPAN_NAME_4BF9", "SpanName must not be modified")
+
+-- Span links verification
+assert(type(b_span.Links) == "string", "Links must be a JSON string")
+assert(b_span.Links:find('"TraceId":"' .. string.rep("11", 16) .. '"', 1, true) ~= nil,
+    "Links must contain normalized 32-char hex TraceId: " .. b_span.Links)
+assert(b_span.Links:find('"SpanId":"' .. string.rep("22", 8) .. '"', 1, true) ~= nil,
+    "Links must contain normalized 16-char hex SpanId: " .. b_span.Links)
+assert(b_span.Links:find('"TraceState":"vendor=active"', 1, true) ~= nil,
+    "Links must contain TraceState: " .. b_span.Links)
+assert(b_span.Links:find('"link.key":"link.val"', 1, true) ~= nil,
+    "Links must contain link attribute: " .. b_span.Links)
+assert(not b_span.Links:find("[\x00-\x1f]"), "Links JSON must not contain raw control bytes")
+
+-- Attribute preservation verification
+assert(b_span.ResourceAttributes["res.upper_hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
+    "ResourceAttributes uppercase hex string must not be altered")
+assert(b_span.SpanAttributes["span.raw_hex"] == "UPPERCASE_AND_HEX_4BF9",
+    "SpanAttributes string must not be altered")
+assert(b_span.SpanAttributes["span.exact_16"] == "1234567812345678",
+    "SpanAttributes exact 16-byte string must not be altered")
+
+-- 2. Logs table with 16B/8B binary IDs, embedded NUL bytes, and attribute preservation
+local binary_table_logs = {
+    resourceLogs = {
+        {
+            resource = {
+                attributes = {
+                    { key = "service.name", value = { stringValue = "bin-log-svc" } },
+                    { key = "res.upper_hex", value = { stringValue = "4BF92F3577B34DA6A3CE929D0E0E4736" } },
+                }
+            },
+            scopeLogs = {
+                {
+                    scope = { name = "bin-log-scope" },
+                    logRecords = {
+                        {
+                            timeUnixNano = "1700000000000000000",
+                            traceId = bin_trace_id_16,
+                            spanId = bin_span_id_8,
+                            body = "BODY_WITH_UPPER_HEX_4BF9",
+                            attributes = {
+                                { key = "log.raw_hex", value = { stringValue = "UPPERCASE_AND_HEX_4BF9" } },
+                                { key = "log.exact_16", value = { stringValue = "1234567812345678" } },
+                            }
+                        },
+                        {
+                            timeUnixNano = "1700000000000000001",
+                            traceId = string.rep(string.char(0x00), 16),
+                            spanId = string.rep(string.char(0x00), 8),
+                            body = "all-zero-binary-ids",
+                        },
+                        {
+                            timeUnixNano = "1700000000000000002",
+                            traceId = "\x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36",
+                            spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+                            body = "mixed-bytes-ids",
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+local bin_log_events = {}
+local n_bin_logs, bin_l_err = vo.logs.process(binary_table_logs, function(ev)
+    table.insert(bin_log_events, ev)
+end)
+assert(n_bin_logs == 3, "Expected 3 binary log records emitted, got: " .. tostring(n_bin_logs))
+assert(bin_l_err == nil, "Expected no error, got: " .. tostring(bin_l_err))
+assert(#bin_log_events == 3, "Expected 3 log events in table")
+
+local b_log1 = bin_log_events[1].log
+assert(b_log1.TraceId == string.rep("aa", 16), "Log TraceId mismatch: " .. tostring(b_log1.TraceId))
+assert(b_log1.SpanId == string.rep("bb", 8), "Log SpanId mismatch: " .. tostring(b_log1.SpanId))
+assert(b_log1.Body == "BODY_WITH_UPPER_HEX_4BF9", "Log Body must not be modified")
+assert(b_log1.ResourceAttributes["res.upper_hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
+    "ResourceAttributes uppercase hex string must not be altered")
+assert(b_log1.LogAttributes["log.raw_hex"] == "UPPERCASE_AND_HEX_4BF9",
+    "LogAttributes raw string must not be altered")
+assert(b_log1.LogAttributes["log.exact_16"] == "1234567812345678",
+    "LogAttributes exact 16 string must not be altered")
+
+local b_log2 = bin_log_events[2].log
+assert(b_log2.TraceId == string.rep("0", 32),
+    "16 NUL bytes TraceId must emit 32 '0's, got: " .. tostring(b_log2.TraceId))
+assert(b_log2.SpanId == string.rep("0", 16),
+    "8 NUL bytes SpanId must emit 16 '0's, got: " .. tostring(b_log2.SpanId))
+
+local b_log3 = bin_log_events[3].log
+assert(b_log3.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "Mixed binary TraceId mismatch: " .. tostring(b_log3.TraceId))
+assert(b_log3.SpanId == "00f067aa0ba902b7", "Mixed binary SpanId mismatch: " .. tostring(b_log3.SpanId))
+
+-- 3. Metrics table with 16B/8B binary IDs in Exemplars (Gauge, Sum, Histogram)
+local binary_table_metrics = {
+    resourceMetrics = {
+        {
+            resource = {
+                attributes = {
+                    { key = "service.name", value = { stringValue = "bin-metric-svc" } },
+                    { key = "res.upper_hex", value = { stringValue = "4BF92F3577B34DA6A3CE929D0E0E4736" } },
+                }
+            },
+            scopeMetrics = {
+                {
+                    scope = { name = "bin-meter" },
+                    metrics = {
+                        {
+                            name = "bin_gauge",
+                            gauge = {
+                                dataPoints = {
+                                    {
+                                        timeUnixNano = "1700000000000000000",
+                                        asDouble = 12.5,
+                                        attributes = {
+                                            { key = "dp.raw_hex", value = { stringValue = "UPPERCASE_4BF9" } },
+                                        },
+                                        exemplars = {
+                                            {
+                                                timeUnixNano = "1700000000123456789",
+                                                traceId = bin_trace_id_16,
+                                                spanId = bin_span_id_8,
+                                                asDouble = 12.5,
+                                                filteredAttributes = {
+                                                    { key = "user.id", value = { stringValue = "usr-1" } },
+                                                    { key = "filter.raw_hex", value = { stringValue = "UPPERCASE_4BF9" } },
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            name = "bin_sum",
+                            sum = {
+                                dataPoints = {
+                                    {
+                                        timeUnixNano = "1700000000000000000",
+                                        asInt = 100,
+                                        exemplars = {
+                                            {
+                                                timeUnixNano = "1700000000987654321",
+                                                traceId = "\x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36",
+                                                spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+                                                asInt = 42,
+                                                filteredAttributes = {
+                                                    { key = "tenant", value = { stringValue = "acme" } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            name = "bin_histogram",
+                            histogram = {
+                                dataPoints = {
+                                    {
+                                        timeUnixNano = "1700000000000000000",
+                                        count = 1,
+                                        sum = 0.5,
+                                        bucketCounts = { 1 },
+                                        explicitBounds = { 1.0 },
+                                        exemplars = {
+                                            {
+                                                timeUnixNano = "1700000000555555555",
+                                                traceId = string.rep(string.char(0x00), 16),
+                                                spanId = string.rep(string.char(0x00), 8),
+                                                value = 0.5,
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+local bin_metric_events = {}
+local n_bin_metrics, bin_m_err = vo.metrics.process(binary_table_metrics, function(ev)
+    table.insert(bin_metric_events, ev)
+end)
+assert(n_bin_metrics == 3, "Expected 3 binary metrics emitted, got: " .. tostring(n_bin_metrics))
+assert(bin_m_err == nil, "Expected no error, got: " .. tostring(bin_m_err))
+assert(#bin_metric_events == 3, "Expected 3 metric events in table")
+
+-- Gauge Exemplar
+local b_m1 = bin_metric_events[1].log
+assert(b_m1.MetricName == "bin_gauge")
+assert(b_m1.ResourceAttributes["res.upper_hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736")
+assert(b_m1.Attributes["dp.raw_hex"] == "UPPERCASE_4BF9")
+assert(type(b_m1.Exemplars) == "table" and #b_m1.Exemplars == 1, "Exemplars table missing or wrong size")
+local b_ex1 = b_m1.Exemplars[1]
+assert(b_ex1.TraceId == string.rep("aa", 16), "Exemplar 1 TraceId mismatch: " .. tostring(b_ex1.TraceId))
+assert(b_ex1.SpanId == string.rep("bb", 8), "Exemplar 1 SpanId mismatch: " .. tostring(b_ex1.SpanId))
+assert(math.abs(b_ex1.Value - 12.5) < 0.001, "Exemplar 1 Value mismatch")
+assert(b_ex1.TimeUnix == "2023-11-14T22:13:20.123456789Z", "Exemplar 1 TimeUnix mismatch: " .. tostring(b_ex1.TimeUnix))
+assert(b_ex1.FilteredAttributes["user.id"] == "usr-1", "Exemplar 1 FilteredAttributes mismatch")
+assert(b_ex1.FilteredAttributes["filter.raw_hex"] == "UPPERCASE_4BF9", "FilteredAttributes string must not be altered")
+
+-- Sum Exemplar
+local b_m2 = bin_metric_events[2].log
+assert(b_m2.MetricName == "bin_sum")
+assert(type(b_m2.Exemplars) == "table" and #b_m2.Exemplars == 1)
+local b_ex2 = b_m2.Exemplars[1]
+assert(b_ex2.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "Exemplar 2 TraceId mismatch: " .. tostring(b_ex2.TraceId))
+assert(b_ex2.SpanId == "00f067aa0ba902b7", "Exemplar 2 SpanId mismatch: " .. tostring(b_ex2.SpanId))
+assert(b_ex2.Value == 42, "Exemplar 2 Value mismatch: " .. tostring(b_ex2.Value))
+assert(b_ex2.FilteredAttributes["tenant"] == "acme")
+
+-- Histogram Exemplar (NUL bytes)
+local b_m3 = bin_metric_events[3].log
+assert(b_m3.MetricName == "bin_histogram")
+assert(type(b_m3.Exemplars) == "table" and #b_m3.Exemplars == 1)
+local b_ex3 = b_m3.Exemplars[1]
+assert(b_ex3.TraceId == string.rep("0", 32), "Exemplar 3 TraceId mismatch: " .. tostring(b_ex3.TraceId))
+assert(b_ex3.SpanId == string.rep("0", 16), "Exemplar 3 SpanId mismatch: " .. tostring(b_ex3.SpanId))
+assert(math.abs(b_ex3.Value - 0.5) < 0.001, "Exemplar 3 Value mismatch")
+
+-- 4. Uppercase Hex Normalization Across All Modes (JSON and Table)
+-- JSON Mode: Traces, Logs, Metrics Exemplars
+local upper_json_traces = [[{
+  "resourceSpans": [{
+    "resource": {"attributes": [{"key": "res.hex", "value": {"stringValue": "4BF92F3577B34DA6A3CE929D0E0E4736"}}]},
+    "scopeSpans": [{
+      "spans": [{
+        "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+        "spanId": "00F067AA0BA902B7",
+        "parentSpanId": "AABBCCDDEEFF0011",
+        "name": "UPPER_SPAN",
+        "startTimeUnixNano": "1000",
+        "endTimeUnixNano": "2000",
+        "links": [{
+          "traceId": "DEADBEEF0123456789ABCDEF00112233",
+          "spanId": "CAFEDEAD00112233"
+        }]
+      }]
+    }]
+  }]
+}]]
+
+local upper_trace_events = {}
+local n_u_traces, u_t_err = vo.traces.process(upper_json_traces, function(ev) table.insert(upper_trace_events, ev) end)
+assert(n_u_traces == 1 and u_t_err == nil)
+local u_s = upper_trace_events[1].log
+assert(u_s.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "JSON TraceId must be lowercase hex")
+assert(u_s.SpanId == "00f067aa0ba902b7", "JSON SpanId must be lowercase hex")
+assert(u_s.ParentSpanId == "aabbccddeeff0011", "JSON ParentSpanId must be lowercase hex")
+assert(u_s.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736", "ResourceAttributes must remain untouched")
+assert(u_s.Links:find('"TraceId":"deadbeef0123456789abcdef00112233"', 1, true) ~= nil, "JSON Links TraceId must be lowercase hex")
+assert(u_s.Links:find('"SpanId":"cafedead00112233"', 1, true) ~= nil, "JSON Links SpanId must be lowercase hex")
+
+-- JSON Mode: Logs
+local upper_json_logs = [[{
+  "resourceLogs": [{
+    "scopeLogs": [{
+      "logRecords": [{
+        "timeUnixNano": "1000",
+        "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+        "spanId": "00F067AA0BA902B7",
+        "body": "UPPER_BODY_4BF9"
+      }]
+    }]
+  }]
+}]]
+local upper_log_events = {}
+local n_u_logs, u_l_err = vo.logs.process(upper_json_logs, function(ev) table.insert(upper_log_events, ev) end)
+assert(n_u_logs == 1 and u_l_err == nil)
+local u_l = upper_log_events[1].log
+assert(u_l.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+assert(u_l.SpanId == "00f067aa0ba902b7")
+assert(u_l.Body == "UPPER_BODY_4BF9")
+
+-- JSON Mode: Metrics Exemplars
+local upper_json_metrics = [[{
+  "resourceMetrics": [{
+    "scopeMetrics": [{
+      "metrics": [{
+        "name": "u_gauge",
+        "gauge": {
+          "dataPoints": [{
+            "timeUnixNano": "1000",
+            "asDouble": 1.0,
+            "exemplars": [{
+              "timeUnixNano": "1000",
+              "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+              "spanId": "00F067AA0BA902B7",
+              "asDouble": 1.0
+            }]
+          }]
+        }
+      }]
+    }]
+  }]
+}]]
+local upper_metric_events = {}
+local n_u_metrics, u_m_err = vo.metrics.process(upper_json_metrics, function(ev) table.insert(upper_metric_events, ev) end)
+assert(n_u_metrics == 1 and u_m_err == nil)
+local u_m = upper_metric_events[1].log
+assert(u_m.Exemplars[1].TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+assert(u_m.Exemplars[1].SpanId == "00f067aa0ba902b7")
+
+-- Table Mode: Uppercase Hex in Logs, Traces, Metrics
+local upper_table_traces = {
+    resourceSpans = {
+        {
+            scopeSpans = {
+                {
+                    spans = {
+                        {
+                            trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+                            span_id = "00F067AA0BA902B7",
+                            parent_span_id = "AABBCCDDEEFF0011",
+                            name = "tbl-upper",
+                            links = {
+                                {
+                                    trace_id = "DEADBEEF0123456789ABCDEF00112233",
+                                    span_id = "CAFEDEAD00112233"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+local u_tbl_traces = {}
+local n_ut_t, ut_t_err = vo.traces.process(upper_table_traces, function(ev) table.insert(u_tbl_traces, ev) end)
+assert(n_ut_t == 1 and ut_t_err == nil)
+assert(u_tbl_traces[1].log.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+assert(u_tbl_traces[1].log.SpanId == "00f067aa0ba902b7")
+assert(u_tbl_traces[1].log.ParentSpanId == "aabbccddeeff0011")
+assert(u_tbl_traces[1].log.Links:find('"TraceId":"deadbeef0123456789abcdef00112233"', 1, true) ~= nil)
+assert(u_tbl_traces[1].log.Links:find('"SpanId":"cafedead00112233"', 1, true) ~= nil)
+
+local upper_table_logs = {
+    resourceLogs = {
+        {
+            scopeLogs = {
+                {
+                    logRecords = {
+                        {
+                            trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+                            span_id = "00F067AA0BA902B7",
+                            body = "tbl-upper-body"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+local u_tbl_logs = {}
+local n_ut_l, ut_l_err = vo.logs.process(upper_table_logs, function(ev) table.insert(u_tbl_logs, ev) end)
+assert(n_ut_l == 1 and ut_l_err == nil)
+assert(u_tbl_logs[1].log.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+assert(u_tbl_logs[1].log.SpanId == "00f067aa0ba902b7")
+
+local upper_table_metrics = {
+    resourceMetrics = {
+        {
+            scopeMetrics = {
+                {
+                    metrics = {
+                        {
+                            name = "tbl_upper_gauge",
+                            gauge = {
+                                dataPoints = {
+                                    {
+                                        asDouble = 1.0,
+                                        exemplars = {
+                                            {
+                                                trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+                                                span_id = "00F067AA0BA902B7",
+                                                asDouble = 1.0
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+local u_tbl_metrics = {}
+local n_ut_m, ut_m_err = vo.metrics.process(upper_table_metrics, function(ev) table.insert(u_tbl_metrics, ev) end)
+assert(n_ut_m == 1 and ut_m_err == nil)
+assert(u_tbl_metrics[1].log.Exemplars[1].TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+assert(u_tbl_metrics[1].log.Exemplars[1].SpanId == "00f067aa0ba902b7")
+
+print("   Issue #8 correlation ID normalization regression tests passed.")
+
+--------------------------------------------------------------------------------
 -- 50,000-Event Stress Loop & GC Stability Check (Dual-Mode: String & Table)
 --------------------------------------------------------------------------------
 print(">> Running 50,000-event stress loop and checking memory stability...")
@@ -618,6 +1090,96 @@ local stress_log = [[{"resourceLogs":[{"resource":{"attributes":[{"key":"service
 local stress_trace = [[{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"stress"}}]},"scopeSpans":[{"scope":{"name":"s"},"spans":[{"traceId":"5b8efff798038103d269b633813fc60c","spanId":"eee19b7ec3c1b174","name":"stress-op","startTimeUnixNano":"1293840000000000000","endTimeUnixNano":"1293840000100000000"}]}]}]}]]
 local stress_metric = [[{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"stress"}}]},"scopeMetrics":[{"scope":{"name":"s"},"metrics":[{"name":"stress_m","gauge":{"dataPoints":[{"timeUnixNano":"1293840000000000000","asInt":"42"}]}}]}]}]}]]
 
+-- Single-event binary table payloads for stress test
+local stress_bin_log = {
+    resourceLogs = {
+        {
+            resource = { attributes = { { key = "service.name", value = { stringValue = "stress-bin" } } } },
+            scopeLogs = {
+                {
+                    scope = { name = "s" },
+                    logRecords = {
+                        {
+                            timeUnixNano = "1293840000000000000",
+                            severityNumber = 9,
+                            severityText = "INFO",
+                            body = "stress-bin-msg",
+                            traceId = bin_trace_id_16,
+                            spanId = bin_span_id_8,
+                            attributes = { { key = "iter", value = { intValue = 1 } } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+local stress_bin_trace = {
+    resourceSpans = {
+        {
+            resource = { attributes = { { key = "service.name", value = { stringValue = "stress-bin" } } } },
+            scopeSpans = {
+                {
+                    scope = { name = "s" },
+                    spans = {
+                        {
+                            traceId = bin_trace_id_16,
+                            spanId = bin_span_id_8,
+                            parentSpanId = bin_parent_span_id_8,
+                            name = "stress-bin-op",
+                            startTimeUnixNano = "1293840000000000000",
+                            endTimeUnixNano = "1293840000100000000",
+                            links = {
+                                {
+                                    traceId = bin_link_trace_id_16,
+                                    spanId = bin_link_span_id_8,
+                                    traceState = "v=1",
+                                    attributes = { { key = "lk", value = { stringValue = "lv" } } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+local stress_bin_metric = {
+    resourceMetrics = {
+        {
+            resource = { attributes = { { key = "service.name", value = { stringValue = "stress-bin" } } } },
+            scopeMetrics = {
+                {
+                    scope = { name = "s" },
+                    metrics = {
+                        {
+                            name = "stress_bin_m",
+                            gauge = {
+                                dataPoints = {
+                                    {
+                                        timeUnixNano = "1293840000000000000",
+                                        asDouble = 42.0,
+                                        exemplars = {
+                                            {
+                                                timeUnixNano = "1293840000000000000",
+                                                traceId = bin_trace_id_16,
+                                                spanId = bin_span_id_8,
+                                                asDouble = 42.0
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 -- 1. Warm up Lua VM internal string pools, upvalues, and C++ static allocations
 for i = 1, 1000 do
     vo.logs.process(stress_log, discard_emit)
@@ -626,6 +1188,9 @@ for i = 1, 1000 do
     vo.logs.process(table_logs_payload, discard_emit)
     vo.traces.process(table_traces_payload, discard_emit)
     vo.metrics.process(table_metrics_payload, discard_emit)
+    vo.logs.process(stress_bin_log, discard_emit)
+    vo.traces.process(stress_bin_trace, discard_emit)
+    vo.metrics.process(stress_bin_metric, discard_emit)
 end
 
 -- Reset counter for actual 50,000 stress loop
@@ -637,55 +1202,45 @@ collectgarbage("collect")
 local mem_start = collectgarbage("count")
 
 local target_events = 50000
-local checkpoint_interval = 10000
 
--- Run 10,000 string logs, 10,000 table logs
-for i = 1, 10000 do
+-- Run 6,000 string logs, 6,000 standard table logs, 6,000 binary table logs (18,000 logs)
+for i = 1, 6000 do
     vo.logs.process(stress_log, discard_emit)
-    if i % checkpoint_interval == 0 then
-        local current_mem = collectgarbage("count")
-        assert(current_mem < mem_start + 1024, "Unbounded memory growth during string logs: " .. current_mem .. " KB")
-    end
 end
-for i = 1, 10000 do
+for i = 1, 6000 do
     vo.logs.process(table_logs_payload, discard_emit)
-    if i % checkpoint_interval == 0 then
-        local current_mem = collectgarbage("count")
-        assert(current_mem < mem_start + 1024, "Unbounded memory growth during table logs: " .. current_mem .. " KB")
-    end
 end
+for i = 1, 6000 do
+    vo.logs.process(stress_bin_log, discard_emit)
+end
+local current_mem = collectgarbage("count")
+assert(current_mem < mem_start + 1024, "Unbounded memory growth during logs: " .. current_mem .. " KB")
 
--- Run 10,000 string traces, 10,000 table traces
-for i = 1, 10000 do
+-- Run 6,000 string traces, 6,000 standard table traces, 6,000 binary table traces (18,000 traces)
+for i = 1, 6000 do
     vo.traces.process(stress_trace, discard_emit)
-    if i % checkpoint_interval == 0 then
-        local current_mem = collectgarbage("count")
-        assert(current_mem < mem_start + 1024, "Unbounded memory growth during string traces: " .. current_mem .. " KB")
-    end
 end
-for i = 1, 10000 do
+for i = 1, 6000 do
     vo.traces.process(table_traces_payload, discard_emit)
-    if i % checkpoint_interval == 0 then
-        local current_mem = collectgarbage("count")
-        assert(current_mem < mem_start + 1024, "Unbounded memory growth during table traces: " .. current_mem .. " KB")
-    end
 end
+for i = 1, 6000 do
+    vo.traces.process(stress_bin_trace, discard_emit)
+end
+current_mem = collectgarbage("count")
+assert(current_mem < mem_start + 1024, "Unbounded memory growth during traces: " .. current_mem .. " KB")
 
--- Run 5,000 string metrics, 5,000 table metrics
+-- Run 5,000 string metrics, 5,000 standard table metrics, 4,000 binary table metrics (14,000 metrics)
 for i = 1, 5000 do
     vo.metrics.process(stress_metric, discard_emit)
-    if i % checkpoint_interval == 0 then
-        local current_mem = collectgarbage("count")
-        assert(current_mem < mem_start + 1024, "Unbounded memory growth during string metrics: " .. current_mem .. " KB")
-    end
 end
 for i = 1, 5000 do
     vo.metrics.process(table_metrics_payload, discard_emit)
-    if i % checkpoint_interval == 0 then
-        local current_mem = collectgarbage("count")
-        assert(current_mem < mem_start + 1024, "Unbounded memory growth during table metrics: " .. current_mem .. " KB")
-    end
 end
+for i = 1, 4000 do
+    vo.metrics.process(stress_bin_metric, discard_emit)
+end
+current_mem = collectgarbage("count")
+assert(current_mem < mem_start + 1024, "Unbounded memory growth during metrics: " .. current_mem .. " KB")
 
 assert(stress_count == target_events, string.format("Expected %d emitted events, got %d", target_events, stress_count))
 
@@ -695,7 +1250,7 @@ collectgarbage("collect")
 local mem_end = collectgarbage("count")
 local delta = mem_end - mem_start
 
-print(string.format("   Stress Loop: Processed %d events across logs, traces, and metrics (String & Table modes).", stress_count))
+print(string.format("   Stress Loop: Processed %d events across logs, traces, and metrics (String, Table & Binary modes).", stress_count))
 print(string.format("   Memory Baseline: %.2f KB, Memory Final: %.2f KB, Memory Delta: %.2f KB", mem_start, mem_end, delta))
 
 -- Requirement: memory stays bounded with zero leaks (delta between start and end after collectgarbage("collect") is <= 10 KB)
