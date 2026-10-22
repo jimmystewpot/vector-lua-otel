@@ -439,6 +439,14 @@ assert(m5.MetricName == "rpc_latency")
 assert(m5.MetricType == "summary")
 assert(m5.Value == nil, "Summary Value must be nil")
 assert(m5.Attributes["service"] == "auth")
+assert(type(m5.Summary) == "table", "Summary table missing")
+assert(m5.Summary.count == 50, "Summary count mismatch")
+assert(m5.Summary.Count == 50, "Summary Count mismatch")
+assert(math.abs(m5.Summary.sum - 1234.5) < 0.001, "Summary sum mismatch")
+assert(math.abs(m5.Summary.Sum - 1234.5) < 0.001, "Summary Sum mismatch")
+assert(type(m5.Summary.quantileValues) == "table" and #m5.Summary.quantileValues == 2, "Summary quantileValues size mismatch")
+assert(math.abs(m5.Summary.quantileValues[1].quantile - 0.5) < 0.001 and math.abs(m5.Summary.quantileValues[1].value - 12.0) < 0.001)
+assert(math.abs(m5.Summary.quantileValues[2].quantile - 0.99) < 0.001 and math.abs(m5.Summary.quantileValues[2].value - 85.0) < 0.001)
 
 print("   Metrics ClickHouse schema validation passed.")
 
@@ -1074,6 +1082,212 @@ assert(u_tbl_metrics[1].log.Exemplars[1].TraceId == "4bf92f3577b34da6a3ce929d0e0
 assert(u_tbl_metrics[1].log.Exemplars[1].SpanId == "00f067aa0ba902b7")
 
 print("   Issue #8 correlation ID normalization regression tests passed.")
+
+--------------------------------------------------------------------------------
+-- Issue #9 Reproduction: ExponentialHistogram & Summary (Table & JSON Modes)
+--------------------------------------------------------------------------------
+print(">> Testing Issue #9 ExponentialHistogram and Summary fidelity (Table & JSON)...")
+
+-- 1. Issue #9 Lua Table mode reproduction (exponentialHistogram + summary)
+local issue9_table_payload = {
+    resourceMetrics = {
+        {
+            resource = {
+                attributes = {
+                    { key = "service.name", value = { stringValue = "issue9-svc" } }
+                }
+            },
+            scopeMetrics = {
+                {
+                    scope = { name = "issue9-meter", version = "1.0.0" },
+                    metrics = {
+                        {
+                            name = "http.server.duration.exp",
+                            description = "Exponential histogram duration",
+                            unit = "ms",
+                            exponentialHistogram = {
+                                aggregationTemporality = 2,
+                                dataPoints = {
+                                    {
+                                        startTimeUnixNano = "1700000000000000000",
+                                        timeUnixNano = "1700000001000000000",
+                                        count = 42,
+                                        sum = 105.5,
+                                        min = 0.5,
+                                        max = 12.0,
+                                        scale = 3,
+                                        zeroCount = 2,
+                                        zeroThreshold = 0.0,
+                                        positive = {
+                                            offset = -1,
+                                            bucketCounts = { 5, 15, 20 }
+                                        },
+                                        negative = {
+                                            offset = 0,
+                                            bucketCounts = { 0 }
+                                        },
+                                        attributes = {
+                                            { key = "http.route", value = { stringValue = "/api/v1/pay" } }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            name = "rpc.server.latency.summary",
+                            description = "Summary RPC latency",
+                            unit = "ms",
+                            summary = {
+                                dataPoints = {
+                                    {
+                                        startTimeUnixNano = "1700000000000000000",
+                                        timeUnixNano = "1700000002000000000",
+                                        count = 50,
+                                        sum = 1234.5,
+                                        quantileValues = {
+                                            { quantile = 0.5, value = 12.0 },
+                                            { quantile = 0.99, value = 85.0 }
+                                        },
+                                        attributes = {
+                                            { key = "rpc.method", value = { stringValue = "Charge" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+local issue9_tbl_events = {}
+local n_i9_tbl, i9_tbl_err = vo.metrics.process(issue9_table_payload, function(ev) table.insert(issue9_tbl_events, ev) end)
+assert(n_i9_tbl == 2, "Expected 2 table metrics for Issue #9, got: " .. tostring(n_i9_tbl))
+assert(i9_tbl_err == nil, "Expected nil error for Issue #9 table mode, got: " .. tostring(i9_tbl_err))
+assert(#issue9_tbl_events == 2, "Expected 2 emitted events for Issue #9 table mode")
+
+local i9_tbl_eh = issue9_tbl_events[1].log
+assert(i9_tbl_eh.MetricName == "http.server.duration.exp")
+assert(i9_tbl_eh.MetricType == "exponential_histogram", "Expected exponential_histogram, got: " .. tostring(i9_tbl_eh.MetricType))
+assert(i9_tbl_eh.AggregationTemporality == 2, "Expected AggregationTemporality 2, got: " .. tostring(i9_tbl_eh.AggregationTemporality))
+assert(i9_tbl_eh.Value == nil, "ExponentialHistogram Value must be nil")
+assert(type(i9_tbl_eh.ExponentialHistogram) == "table", "ExponentialHistogram sub-table missing")
+assert(i9_tbl_eh.ExponentialHistogram.aggregationTemporality == 2)
+assert(i9_tbl_eh.ExponentialHistogram.count == 42 and i9_tbl_eh.ExponentialHistogram.Count == 42)
+assert(math.abs(i9_tbl_eh.ExponentialHistogram.sum - 105.5) < 0.001)
+assert(math.abs(i9_tbl_eh.ExponentialHistogram.min - 0.5) < 0.001)
+assert(math.abs(i9_tbl_eh.ExponentialHistogram.max - 12.0) < 0.001)
+assert(i9_tbl_eh.ExponentialHistogram.scale == 3 and i9_tbl_eh.ExponentialHistogram.Scale == 3)
+assert(i9_tbl_eh.ExponentialHistogram.zeroCount == 2 and i9_tbl_eh.ExponentialHistogram.ZeroCount == 2)
+assert(type(i9_tbl_eh.ExponentialHistogram.positive) == "table")
+assert(i9_tbl_eh.ExponentialHistogram.positive.offset == -1)
+assert(#i9_tbl_eh.ExponentialHistogram.positive.bucketCounts == 3)
+assert(i9_tbl_eh.ExponentialHistogram.positive.bucketCounts[1] == 5)
+assert(i9_tbl_eh.ExponentialHistogram.positive.bucketCounts[2] == 15)
+assert(i9_tbl_eh.ExponentialHistogram.positive.bucketCounts[3] == 20)
+assert(type(i9_tbl_eh.ExponentialHistogram.negative) == "table")
+assert(i9_tbl_eh.ExponentialHistogram.negative.offset == 0)
+assert(#i9_tbl_eh.ExponentialHistogram.negative.bucketCounts == 1)
+
+local i9_tbl_sum = issue9_tbl_events[2].log
+assert(i9_tbl_sum.MetricName == "rpc.server.latency.summary")
+assert(i9_tbl_sum.MetricType == "summary")
+assert(i9_tbl_sum.Value == nil, "Summary Value must be nil")
+assert(type(i9_tbl_sum.Summary) == "table", "Summary sub-table missing")
+assert(i9_tbl_sum.Summary.count == 50 and i9_tbl_sum.Summary.Count == 50)
+assert(math.abs(i9_tbl_sum.Summary.sum - 1234.5) < 0.001)
+assert(type(i9_tbl_sum.Summary.quantileValues) == "table" and #i9_tbl_sum.Summary.quantileValues == 2)
+assert(math.abs(i9_tbl_sum.Summary.quantileValues[1].quantile - 0.5) < 0.001)
+assert(math.abs(i9_tbl_sum.Summary.quantileValues[1].value - 12.0) < 0.001)
+assert(math.abs(i9_tbl_sum.Summary.quantileValues[2].quantile - 0.99) < 0.001)
+assert(math.abs(i9_tbl_sum.Summary.quantileValues[2].value - 85.0) < 0.001)
+
+-- 2. Issue #9 JSON string mode reproduction (mixed_json)
+local mixed_json = [[{
+  "resourceMetrics": [{
+    "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "issue9-json-svc"}}]},
+    "scopeMetrics": [{
+      "scope": {"name": "issue9-json-scope", "version": "1.0.0"},
+      "metrics": [
+        {
+          "name": "http.server.duration.exp",
+          "description": "Exponential histogram duration",
+          "unit": "ms",
+          "exponentialHistogram": {
+            "aggregationTemporality": 1,
+            "dataPoints": [{
+              "startTimeUnixNano": "1700000000000000000",
+              "timeUnixNano": "1700000001000000000",
+              "count": "42",
+              "sum": 105.5,
+              "min": 0.5,
+              "max": 12.0,
+              "scale": -1,
+              "zeroCount": "2",
+              "zeroThreshold": 0.0,
+              "positive": {"offset": 1, "bucketCounts": ["5", "15", "20"]},
+              "negative": {"offset": -2, "bucketCounts": ["0"]}
+            }]
+          }
+        },
+        {
+          "name": "rpc.server.latency.summary",
+          "description": "Summary RPC latency",
+          "unit": "ms",
+          "summary": {
+            "dataPoints": [{
+              "startTimeUnixNano": "1700000000000000000",
+              "timeUnixNano": "1700000002000000000",
+              "count": "50",
+              "sum": 1234.5,
+              "quantileValues": [
+                {"quantile": 0.5, "value": 12.0},
+                {"quantile": 0.99, "value": 85.0}
+              ]
+            }]
+          }
+        }
+      ]
+    }]
+  }]
+}]]
+
+local issue9_json_events = {}
+local n_i9_json, i9_json_err = vo.metrics.process(mixed_json, function(ev) table.insert(issue9_json_events, ev) end)
+assert(n_i9_json == 2, "Expected 2 JSON metrics for Issue #9, got: " .. tostring(n_i9_json))
+assert(i9_json_err == nil, "Expected nil error for Issue #9 JSON mode, got: " .. tostring(i9_json_err))
+assert(#issue9_json_events == 2, "Expected 2 emitted events for Issue #9 JSON mode")
+
+local i9_json_eh = issue9_json_events[1].log
+assert(i9_json_eh.MetricType == "exponential_histogram")
+assert(i9_json_eh.AggregationTemporality == 1)
+assert(i9_json_eh.Value == nil)
+assert(type(i9_json_eh.ExponentialHistogram) == "table")
+assert(i9_json_eh.ExponentialHistogram.count == 42)
+assert(math.abs(i9_json_eh.ExponentialHistogram.sum - 105.5) < 0.001)
+assert(math.abs(i9_json_eh.ExponentialHistogram.min - 0.5) < 0.001)
+assert(math.abs(i9_json_eh.ExponentialHistogram.max - 12.0) < 0.001)
+assert(i9_json_eh.ExponentialHistogram.scale == -1)
+assert(i9_json_eh.ExponentialHistogram.zeroCount == 2)
+assert(i9_json_eh.ExponentialHistogram.positive.offset == 1)
+assert(#i9_json_eh.ExponentialHistogram.positive.bucketCounts == 3)
+assert(i9_json_eh.ExponentialHistogram.positive.bucketCounts[3] == 20)
+assert(i9_json_eh.ExponentialHistogram.negative.offset == -2)
+assert(#i9_json_eh.ExponentialHistogram.negative.bucketCounts == 1)
+
+local i9_json_sum = issue9_json_events[2].log
+assert(i9_json_sum.MetricType == "summary")
+assert(i9_json_sum.Value == nil)
+assert(type(i9_json_sum.Summary) == "table")
+assert(i9_json_sum.Summary.count == 50)
+assert(math.abs(i9_json_sum.Summary.sum - 1234.5) < 0.001)
+assert(#i9_json_sum.Summary.quantileValues == 2)
+assert(math.abs(i9_json_sum.Summary.quantileValues[1].quantile - 0.5) < 0.001)
+assert(math.abs(i9_json_sum.Summary.quantileValues[2].value - 85.0) < 0.001)
+
+print("   Issue #9 ExponentialHistogram and Summary validation passed.")
 
 --------------------------------------------------------------------------------
 -- 50,000-Event Stress Loop & GC Stability Check (Dual-Mode: String & Table)

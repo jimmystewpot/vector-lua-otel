@@ -52,8 +52,17 @@ sinks:
 - `TraceFlags`: 64-bit signed integer (`int64`).
 - `SeverityNumber`: 64-bit signed integer (`int64`) (range 1–24).
 
-### 3. Attribute Maps
-- `ResourceAttributes`, `ScopeAttributes`, `LogAttributes`, and `SpanAttributes` are serialised as compact JSON strings inside Parquet strings (`binary (STRING)`), ensuring full compatibility across query engines without schema evolution issues.
+### 3. Attribute Maps & Structured Metric Sub-Tables
+- `ResourceAttributes`, `ScopeAttributes`, `LogAttributes`, `SpanAttributes`, and `Attributes` are serialised as compact JSON strings inside Parquet strings (`binary (STRING)`), ensuring full compatibility across query engines without schema evolution issues.
+- **Metrics Columns** (`metrics.schema`):
+  - `MetricType`: Discriminator string (`"gauge"`, `"sum"`, `"histogram"`, `"exponential_histogram"`, `"summary"`).
+  - `AggregationTemporality`: Optional 64-bit signed integer (`int64`, `1` = DELTA, `2` = CUMULATIVE, `0` = UNSPECIFIED) for `"sum"`, `"histogram"`, and `"exponential_histogram"`.
+  - `IsMonotonic`: Optional boolean (`boolean`) for `"sum"` metrics when `isMonotonic` is specified.
+  - `Value`: Optional 64-bit floating-point number (`double`) populated for `"gauge"` and `"sum"` (null/omitted for `"histogram"`, `"exponential_histogram"`, and `"summary"`).
+  - `Histogram`, `ExponentialHistogram`, `Summary`, and `Exemplars`: Structured metric payloads stored as `optional binary (STRING)` (JSON-encoded sub-tables when written to Parquet):
+    - `Histogram`: `{ aggregationTemporality, count, sum, min, max, bucketCounts, explicitBounds }`
+    - `ExponentialHistogram`: `{ aggregationTemporality, count, sum, min, max, scale, zeroCount, zeroThreshold, positive = { offset, bucketCounts }, negative = { offset, bucketCounts } }`
+    - `Summary`: `{ count, sum, quantileValues = [ { quantile, value }, ... ] }`
 
 ---
 
