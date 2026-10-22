@@ -1154,6 +1154,54 @@ TEST_F(NativeExtractorsTest, NativeMetrics_UnsupportedNonOtlpVariantsSkippedAndL
       << "Stdout missing drop warning: " << json_mixed_stdout;
   EXPECT_NE(json_mixed_stdout.find("other: 1"), std::string::npos)
       << "Stdout missing other count: " << json_mixed_stdout;
+
+  // 5. Wholly unrecognized nonempty record in JSON (no recognized name or variant key)
+  std::string json_wholly_unrecognized = R"({"future_metric":{"value":1}})";
+  testing::internal::CaptureStdout();
+  auto json_wu_res = ProcessNativeMetrics(L_, json_wholly_unrecognized, emit_idx_);
+  std::string json_wu_stdout = testing::internal::GetCapturedStdout();
+  EXPECT_TRUE(json_wu_res.success) << json_wu_res.error;
+  EXPECT_EQ(json_wu_res.emitted_count, 0);
+  EXPECT_NE(json_wu_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+            std::string::npos)
+      << "Stdout missing drop warning for wholly unrecognized JSON: " << json_wu_stdout;
+  EXPECT_NE(json_wu_stdout.find("other: 1"), std::string::npos)
+      << "Stdout missing other: 1 for wholly unrecognized JSON: " << json_wu_stdout;
+
+  // 6. Wholly unrecognized nonempty record in Lua Table (no recognized name or variant key)
+  ASSERT_EQ(luaL_dostring(L_, "return { future_metric = { value = 1 } }"), LUA_OK);
+  int wu_tbl_idx = lua_gettop(L_);
+  testing::internal::CaptureStdout();
+  auto tbl_wu_res = ProcessNativeMetricsTable(L_, wu_tbl_idx, emit_idx_);
+  std::string tbl_wu_stdout = testing::internal::GetCapturedStdout();
+  lua_pop(L_, 1);
+  EXPECT_TRUE(tbl_wu_res.success) << tbl_wu_res.error;
+  EXPECT_EQ(tbl_wu_res.emitted_count, 0);
+  EXPECT_NE(tbl_wu_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+            std::string::npos)
+      << "Stdout missing drop warning for wholly unrecognized table: " << tbl_wu_stdout;
+  EXPECT_NE(tbl_wu_stdout.find("other: 1"), std::string::npos)
+      << "Stdout missing other: 1 for wholly unrecognized table: " << tbl_wu_stdout;
+
+  // 7. Truly empty object in JSON and Table mode must NOT trigger drop warning (AGENTS.md Rule 3)
+  testing::internal::CaptureStdout();
+  auto json_empty_res = ProcessNativeMetrics(L_, "{}", emit_idx_);
+  std::string json_empty_stdout = testing::internal::GetCapturedStdout();
+  EXPECT_TRUE(json_empty_res.success) << json_empty_res.error;
+  EXPECT_EQ(json_empty_res.emitted_count, 0);
+  EXPECT_TRUE(json_empty_stdout.empty())
+      << "Expected no warning for empty JSON {}, got: " << json_empty_stdout;
+
+  ASSERT_EQ(luaL_dostring(L_, "return {}"), LUA_OK);
+  int empty_tbl_idx = lua_gettop(L_);
+  testing::internal::CaptureStdout();
+  auto tbl_empty_res = ProcessNativeMetricsTable(L_, empty_tbl_idx, emit_idx_);
+  std::string tbl_empty_stdout = testing::internal::GetCapturedStdout();
+  lua_pop(L_, 1);
+  EXPECT_TRUE(tbl_empty_res.success) << tbl_empty_res.error;
+  EXPECT_EQ(tbl_empty_res.emitted_count, 0);
+  EXPECT_TRUE(tbl_empty_stdout.empty())
+      << "Expected no warning for empty table {}, got: " << tbl_empty_stdout;
 }
 
 TEST_F(NativeExtractorsTest, NativeMetricsJson_AllSupportedVariants) {

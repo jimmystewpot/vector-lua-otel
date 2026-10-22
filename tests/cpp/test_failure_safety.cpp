@@ -1839,11 +1839,8 @@ TEST(FailureSafetyNativeMetrics, TableExemplarsAreCopiedNotAliased) {
   EXPECT_NE(rec.events[0].find(R"("SpanId":"ab")"), std::string::npos) << rec.events[0];
 }
 
-TEST(FailureSafetyNativeMetrics, UnsupportedVariantsFailWithExactMessageAndPartialCount) {
+TEST(FailureSafetyNativeMetrics, UnsupportedVariantsSkippedWithWarningAndValidItemsEmitted) {
   for (const char* variant : {"distribution", "set", "sketch"}) {
-    const std::string expected = std::string("Unsupported non-OTLP metric variant '") + variant +
-                                 "': vector_native only supports OpenTelemetry metric types "
-                                 "(counter, gauge, aggregated_histogram, aggregated_summary)";
     for (bool table : {false, true}) {
       SCOPED_TRACE(std::string(variant) + (table ? " (table)" : " (json)"));
       RawState s;
@@ -1853,14 +1850,18 @@ TEST(FailureSafetyNativeMetrics, UnsupportedVariantsFailWithExactMessageAndParti
           R"(":{"x":1}},{"name":"never","gauge":{"value":2}}])";
       const std::string lua = std::string(R"(return {{name="ok",gauge={value=1}},{name="bad",)") +
                               variant + R"(={x=1}},{name="never",gauge={value=2}}})";
+      testing::internal::CaptureStdout();
       const ProcResult r =
           CallProcess(s, true, "metrics", table ? TablePayload(lua) : JsonPayload(json), rec);
+      std::string captured_out = testing::internal::GetCapturedStdout();
       ASSERT_EQ(r.status, LUA_OK);
-      ASSERT_EQ(r.nresults, 3);
-      EXPECT_TRUE(r.first_nil);
-      EXPECT_EQ(r.error, expected);
-      EXPECT_EQ(r.count, rec.rows) << "partial count must equal rows in completed callbacks";
-      EXPECT_EQ(r.count, (1 / kN) * kN);
+      ASSERT_EQ(r.nresults, 2);
+      EXPECT_FALSE(r.first_nil);
+      EXPECT_EQ(r.count, 2);
+      EXPECT_EQ(rec.rows, 2);
+      EXPECT_NE(captured_out.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+                std::string::npos);
+      EXPECT_NE(captured_out.find(variant), std::string::npos);
       for (int i = 0; i < kInvocationSlotCount; ++i) {
         EXPECT_EQ(AnchorSlotType(s.L(), ModuleKind::Native, static_cast<AnchorSlot>(i)),
                   LUA_TBOOLEAN);
@@ -1944,20 +1945,22 @@ TEST(FailureSafetyNativeMetrics, RootShapesWrappersAndErrors) {
         << rec.events[0];
   }
 
-  // An unsupported variant inside a single table record or a table wrapper is an error.
-  const std::string expected =
-      "Unsupported non-OTLP metric variant 'set': vector_native only supports OpenTelemetry "
-      "metric types (counter, gauge, aggregated_histogram, aggregated_summary)";
+  // An unsupported variant inside a single table record or a table wrapper is skipped with warning.
   for (const char* lua : {R"(return {name="x",gauge={value=1},set={x=1}})",
                           R"(return {metric={name="x",gauge={value=1},set={x=1}}})"}) {
     SCOPED_TRACE(lua);
     RawState s;
     ProcRecorder rec;
+    testing::internal::CaptureStdout();
     const ProcResult r = CallProcess(s, true, "metrics", TablePayload(lua), rec);
-    ASSERT_EQ(r.nresults, 3);
-    EXPECT_TRUE(r.first_nil);
-    EXPECT_EQ(r.error, expected);
+    std::string captured_out = testing::internal::GetCapturedStdout();
+    ASSERT_EQ(r.nresults, 2);
+    EXPECT_FALSE(r.first_nil);
     EXPECT_EQ(r.count, 0);
+    EXPECT_EQ(rec.rows, 0);
+    EXPECT_NE(captured_out.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+              std::string::npos);
+    EXPECT_NE(captured_out.find("set: 1"), std::string::npos);
   }
 }
 

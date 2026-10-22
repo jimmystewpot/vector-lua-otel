@@ -96,7 +96,6 @@ bool IsInfinityString(std::string_view sv) noexcept {
          core::EqualsIgnoreCaseAscii(sv, "+infinity");
 }
 
-
 void ThrowIfSimdjsonSyntaxError(simdjson::error_code err) {
   if (err != simdjson::SUCCESS && err != simdjson::INCORRECT_TYPE) {
     throw std::runtime_error(std::string(simdjson::error_message(err)));
@@ -1051,8 +1050,10 @@ bool ExtractNativeMetricObjectJson(
   };
 
   bool has_recognized_field = false;
+  bool has_any_field = false;
 
   for (auto field_res : rec_obj) {
+    has_any_field = true;
     if (field_res.error() != simdjson::SUCCESS) {
       err_out = std::string(simdjson::error_message(field_res.error()));
       return false;
@@ -1423,13 +1424,12 @@ bool ExtractNativeMetricObjectJson(
     }
   }
 
-  if (!has_recognized_field) {
+  if (!has_any_field) {
     return true;
   }
   if (metric_type.empty()) {
-    dropped_summary.other++;
-    if (out_matched != nullptr) {
-      *out_matched = true;
+    if (depth == 0) {
+      dropped_summary.other++;
     }
     return true;
   }
@@ -2028,19 +2028,20 @@ bool ExtractSingleNativeMetricTable(
   int abs_rec_idx = lua_absindex(L, rec_idx);
 
   // 1. Check for unsupported non-OTLP metric variants first
-  static constexpr core::ReadKey kUnsupportedVariants[] = {"distribution", "set", "sketch"};
-  for (const core::ReadKey& v : kUnsupportedVariants) {
-    if (core::GetTableFieldRaw(L, abs_rec_idx, v)) {
-      lua_pop(L, 1);
-      if (std::string_view(v) == "distribution") {
-        dropped_summary.distribution++;
-      } else if (std::string_view(v) == "set") {
-        dropped_summary.set++;
-      } else {
-        dropped_summary.sketch++;
-      }
-      return true;
-    }
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "distribution")) {
+    lua_pop(L, 1);
+    dropped_summary.distribution++;
+    return true;
+  }
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "set")) {
+    lua_pop(L, 1);
+    dropped_summary.set++;
+    return true;
+  }
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "sketch")) {
+    lua_pop(L, 1);
+    dropped_summary.sketch++;
+    return true;
   }
 
   // 2. Top-level temporality & supported OTLP metric variant
@@ -2573,6 +2574,8 @@ bool ExtractNativeMetricsTable(OperationContext& ctx) {
             lua_pop(L, 1);
             return false;
           }
+        } else if (!core::IsLuaTableEmpty(L, item_idx)) {
+          dropped_summary.other++;
         }
       }
       lua_pop(L, 1);
@@ -2603,13 +2606,20 @@ bool ExtractNativeMetricsTable(OperationContext& ctx) {
             lua_pop(L, 1);
             return FailMetric(ctx, emitter, err_out);
           }
+        } else if (!core::IsLuaTableEmpty(L, inner_idx)) {
+          handled_wrapper = true;
+          dropped_summary.other++;
         }
       }
       lua_pop(L, 1);
     }
-    if (!handled_wrapper && HasNativeMetricFields(L, abs_idx)) {
-      if (!extract_one(abs_idx)) {
-        return FailMetric(ctx, emitter, err_out);
+    if (!handled_wrapper) {
+      if (HasNativeMetricFields(L, abs_idx)) {
+        if (!extract_one(abs_idx)) {
+          return FailMetric(ctx, emitter, err_out);
+        }
+      } else if (!core::IsLuaTableEmpty(L, abs_idx)) {
+        dropped_summary.other++;
       }
     }
   }
