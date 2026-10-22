@@ -30,6 +30,7 @@ std::string_view CaptureServiceName(lua_State* L, bool is_scalar_str) noexcept {
     return "unknown_service";
   }
   // Copy into thread-local scratch (preserves embedded NULs)
+  ReserveScratchString(tls_service_name_scratch, 128);
   tls_service_name_scratch.assign(s, slen);
   return std::string_view(tls_service_name_scratch);
 }
@@ -149,71 +150,134 @@ std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string
   return default_val;
 }
 
-int64_t ParseInt64(simdjson::ondemand::value& val) {
+bool TryParseInt64(simdjson::ondemand::value& val, int64_t& out) {
   auto type_res = val.type();
   if (type_res.error() != simdjson::SUCCESS) {
-    return 0;
+    return false;
   }
   const auto type = type_res.value();
   if (type == simdjson::ondemand::json_type::number) {
     auto num_res = val.get_number();
     if (num_res.error() != simdjson::SUCCESS) {
-      return 0;
+      return false;
     }
     const auto num = num_res.value();
     if (num.is_int64()) {
-      return num.get_int64();
+      out = num.get_int64();
+      return true;
     }
     if (num.is_uint64()) {
       const uint64_t u = num.get_uint64();
-      return u > static_cast<uint64_t>(INT64_MAX) ? std::numeric_limits<int64_t>::max()
-                                                  : static_cast<int64_t>(u);
+      out = u > static_cast<uint64_t>(INT64_MAX) ? std::numeric_limits<int64_t>::max()
+                                                 : static_cast<int64_t>(u);
+      return true;
     }
     if (num.is_double()) {
       const double d = num.get_double();
       if (std::isfinite(d) && d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
-        return static_cast<int64_t>(d);
+        out = static_cast<int64_t>(d);
+        return true;
       }
     }
-    return 0;
+    return false;
   }
 
   if (type == simdjson::ondemand::json_type::string) {
     auto str_res = val.get_string();
     if (str_res.error() != simdjson::SUCCESS) {
-      return 0;
+      return false;
     }
-    std::string_view sv = str_res.value();
-    while (!sv.empty() &&
-           (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
-      sv.remove_prefix(1);
-    }
-    while (!sv.empty() &&
-           (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
-      sv.remove_suffix(1);
-    }
+    std::string_view sv = TrimJsonWhitespace(str_res.value());
     if (!sv.empty() && sv.front() == '+') {
       sv.remove_prefix(1);
       if (!sv.empty() && sv.front() == '-') {
-        return 0;
+        return false;
       }
     }
     if (sv.empty()) {
-      return 0;
+      return false;
     }
     int64_t sval = 0;
     auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), sval);
     if (ec == std::errc() && ptr == sv.data() + sv.size()) {
-      return sval;
+      out = sval;
+      return true;
     }
     uint64_t uval = 0;
     auto [uptr, uec] = std::from_chars(sv.data(), sv.data() + sv.size(), uval);
     if (uec == std::errc() && uptr == sv.data() + sv.size()) {
-      return uval > static_cast<uint64_t>(INT64_MAX) ? std::numeric_limits<int64_t>::max()
-                                                     : static_cast<int64_t>(uval);
+      out = uval > static_cast<uint64_t>(INT64_MAX) ? std::numeric_limits<int64_t>::max()
+                                                    : static_cast<int64_t>(uval);
+      return true;
     }
   }
+  return false;
+}
+
+int64_t ParseInt64(simdjson::ondemand::value& val) {
+  int64_t v = 0;
+  TryParseInt64(val, v);
+  return v;
+}
+
+int64_t ParseSeverityNumberString(std::string_view sv) noexcept {
+  if (sv == "SEVERITY_NUMBER_TRACE") return 1;
+  if (sv == "SEVERITY_NUMBER_TRACE2") return 2;
+  if (sv == "SEVERITY_NUMBER_TRACE3") return 3;
+  if (sv == "SEVERITY_NUMBER_TRACE4") return 4;
+  if (sv == "SEVERITY_NUMBER_DEBUG") return 5;
+  if (sv == "SEVERITY_NUMBER_DEBUG2") return 6;
+  if (sv == "SEVERITY_NUMBER_DEBUG3") return 7;
+  if (sv == "SEVERITY_NUMBER_DEBUG4") return 8;
+  if (sv == "SEVERITY_NUMBER_INFO") return 9;
+  if (sv == "SEVERITY_NUMBER_INFO2") return 10;
+  if (sv == "SEVERITY_NUMBER_INFO3") return 11;
+  if (sv == "SEVERITY_NUMBER_INFO4") return 12;
+  if (sv == "SEVERITY_NUMBER_WARN") return 13;
+  if (sv == "SEVERITY_NUMBER_WARN2") return 14;
+  if (sv == "SEVERITY_NUMBER_WARN3") return 15;
+  if (sv == "SEVERITY_NUMBER_WARN4") return 16;
+  if (sv == "SEVERITY_NUMBER_ERROR") return 17;
+  if (sv == "SEVERITY_NUMBER_ERROR2") return 18;
+  if (sv == "SEVERITY_NUMBER_ERROR3") return 19;
+  if (sv == "SEVERITY_NUMBER_ERROR4") return 20;
+  if (sv == "SEVERITY_NUMBER_FATAL") return 21;
+  if (sv == "SEVERITY_NUMBER_FATAL2") return 22;
+  if (sv == "SEVERITY_NUMBER_FATAL3") return 23;
+  if (sv == "SEVERITY_NUMBER_FATAL4") return 24;
+  if (sv == "SEVERITY_NUMBER_UNSPECIFIED") return 0;
+
+  sv = TrimJsonWhitespace(sv);
+  if (!sv.empty() && sv.front() == '+') {
+    sv.remove_prefix(1);
+    if (!sv.empty() && sv.front() == '-') {
+      return 0;
+    }
+  }
+  if (sv.empty()) {
+    return 0;
+  }
+  int64_t sval = 0;
+  auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), sval);
+  if (ec == std::errc() && ptr == sv.data() + sv.size()) {
+    return sval;
+  }
   return 0;
+}
+
+int64_t ParseSeverityNumber(simdjson::ondemand::value& val) {
+  auto type_res = val.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return 0;
+  }
+  if (type_res.value() == simdjson::ondemand::json_type::string) {
+    auto str_res = val.get_string();
+    if (str_res.error() != simdjson::SUCCESS) {
+      return 0;
+    }
+    return ParseSeverityNumberString(str_res.value());
+  }
+  return ParseInt64(val);
 }
 
 uint64_t ParseUint64(simdjson::ondemand::value& val) {
@@ -626,6 +690,10 @@ void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& 
 void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
                          FastJsonWriter& json_writer, std::string_view* out_service_name) {
   if (L == nullptr) {
+    return;
+  }
+  if (!lua_checkstack(L, 8)) {
+    lua_newtable(L);
     return;
   }
   lua_newtable(L);
