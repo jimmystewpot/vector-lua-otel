@@ -53,6 +53,7 @@ add_library(vector_otel_core STATIC
   src/extractors/logs_extractor.cpp
   src/extractors/traces_extractor.cpp
   src/extractors/metrics_extractor.cpp
+  src/native_extractors/native_logs_extractor.cpp
 )
 set_target_properties(vector_otel_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(vector_otel_core PUBLIC
@@ -93,6 +94,7 @@ add_executable(vector_otel_tests
   tests/cpp/test_module_exports.cpp
   tests/cpp/test_table_mode.cpp
   tests/cpp/test_scratch.cpp
+  tests/cpp/test_native_extractors.cpp
 )
 target_link_libraries(vector_otel_tests PRIVATE
   vector_otel_core
