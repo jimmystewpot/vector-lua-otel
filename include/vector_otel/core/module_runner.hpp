@@ -53,11 +53,13 @@ int ProcessDispatcher(lua_State* L) {
 
     extractors::ExtractionResult result;
     if (arg_type == LUA_TSTRING) {
+      struct ParserTrimGuard {
+        ~ParserTrimGuard() noexcept { OtelParser::TrimThreadLocalBuffer(); }
+      } parser_trim_guard;
       size_t len = 0;
       const char* str = lua_tolstring(L, 1, &len);
       std::string_view payload(str, len);
       result = StringExtractor(L, payload, 2);
-      OtelParser::TrimThreadLocalBuffer();
     } else {
       result = TableExtractor(L, 1, 2);
     }

@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "vector_otel/core/scratch.hpp"
+#include "vector_otel/core/timestamp.hpp"
 
 namespace vector_otel::core {
 
@@ -690,5 +691,127 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
 }
 
 void ResetServiceNameScratch() noexcept { ResetScratchString(tls_service_name_scratch); }
+
+std::string_view TrimJsonWhitespace(std::string_view sv) noexcept {
+  while (!sv.empty() &&
+         (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
+    sv.remove_prefix(1);
+  }
+  while (!sv.empty() &&
+         (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
+    sv.remove_suffix(1);
+  }
+  return sv;
+}
+
+bool EqualsIgnoreCaseAscii(std::string_view a, std::string_view b) noexcept {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.size(); ++i) {
+    char ca = a[i];
+    char cb = b[i];
+    if (ca >= 'a' && ca <= 'z') {
+      ca = static_cast<char>(ca - 'a' + 'A');
+    }
+    if (cb >= 'a' && cb <= 'z') {
+      cb = static_cast<char>(cb - 'a' + 'A');
+    }
+    if (ca != cb) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ParseJsonTimestamp(simdjson::ondemand::value& fv, uint64_t& out_ns) noexcept {
+  auto type_res = fv.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return false;
+  }
+  const auto type = type_res.value();
+  if (type == simdjson::ondemand::json_type::string) {
+    auto s_res = fv.get_string();
+    if (s_res.error() != simdjson::SUCCESS) {
+      return false;
+    }
+    return ParseIso8601ToUnixNano(s_res.value(), out_ns);
+  }
+  if (type == simdjson::ondemand::json_type::number) {
+    auto num_res = fv.get_number();
+    if (num_res.error() != simdjson::SUCCESS) {
+      return false;
+    }
+    const auto num = num_res.value();
+    if (num.is_uint64()) {
+      out_ns = num.get_uint64();
+      return true;
+    }
+    if (num.is_int64()) {
+      const int64_t iv = num.get_int64();
+      if (iv < 0) {
+        return false;
+      }
+      out_ns = static_cast<uint64_t>(iv);
+      return true;
+    }
+    if (num.is_double()) {
+      const double d = num.get_double();
+      if (std::isfinite(d) && d >= 0.0 && d < 18446744073709551616.0) {
+        out_ns = static_cast<uint64_t>(d);
+        return true;
+      }
+    }
+    return false;
+  }
+  if (type == simdjson::ondemand::json_type::object) {
+    auto obj_res = fv.get_object();
+    if (obj_res.error() != simdjson::SUCCESS) {
+      return false;
+    }
+    int64_t year = 0;
+    int64_t month = 0;
+    int64_t day = 0;
+    int64_t hour = 0;
+    int64_t min = 0;
+    int64_t sec = 0;
+    int64_t nanosec = 0;
+    bool has_year = false;
+    bool has_month = false;
+    bool has_day = false;
+    for (auto field_res : obj_res.value()) {
+      if (field_res.error() != simdjson::SUCCESS) continue;
+      auto k_res = field_res.unescaped_key();
+      if (k_res.error() != simdjson::SUCCESS) continue;
+      std::string_view k = k_res.value();
+      auto v_res = field_res.value();
+      if (v_res.error() != simdjson::SUCCESS) continue;
+      auto v = v_res.value();
+      if (k == "year") {
+        year = ParseInt64(v);
+        has_year = true;
+      } else if (k == "month") {
+        month = ParseInt64(v);
+        has_month = true;
+      } else if (k == "day") {
+        day = ParseInt64(v);
+        has_day = true;
+      } else if (k == "hour") {
+        hour = ParseInt64(v);
+      } else if (k == "min") {
+        min = ParseInt64(v);
+      } else if (k == "sec") {
+        sec = ParseInt64(v);
+      } else if (k == "nanosec" || k == "nanosecond" || k == "nsec") {
+        nanosec = ParseInt64(v);
+      }
+    }
+    if (!has_year || !has_month || !has_day) {
+      return false;
+    }
+    return CivilToUnixNano(year, month, day, hour, min, sec, nanosec, out_ns);
+  }
+  return false;
+}
 
 }  // namespace vector_otel::core

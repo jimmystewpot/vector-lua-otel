@@ -26,6 +26,10 @@ bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* n
 bool GetTableFieldRaw(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,
                       const char* name3 = nullptr);
 
+// O(1) check returning true if the table at table_idx is not a table or has 0
+// keys (using a single lua_next probe without string interning).
+bool IsLuaTableEmpty(lua_State* L, int table_idx) noexcept;
+
 // Reads string field from table at table_idx, or returns default_val.
 std::string ReadTableString(lua_State* L, int table_idx, const char* name1,
                             const char* name2 = nullptr, std::string_view default_val = "");
@@ -52,6 +56,12 @@ void CopyStringField(lua_State* L, int table_idx, const char* name1, const char*
 void CopyIdField(lua_State* L, int table_idx, const char* name1, const char* name2,
                  size_t expected_binary_len, LuaEmitter& emitter, std::string_view dst_key,
                  const char* name3 = nullptr);
+
+// Always sets dst_key on emitter (even when default_val is empty), reading
+// table[name1] or table[name2] via raw table lookup.
+void CopyStringFieldAlways(lua_State* L, int table_idx, const char* name1, const char* name2,
+                           LuaEmitter& emitter, std::string_view dst_key,
+                           std::string_view default_val = "");
 
 // Parses int64/uint64/double value at Lua stack index val_idx (handles
 // integers, finite floats, and numeric strings).

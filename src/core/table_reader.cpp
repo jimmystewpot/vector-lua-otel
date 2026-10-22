@@ -150,6 +150,22 @@ bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* n
   return GetTableFieldRaw(L, table_idx, name1, name2, name3);
 }
 
+bool IsLuaTableEmpty(lua_State* L, int table_idx) noexcept {
+  if (L == nullptr) {
+    return true;
+  }
+  int abs_idx = lua_absindex(L, table_idx);
+  if (!lua_istable(L, abs_idx)) {
+    return true;
+  }
+  lua_pushnil(L);
+  if (lua_next(L, abs_idx) == 0) {
+    return true;
+  }
+  lua_pop(L, 2);
+  return false;
+}
+
 std::string ReadTableString(lua_State* L, int table_idx, const char* name1, const char* name2,
                             std::string_view default_val) {
   if (GetTableField(L, table_idx, name1, name2)) {
@@ -249,6 +265,22 @@ void CopyIdField(lua_State* L, int table_idx, const char* name1, const char* nam
   std::string_view norm =
       ReadTableNormalizedId(L, table_idx, name1, name2, name3, expected_binary_len, id_buf);
   emitter.SetString(dst_key, norm);
+}
+
+void CopyStringFieldAlways(lua_State* L, int table_idx, const char* name1, const char* name2,
+                           LuaEmitter& emitter, std::string_view dst_key,
+                           std::string_view default_val) {
+  if (GetTableFieldRaw(L, table_idx, name1, name2)) {
+    if (lua_isstring(L, -1)) {
+      size_t len = 0;
+      const char* s = lua_tolstring(L, -1, &len);
+      emitter.SetString(dst_key, std::string_view(s, len));
+      lua_pop(L, 1);
+      return;
+    }
+    lua_pop(L, 1);
+  }
+  emitter.SetString(dst_key, default_val);
 }
 
 bool TryParseTableInt64At(lua_State* L, int val_idx, int64_t& out) {

@@ -1216,6 +1216,59 @@ TEST_F(NativeExtractorsTest, JsonWrapperSourceTypeBeforeInnerObject) {
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(NativeExtractorsTest, Resilience_EmptyJsonMalformedBatchAndDeepNesting) {
+  // 1. Empty JSON input returns (false, "Empty JSON input", 0) across all three extractors
+  auto empty_log = ProcessNativeLogs(L_, "", emit_idx_);
+  EXPECT_FALSE(empty_log.success);
+  EXPECT_EQ(empty_log.emitted_count, 0);
+
+  auto empty_trace = ProcessNativeTraces(L_, "", emit_idx_);
+  EXPECT_FALSE(empty_trace.success);
+  EXPECT_EQ(empty_trace.emitted_count, 0);
+
+  auto empty_metric = ProcessNativeMetrics(L_, "", emit_idx_);
+  EXPECT_FALSE(empty_metric.success);
+  EXPECT_EQ(empty_metric.emitted_count, 0);
+
+  // 2. Non-object element mid-batch fails fast and preserves partial_count = 1
+  auto bad_log_batch = ProcessNativeLogs(L_, R"([{"message":"ok"}, 123])", emit_idx_);
+  EXPECT_FALSE(bad_log_batch.success);
+  EXPECT_EQ(bad_log_batch.emitted_count, 1);
+
+  auto bad_trace_batch = ProcessNativeTraces(L_, R"([{"name":"ok-span"}, 123])", emit_idx_);
+  EXPECT_FALSE(bad_trace_batch.success);
+  EXPECT_EQ(bad_trace_batch.emitted_count, 1);
+
+  auto bad_metric_batch =
+      ProcessNativeMetrics(L_, R"([{"name":"ok_m","gauge":{"value":1}}, 123])", emit_idx_);
+  EXPECT_FALSE(bad_metric_batch.success);
+  EXPECT_EQ(bad_metric_batch.emitted_count, 1);
+
+  // 3. Deeply nested JSON object (> 16 levels) in span event attributes clamps safely
+  std::string deep_json = R"({"name":"deep-span","events":[{"name":"ev","attributes":{"root":)";
+  for (int i = 0; i < 20; ++i) {
+    deep_json += R"({"n":)";
+  }
+  deep_json += R"("leaf")";
+  for (int i = 0; i < 20; ++i) {
+    deep_json += "}";
+  }
+  deep_json += "}}]}";
+
+  auto deep_res = ProcessNativeTraces(L_, deep_json, emit_idx_);
+  EXPECT_TRUE(deep_res.success) << deep_res.error;
+  EXPECT_EQ(deep_res.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 4, "Expected 4 emitted events total, got " .. #emitted)
+    local deep_span = emitted[4].log
+    assert(type(deep_span.Events) == "string", "Events must be JSON string")
+    assert(string.find(deep_span.Events, "%[max_depth_exceeded%]") ~= nil,
+           "Expected [max_depth_exceeded] in Events JSON, got: " .. tostring(deep_span.Events))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace native_extractors
 }  // namespace vector_otel
