@@ -1796,7 +1796,6 @@ TEST_F(MetricsExtractorTest, ExemplarMissingTraceIdAndSpanIdEmitEmptyString) {
               "exemplars": [{
                 "timeUnixNano": "1700000000111111111",
                 "asDouble": 1.0
-                -- traceId and spanId omitted
               }]
             }]
           }
