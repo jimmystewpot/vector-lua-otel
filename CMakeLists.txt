@@ -83,8 +83,12 @@ target_include_directories(vector_otel_core PUBLIC
   ${LUA_INCLUDE_DIR}
 )
 target_link_libraries(vector_otel_core PUBLIC simdjson)
+if(NOT DEFINED VECTOR_NATIVE_MODULE_NAME)
+  set(VECTOR_NATIVE_MODULE_NAME "vector_native")
+endif()
 target_compile_definitions(vector_otel_core PUBLIC
   VECTOR_OTEL_EMIT_BATCH_SIZE=${VECTOR_OTEL_EMIT_BATCH_SIZE}
+  VECTOR_NATIVE_MODULE_NAME="${VECTOR_NATIVE_MODULE_NAME}"
 )
 
 # Production shared modules: MUST NOT link liblua

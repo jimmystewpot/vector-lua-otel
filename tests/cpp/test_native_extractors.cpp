@@ -1077,44 +1077,131 @@ TEST_F(NativeExtractorsTest, NativeMetricsTable_MissingTimestampFallsBackToNow) 
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
-TEST_F(NativeExtractorsTest, NativeMetrics_UnsupportedNonOtlpVariantsReturnError) {
+TEST_F(NativeExtractorsTest, NativeMetrics_UnsupportedNonOtlpVariantsSkippedAndLogged) {
   const char* variants[] = {"distribution", "set", "sketch"};
   for (const char* v : variants) {
-    // 1. Lua Table mode
+    // 1. Lua Table mode (single unsupported record: skipped, 0 emitted, warning logged)
     std::string lua_code = std::string("return { name = 'bad_m', ") + v + " = { values = {1} } }";
     ASSERT_EQ(luaL_dostring(L_, lua_code.c_str()), LUA_OK);
     int table_idx = lua_gettop(L_);
-    auto tbl_res = ProcessNativeMetricsTable(L_, table_idx, emit_idx_);
-    lua_pop(L_, 1);
-    EXPECT_FALSE(tbl_res.success) << "Expected failure for table variant " << v;
-    EXPECT_NE(tbl_res.error.find("Unsupported non-OTLP metric variant"), std::string::npos)
-        << tbl_res.error;
-    EXPECT_NE(tbl_res.error.find(v), std::string::npos) << tbl_res.error;
-    EXPECT_EQ(tbl_res.emitted_count, 0);
 
-    // 2. JSON String mode
+    testing::internal::CaptureStdout();
+    auto tbl_res = ProcessNativeMetricsTable(L_, table_idx, emit_idx_);
+    std::string tbl_stdout = testing::internal::GetCapturedStdout();
+    lua_pop(L_, 1);
+
+    EXPECT_TRUE(tbl_res.success) << "Expected success (skip) for table variant " << v
+                                 << ", but got error: " << tbl_res.error;
+    EXPECT_EQ(tbl_res.emitted_count, 0);
+    EXPECT_NE(tbl_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+              std::string::npos)
+        << "Stdout missing drop warning: " << tbl_stdout;
+    EXPECT_NE(tbl_stdout.find(v), std::string::npos)
+        << "Stdout missing variant name " << v << ": " << tbl_stdout;
+
+    // 2. JSON String mode (single unsupported record: skipped, 0 emitted, warning logged)
     std::string json_code = std::string(R"({"name":"bad_m",")") + v + R"(":{"values":[1]}})";
+    testing::internal::CaptureStdout();
     auto json_res = ProcessNativeMetrics(L_, json_code, emit_idx_);
-    EXPECT_FALSE(json_res.success) << "Expected failure for JSON variant " << v;
-    EXPECT_NE(json_res.error.find("Unsupported non-OTLP metric variant"), std::string::npos)
-        << json_res.error;
-    EXPECT_NE(json_res.error.find(v), std::string::npos) << json_res.error;
+    std::string json_stdout = testing::internal::GetCapturedStdout();
+
+    EXPECT_TRUE(json_res.success) << "Expected success (skip) for JSON variant " << v
+                                  << ", but got error: " << json_res.error;
     EXPECT_EQ(json_res.emitted_count, 0);
+    EXPECT_NE(json_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+              std::string::npos)
+        << "Stdout missing drop warning: " << json_stdout;
+    EXPECT_NE(json_stdout.find(v), std::string::npos)
+        << "Stdout missing variant name " << v << ": " << json_stdout;
   }
 
-  // Also verify partial_count when 2nd item in a batch fails
-  const char* batch_fail_script = R"(
+  // 3. Mixed batch: valid counter + unsupported sketch -> batch succeeds, emits 1, logs warning
+  const char* batch_script = R"(
     return {
       { name = "ok_counter", counter = { value = 10 } },
       { name = "bad_sketch", sketch = { agent_dd = {} } }
     }
   )";
-  ASSERT_EQ(luaL_dostring(L_, batch_fail_script), LUA_OK);
+  ASSERT_EQ(luaL_dostring(L_, batch_script), LUA_OK);
   int batch_idx = lua_gettop(L_);
+  testing::internal::CaptureStdout();
   auto batch_res = ProcessNativeMetricsTable(L_, batch_idx, emit_idx_);
+  std::string batch_stdout = testing::internal::GetCapturedStdout();
   lua_pop(L_, 1);
-  EXPECT_FALSE(batch_res.success);
+
+  EXPECT_TRUE(batch_res.success) << "Expected mixed batch success: " << batch_res.error;
   EXPECT_EQ(batch_res.emitted_count, 1);
+  EXPECT_NE(batch_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+            std::string::npos)
+      << "Stdout missing drop warning: " << batch_stdout;
+  EXPECT_NE(batch_stdout.find("sketch: 1"), std::string::npos)
+      << "Stdout missing sketch count: " << batch_stdout;
+
+  // 4. Mixed JSON batch: 1 valid gauge + 1 unrecognized metric object ("other")
+  std::string json_mixed = R"([
+    {"name":"ok_gauge","gauge":{"value":42.0}},
+    {"name":"bad_other","unrecognized_type":{"some":"val"}}
+  ])";
+  testing::internal::CaptureStdout();
+  auto json_mixed_res = ProcessNativeMetrics(L_, json_mixed, emit_idx_);
+  std::string json_mixed_stdout = testing::internal::GetCapturedStdout();
+
+  EXPECT_TRUE(json_mixed_res.success)
+      << "Expected json mixed batch success: " << json_mixed_res.error;
+  EXPECT_EQ(json_mixed_res.emitted_count, 1);
+  EXPECT_NE(json_mixed_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+            std::string::npos)
+      << "Stdout missing drop warning: " << json_mixed_stdout;
+  EXPECT_NE(json_mixed_stdout.find("other: 1"), std::string::npos)
+      << "Stdout missing other count: " << json_mixed_stdout;
+
+  // 5. Wholly unrecognized nonempty record in JSON (no recognized name or variant key)
+  std::string json_wholly_unrecognized = R"({"future_metric":{"value":1}})";
+  testing::internal::CaptureStdout();
+  auto json_wu_res = ProcessNativeMetrics(L_, json_wholly_unrecognized, emit_idx_);
+  std::string json_wu_stdout = testing::internal::GetCapturedStdout();
+  EXPECT_TRUE(json_wu_res.success) << json_wu_res.error;
+  EXPECT_EQ(json_wu_res.emitted_count, 0);
+  EXPECT_NE(json_wu_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+            std::string::npos)
+      << "Stdout missing drop warning for wholly unrecognized JSON: " << json_wu_stdout;
+  EXPECT_NE(json_wu_stdout.find("other: 1"), std::string::npos)
+      << "Stdout missing other: 1 for wholly unrecognized JSON: " << json_wu_stdout;
+
+  // 6. Wholly unrecognized nonempty record in Lua Table (no recognized name or variant key)
+  ASSERT_EQ(luaL_dostring(L_, "return { future_metric = { value = 1 } }"), LUA_OK);
+  int wu_tbl_idx = lua_gettop(L_);
+  testing::internal::CaptureStdout();
+  auto tbl_wu_res = ProcessNativeMetricsTable(L_, wu_tbl_idx, emit_idx_);
+  std::string tbl_wu_stdout = testing::internal::GetCapturedStdout();
+  lua_pop(L_, 1);
+  EXPECT_TRUE(tbl_wu_res.success) << tbl_wu_res.error;
+  EXPECT_EQ(tbl_wu_res.emitted_count, 0);
+  EXPECT_NE(tbl_wu_stdout.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
+            std::string::npos)
+      << "Stdout missing drop warning for wholly unrecognized table: " << tbl_wu_stdout;
+  EXPECT_NE(tbl_wu_stdout.find("other: 1"), std::string::npos)
+      << "Stdout missing other: 1 for wholly unrecognized table: " << tbl_wu_stdout;
+
+  // 7. Truly empty object in JSON and Table mode must NOT trigger drop warning (AGENTS.md Rule 3)
+  testing::internal::CaptureStdout();
+  auto json_empty_res = ProcessNativeMetrics(L_, "{}", emit_idx_);
+  std::string json_empty_stdout = testing::internal::GetCapturedStdout();
+  EXPECT_TRUE(json_empty_res.success) << json_empty_res.error;
+  EXPECT_EQ(json_empty_res.emitted_count, 0);
+  EXPECT_TRUE(json_empty_stdout.empty())
+      << "Expected no warning for empty JSON {}, got: " << json_empty_stdout;
+
+  ASSERT_EQ(luaL_dostring(L_, "return {}"), LUA_OK);
+  int empty_tbl_idx = lua_gettop(L_);
+  testing::internal::CaptureStdout();
+  auto tbl_empty_res = ProcessNativeMetricsTable(L_, empty_tbl_idx, emit_idx_);
+  std::string tbl_empty_stdout = testing::internal::GetCapturedStdout();
+  lua_pop(L_, 1);
+  EXPECT_TRUE(tbl_empty_res.success) << tbl_empty_res.error;
+  EXPECT_EQ(tbl_empty_res.emitted_count, 0);
+  EXPECT_TRUE(tbl_empty_stdout.empty())
+      << "Expected no warning for empty table {}, got: " << tbl_empty_stdout;
 }
 
 TEST_F(NativeExtractorsTest, NativeMetricsJson_AllSupportedVariants) {
@@ -1173,10 +1260,13 @@ TEST_F(NativeExtractorsTest, NativeMetricsJson_AllSupportedVariants) {
   EXPECT_TRUE(res.success) << res.error;
   EXPECT_EQ(res.emitted_count, 4);
 
-  auto err_res =
+  testing::internal::CaptureStdout();
+  auto drop_res =
       ProcessNativeMetrics(L_, R"({"metric":{"name":"bad","sketch":{"bins":[]}}})", emit_idx_);
-  EXPECT_FALSE(err_res.success);
-  EXPECT_NE(err_res.error.find("sketch"), std::string::npos);
+  std::string drop_stdout = testing::internal::GetCapturedStdout();
+  EXPECT_TRUE(drop_res.success) << drop_res.error;
+  EXPECT_EQ(drop_res.emitted_count, 0);
+  EXPECT_NE(drop_stdout.find("sketch: 1"), std::string::npos);
 
   const char* verify = R"(
     assert(#emitted == 4, "Expected 4 emitted metrics, got " .. #emitted)
@@ -2469,19 +2559,18 @@ TEST_F(NativeExtractorsTest, MetricsZeroBucketCountsAndNonOtlpExclusions) {
   int bad_tbl_idx = lua_gettop(L_);
   auto res2 = ProcessNativeMetricsTable(L_, bad_tbl_idx, emit_idx_);
   lua_pop(L_, 1);
-  EXPECT_FALSE(res2.success);
-  EXPECT_NE(res2.error.find("Unsupported non-OTLP metric variant 'distribution'"),
-            std::string::npos);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 0);
 
-  // 3. Non-OTLP metric variants in JSON mode
+  // 3. Non-OTLP metric variants in JSON mode (skipped, 0 emitted)
   std::string json_sketch = R"({
     "name": "sketch.metric",
     "kind": "sketch",
     "sketch": {"bins": []}
   })";
   auto res3 = ProcessNativeMetrics(L_, json_sketch, emit_idx_);
-  EXPECT_FALSE(res3.success);
-  EXPECT_NE(res3.error.find("Unsupported non-OTLP metric variant 'sketch'"), std::string::npos);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 0);
 }
 
 TEST_F(NativeExtractorsTest, MetricsOtelPrefixTagsAndParallelQuantilesJson) {

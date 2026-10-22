@@ -456,8 +456,8 @@ TEST_F(ModuleExportsTest, NativeProcessContractsAndValidation) {
     local c2, e2 = vector_native.metrics.process('{"name":"m2","counter":{"value":2}}', mock_emit)
     assert(c1 == 1 and e1 == nil)
     assert(c2 == 1 and e2 == nil)
-    local c_err, err_msg, partial = vector_native.metrics.process({ name = "bad", distribution = {} }, mock_emit)
-    assert(c_err == nil and type(err_msg) == "string" and partial == 0)
+    local c_drop, e_drop = vector_native.metrics.process({ name = "bad", distribution = {} }, mock_emit)
+    assert(c_drop == 0 and e_drop == nil)
   )";
   ASSERT_EQ(luaL_dostring(L_, metrics_check), LUA_OK) << lua_tostring(L_, -1);
 

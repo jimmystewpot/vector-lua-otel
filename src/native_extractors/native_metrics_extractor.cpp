@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <limits>
 #include <stdexcept>
@@ -12,6 +13,10 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#if (defined(__unix__) || defined(__APPLE__)) && !defined(_WIN32)
+#include <dlfcn.h>
+#endif
 
 extern "C" {
 #include <lauxlib.h>
@@ -36,22 +41,59 @@ using core::ErrorCode;
 using core::OperationContext;
 using extractors::ExtractionResult;
 
+#ifndef VECTOR_NATIVE_MODULE_NAME
+#define VECTOR_NATIVE_MODULE_NAME "vector_native"
+#endif
+
 constexpr uint64_t kMaxLuaInt = static_cast<uint64_t>(std::numeric_limits<lua_Integer>::max());
+
+struct DroppedMetricsSummary {
+  uint32_t distribution{0};
+  uint32_t set{0};
+  uint32_t sketch{0};
+  uint32_t other{0};
+
+  constexpr bool HasDropped() const noexcept { return (distribution + set + sketch + other) > 0; }
+  constexpr uint32_t Total() const noexcept { return distribution + set + sketch + other; }
+  void LogSummary(std::string_view module_name) const noexcept {
+    if (!HasDropped()) return;
+    std::fprintf(stdout,
+                 "[%.*s] [WARN] Dropped %u unsupported metric item(s) in batch "
+                 "(distribution: %u, set: %u, sketch: %u, other: %u)\n",
+                 static_cast<int>(module_name.size()), module_name.data(), Total(), distribution,
+                 set, sketch, other);
+    std::fflush(stdout);
+  }
+};
+
+std::string_view ResolveModuleName() noexcept {
+#if (defined(__unix__) || defined(__APPLE__)) && !defined(_WIN32)
+  Dl_info info;
+  if (dladdr(reinterpret_cast<void*>(&ProcessNativeMetrics), &info) != 0 &&
+      info.dli_fname != nullptr && info.dli_fname[0] != '\0') {
+    std::string_view fname(info.dli_fname);
+    size_t last_slash = fname.rfind('/');
+    if (last_slash != std::string_view::npos) {
+      fname = fname.substr(last_slash + 1);
+    }
+    if (fname.ends_with(".so")) {
+      fname.remove_suffix(3);
+    } else if (fname.ends_with(".dylib")) {
+      fname.remove_suffix(6);
+    }
+    if (!fname.empty() && fname != "vector_otel_tests") {
+      return fname;
+    }
+  }
+#endif
+  return VECTOR_NATIVE_MODULE_NAME;
+}
 
 bool IsInfinityString(std::string_view sv) noexcept {
   sv = core::TrimJsonWhitespace(sv);
   return core::EqualsIgnoreCaseAscii(sv, "inf") || core::EqualsIgnoreCaseAscii(sv, "+inf") ||
          core::EqualsIgnoreCaseAscii(sv, "infinity") ||
          core::EqualsIgnoreCaseAscii(sv, "+infinity");
-}
-
-std::string UnsupportedMetricVariantError(std::string_view variant) {
-  std::string msg = "Unsupported non-OTLP metric variant '";
-  msg.append(variant);
-  msg.append(
-      "': vector_native only supports OpenTelemetry metric types (counter, gauge, "
-      "aggregated_histogram, aggregated_summary)");
-  return msg;
 }
 
 void ThrowIfSimdjsonSyntaxError(simdjson::error_code err) {
@@ -876,7 +918,8 @@ bool ExtractNativeMetricObjectJson(
     std::vector<double>& tls_explicit_bounds, std::vector<uint64_t>& tls_pos_bucket_counts,
     std::vector<uint64_t>& tls_neg_bucket_counts,
     std::vector<SummaryQuantile>& tls_summary_quantiles, core::RowEmitter& emitter,
-    std::string& err_out, int depth = 0, bool* out_matched = nullptr) {
+    std::string& err_out, DroppedMetricsSummary& dropped_summary, int depth = 0,
+    bool* out_matched = nullptr) {
   NativeMetricsScratch& level = ScratchLevel(depth);
   std::vector<DeferredJsonTag>& tls_deferred_tags = level.deferred_tags;
   std::string& tls_tag_arena = level.tag_arena;
@@ -888,7 +931,8 @@ bool ExtractNativeMetricObjectJson(
         L, inner, processed_at, n.res_attrs_writer, n.scope_attrs_writer, n.dp_attrs_writer,
         n.exemplars_writer, n.payload_writer, n.metric_name, n.service, n.scope_name, n.scope_ver,
         n.metric_desc, n.metric_unit, n.bucket_counts, n.explicit_bounds, n.pos_bucket_counts,
-        n.neg_bucket_counts, n.summary_quantiles, emitter, err_out, depth + 1, matched);
+        n.neg_bucket_counts, n.summary_quantiles, emitter, err_out, dropped_summary, depth + 1,
+        matched);
   };
   uint64_t t_ns = 0;
   uint64_t start_ns = 0;
@@ -1006,8 +1050,10 @@ bool ExtractNativeMetricObjectJson(
   };
 
   bool has_recognized_field = false;
+  bool has_any_field = false;
 
   for (auto field_res : rec_obj) {
+    has_any_field = true;
     if (field_res.error() != simdjson::SUCCESS) {
       err_out = std::string(simdjson::error_message(field_res.error()));
       return false;
@@ -1084,8 +1130,17 @@ bool ExtractNativeMetricObjectJson(
       auto t_res = fv.type();
       if (t_res.error() == simdjson::SUCCESS &&
           t_res.value() != simdjson::ondemand::json_type::null) {
-        err_out = UnsupportedMetricVariantError(k);
-        return false;
+        if (k == "distribution") {
+          dropped_summary.distribution++;
+        } else if (k == "set") {
+          dropped_summary.set++;
+        } else {
+          dropped_summary.sketch++;
+        }
+        if (out_matched != nullptr) {
+          *out_matched = true;
+        }
+        return true;
       }
       continue;
     }
@@ -1369,7 +1424,13 @@ bool ExtractNativeMetricObjectJson(
     }
   }
 
-  if (!has_recognized_field || metric_type.empty()) {
+  if (!has_any_field) {
+    return true;
+  }
+  if (metric_type.empty()) {
+    if (depth == 0) {
+      dropped_summary.other++;
+    }
     return true;
   }
   if (out_matched != nullptr) {
@@ -1959,7 +2020,7 @@ bool ExtractSingleNativeMetricTable(
     std::vector<double>& tls_explicit_bounds, std::vector<uint64_t>& tls_pos_bucket_counts,
     std::vector<uint64_t>& tls_neg_bucket_counts,
     std::vector<SummaryQuantile>& tls_summary_quantiles, core::RowEmitter& emitter,
-    std::string& err_out) {
+    std::string& err_out, DroppedMetricsSummary& dropped_summary) {
   if (!lua_checkstack(L, 16)) {
     err_out = "Lua stack overflow during native metric extraction";
     return false;
@@ -1967,13 +2028,20 @@ bool ExtractSingleNativeMetricTable(
   int abs_rec_idx = lua_absindex(L, rec_idx);
 
   // 1. Check for unsupported non-OTLP metric variants first
-  static constexpr core::ReadKey kUnsupportedVariants[] = {"distribution", "set", "sketch"};
-  for (const core::ReadKey& v : kUnsupportedVariants) {
-    if (core::GetTableFieldRaw(L, abs_rec_idx, v)) {
-      lua_pop(L, 1);
-      err_out = UnsupportedMetricVariantError(v.c_str());
-      return false;
-    }
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "distribution")) {
+    lua_pop(L, 1);
+    dropped_summary.distribution++;
+    return true;
+  }
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "set")) {
+    lua_pop(L, 1);
+    dropped_summary.set++;
+    return true;
+  }
+  if (core::GetTableFieldRaw(L, abs_rec_idx, "sketch")) {
+    lua_pop(L, 1);
+    dropped_summary.sketch++;
+    return true;
   }
 
   // 2. Top-level temporality & supported OTLP metric variant
@@ -2030,6 +2098,7 @@ bool ExtractSingleNativeMetricTable(
   }
 
   if (metric_type.empty()) {
+    dropped_summary.other++;
     return true;
   }
 
@@ -2413,13 +2482,14 @@ bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
   core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
   std::string_view processed_at(proc_buf.data(), 30);
   std::string err_out;
+  DroppedMetricsSummary dropped_summary;
 
   auto extract_object = [&](simdjson::ondemand::object& obj) -> bool {
     return ExtractNativeMetricObjectJson(
         ctx.L, obj, processed_at, s.res_attrs_writer, s.scope_attrs_writer, s.dp_attrs_writer,
         s.exemplars_writer, s.payload_writer, s.metric_name, s.service, s.scope_name, s.scope_ver,
         s.metric_desc, s.metric_unit, s.bucket_counts, s.explicit_bounds, s.pos_bucket_counts,
-        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out);
+        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out, dropped_summary);
   };
 
   const auto root_type = type_res.value();
@@ -2455,6 +2525,8 @@ bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
     return false;
   }
 
+  dropped_summary.LogSummary(ResolveModuleName());
+
   emitter.Flush();
   return !emitter.HasError();
 }
@@ -2480,6 +2552,7 @@ bool ExtractNativeMetricsTable(OperationContext& ctx) {
   core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
   std::string_view processed_at(proc_buf.data(), 30);
   std::string err_out;
+  DroppedMetricsSummary dropped_summary;
 
   const int abs_idx = lua_absindex(L, ctx.input_index);
 
@@ -2488,7 +2561,7 @@ bool ExtractNativeMetricsTable(OperationContext& ctx) {
         L, idx, processed_at, s.res_attrs_writer, s.scope_attrs_writer, s.dp_attrs_writer,
         s.exemplars_writer, s.payload_writer, s.metric_name, s.service, s.scope_name, s.scope_ver,
         s.metric_desc, s.metric_unit, s.bucket_counts, s.explicit_bounds, s.pos_bucket_counts,
-        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out);
+        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out, dropped_summary);
   };
 
   auto extract_array = [&](int arr_idx, size_t len) -> bool {
@@ -2501,6 +2574,8 @@ bool ExtractNativeMetricsTable(OperationContext& ctx) {
             lua_pop(L, 1);
             return false;
           }
+        } else if (!core::IsLuaTableEmpty(L, item_idx)) {
+          dropped_summary.other++;
         }
       }
       lua_pop(L, 1);
@@ -2531,16 +2606,25 @@ bool ExtractNativeMetricsTable(OperationContext& ctx) {
             lua_pop(L, 1);
             return FailMetric(ctx, emitter, err_out);
           }
+        } else if (!core::IsLuaTableEmpty(L, inner_idx)) {
+          handled_wrapper = true;
+          dropped_summary.other++;
         }
       }
       lua_pop(L, 1);
     }
-    if (!handled_wrapper && HasNativeMetricFields(L, abs_idx)) {
-      if (!extract_one(abs_idx)) {
-        return FailMetric(ctx, emitter, err_out);
+    if (!handled_wrapper) {
+      if (HasNativeMetricFields(L, abs_idx)) {
+        if (!extract_one(abs_idx)) {
+          return FailMetric(ctx, emitter, err_out);
+        }
+      } else if (!core::IsLuaTableEmpty(L, abs_idx)) {
+        dropped_summary.other++;
       }
     }
   }
+
+  dropped_summary.LogSummary(ResolveModuleName());
 
   emitter.Flush();
   return !emitter.HasError();

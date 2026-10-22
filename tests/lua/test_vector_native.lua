@@ -116,30 +116,26 @@ assert(inner_count == nil)
 assert(inner_err == "re-entrant vector_otel.process() invocation is not permitted")
 assert(inner_emitted == 0)
 
--- Non-OTLP metric variants (distribution, set, sketch) rejected in Table & String modes
+-- Non-OTLP metric variants (distribution, set, sketch) skipped & warned in Table & String modes
 for _, variant in ipairs({ "distribution", "set", "sketch" }) do
   local tbl_payload = { name = "bad_" .. variant }
   tbl_payload[variant] = { values = { 1, 2 } }
-  count, err, emitted = vn.metrics.process(tbl_payload, dummy_emit)
-  assert(count == nil, "Expected nil count for table variant " .. variant)
-  assert(type(err) == "string" and err:find("Unsupported non%-OTLP metric variant") and err:find(variant),
-    "Unexpected error for table variant " .. variant .. ": " .. tostring(err))
-  assert(emitted == 0)
+  count, err = vn.metrics.process(tbl_payload, dummy_emit)
+  assert(count == 0 and err == nil, "Expected count == 0 and err == nil for table variant " .. variant .. ", got count=" .. tostring(count) .. " err=" .. tostring(err))
 
   local json_payload = string.format('{"name":"bad_%s","%s":{"values":[1,2]}}', variant, variant)
-  count, err, emitted = vn.metrics.process(json_payload, dummy_emit)
-  assert(count == nil, "Expected nil count for JSON variant " .. variant)
-  assert(type(err) == "string" and err:find("Unsupported non%-OTLP metric variant") and err:find(variant),
-    "Unexpected error for JSON variant " .. variant .. ": " .. tostring(err))
-  assert(emitted == 0)
+  count, err = vn.metrics.process(json_payload, dummy_emit)
+  assert(count == 0 and err == nil, "Expected count == 0 and err == nil for JSON variant " .. variant .. ", got count=" .. tostring(count) .. " err=" .. tostring(err))
 end
 
--- Partial count on batch failure
-count, err, emitted = vn.metrics.process({
+-- Mixed batch: valid item emitted, unsupported item skipped without failing batch
+local mixed_emitted_records = {}
+count, err = vn.metrics.process({
   { name = "ok_m", counter = { value = 5 } },
   { name = "bad_m", sketch = {} },
-}, dummy_emit)
-assert(count == nil and type(err) == "string" and emitted == 1)
+}, function(ev) table.insert(mixed_emitted_records, ev) end)
+assert(count == 1 and err == nil, "Expected mixed batch success count == 1, got count=" .. tostring(count) .. " err=" .. tostring(err))
+assert(#mixed_emitted_records == 1 and mixed_emitted_records[1].log.MetricName == "ok_m")
 
 print("   Error contracts and non-OTLP metric variant exclusions passed.")
 
