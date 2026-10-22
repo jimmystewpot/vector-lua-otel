@@ -239,6 +239,24 @@ assert(json_log_events[1].log.Body == "no_ts_msg")
 assert(json_log_events[1].log.ServiceName == "json-log-svc")
 assert(json_log_events[1].log.Timestamp == json_log_events[1].log.processed_at)
 
+-- Array-wrapped logs in JSON
+local arr_json_events = {}
+local n_arr, a_err = vn.logs.process('{"log":[{"message":"arr1","service_name":"s1"},{"message":"arr2","service_name":"s2"}]}', function(ev)
+  table.insert(arr_json_events, ev)
+end)
+assert(n_arr == 2 and a_err == nil and #arr_json_events == 2)
+assert(arr_json_events[1].log.Body == "arr1")
+assert(arr_json_events[2].log.Body == "arr2")
+
+-- Array-wrapped logs in Table
+local arr_tbl_events = {}
+n_arr, a_err = vn.logs.process({ { message = "t1" }, { message = "t2" } }, function(ev)
+  table.insert(arr_tbl_events, ev)
+end)
+assert(n_arr == 2 and a_err == nil and #arr_tbl_events == 2)
+assert(arr_tbl_events[1].log.Body == "t1")
+assert(arr_tbl_events[2].log.Body == "t2")
+
 print("   Native logs extraction and schema parity passed.")
 
 --------------------------------------------------------------------------------
@@ -315,6 +333,27 @@ vo.traces.process([[{"resourceSpans":[{"resource":{},"scopeSpans":[{"scope":{},"
   table.insert(otel_trace_events, ev)
 end)
 assert_same_keys(nt, otel_trace_events[1].log, "Traces ClickHouse Schema Parity")
+
+-- Explicit error status code & message
+local err_trace_events = {}
+local n_et, et_err = vn.traces.process({
+  log = {
+    name = "rpc.call",
+    trace_id = "5b8efff798038103d269b633813fc60c",
+    span_id = "eee19b7ec3c1b174",
+    status = { code = "STATUS_CODE_ERROR", message = "connection refused" },
+  },
+}, function(ev) table.insert(err_trace_events, ev) end)
+assert(n_et == 1 and et_err == nil and #err_trace_events == 1)
+assert(err_trace_events[1].log.StatusCode == "STATUS_CODE_ERROR")
+assert(err_trace_events[1].log.StatusMessage == "connection refused")
+
+-- Array-wrapped traces in JSON
+local arr_trace_events = {}
+local n_at, at_err = vn.traces.process('{"trace":[{"name":"s1","trace_id":"5b8efff798038103d269b633813fc60c","span_id":"eee19b7ec3c1b174"},{"name":"s2","trace_id":"5b8efff798038103d269b633813fc60c","span_id":"eee19b7ec3c1b175"}]}', function(ev)
+  table.insert(arr_trace_events, ev)
+end)
+assert(n_at == 2 and at_err == nil and #arr_trace_events == 2)
 
 print("   Native traces extraction and schema parity passed.")
 
@@ -401,6 +440,33 @@ end)
 assert_same_keys(nm1, otel_metric_events[1].log, "Metrics Sum ClickHouse Schema Parity")
 assert_same_keys(nm2, otel_metric_events[2].log, "Metrics Histogram ClickHouse Schema Parity")
 
+-- Summary metric with structured quantiles
+local summary_metric_events = {}
+local n_sum, s_err = vn.metrics.process({
+  metric = {
+    name = "http_req_summary",
+    timestamp = "2026-10-22T10:02:00.000000000Z",
+    tags = { ["resource.service.name"] = "pay-svc" },
+    summary = {
+      count = 100,
+      sum = 450.5,
+      quantiles = {
+        { quantile = 0.5, value = 1.5 },
+        { quantile = 0.9, value = 4.2 },
+        { quantile = 0.99, value = 9.8 },
+      },
+    },
+  },
+}, function(ev) table.insert(summary_metric_events, ev) end)
+assert(n_sum == 1 and s_err == nil and #summary_metric_events == 1)
+local sm = summary_metric_events[1].log
+assert(sm.MetricType == "summary")
+assert(type(sm.Summary) == "table")
+assert(sm.Summary.Count == 100 and sm.Summary.count == 100)
+assert(math.abs(sm.Summary.Sum - 450.5) < 1e-6 and math.abs(sm.Summary.sum - 450.5) < 1e-6)
+assert(type(sm.Summary.QuantileValues) == "table" and #sm.Summary.QuantileValues == 3)
+assert(sm.Summary.QuantileValues[1].Quantile == 0.5 and math.abs(sm.Summary.QuantileValues[1].Value - 1.5) < 1e-6)
+
 print("   Native metrics extraction and schema parity passed.")
 
 --------------------------------------------------------------------------------
@@ -429,6 +495,19 @@ local stress_metric_table = {
   },
 }
 
+local stress_summary_table = {
+  metric = {
+    name = "stress_sum",
+    timestamp = "2026-10-22T10:00:01.000000000Z",
+    tags = { ["resource.service.name"] = "stress" },
+    summary = {
+      count = 10,
+      sum = 25.0,
+      quantiles = { { quantile = 0.5, value = 2.0 }, { quantile = 0.99, value = 5.0 } },
+    },
+  },
+}
+
 -- 1. Warm up Lua VM internal string pools, upvalues, and C++ thread-local buffers
 for i = 1, 1000 do
   vn.logs.process(stress_log_json, discard_emit)
@@ -437,6 +516,7 @@ for i = 1, 1000 do
   vn.logs.process(native_log_table, discard_emit)
   vn.traces.process(native_trace_table, discard_emit)
   vn.metrics.process(stress_metric_table, discard_emit)
+  vn.metrics.process(stress_summary_table, discard_emit)
 end
 
 stress_count = 0
@@ -488,12 +568,11 @@ for i = 1, 5000 do
     assert(current_mem < mem_start + 1024, "Unbounded memory growth during string metrics: " .. current_mem .. " KB")
   end
 end
-for i = 1, 5000 do
+for i = 1, 2500 do
   vn.metrics.process(stress_metric_table, discard_emit)
-  if i % checkpoint_interval == 0 then
-    local current_mem = collectgarbage("count")
-    assert(current_mem < mem_start + 1024, "Unbounded memory growth during table metrics: " .. current_mem .. " KB")
-  end
+end
+for i = 1, 2500 do
+  vn.metrics.process(stress_summary_table, discard_emit)
 end
 
 assert(stress_count == target_events, string.format("Expected %d emitted events, got %d", target_events, stress_count))

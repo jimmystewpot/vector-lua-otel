@@ -486,6 +486,8 @@ local table_logs_payload = {
                                 { key = "user.id", value = { intValue = 1001 } },
                                 { key = "req.success", value = { boolValue = true } },
                                 { key = "req.lat", value = { doubleValue = 12.34 } },
+                                { key = "raw.bytes", value = { bytesValue = "c25ha2U=" } },
+                                { key = "nested.kv", value = { kvlistValue = { values = { { key = "sub_k", value = { stringValue = "nested_val" } } } } } },
                             },
                             traceId = "0123456789abcdef0123456789abcdef",
                             spanId = "0123456789abcdef",
@@ -516,6 +518,8 @@ assert(tbl_r1.ResourceAttributes["service.name"] == "tbl-log-svc", "Resource att
 assert(tbl_r1.ResourceAttributes["deployment.env"] == "staging", "Resource attribute mismatch")
 assert(tbl_r1.LogAttributes["user.id"] == 1001, "Log attribute mismatch")
 assert(tbl_r1.LogAttributes["req.success"] == true, "Log attribute mismatch")
+assert(tbl_r1.LogAttributes["raw.bytes"]:find("c25ha2U=") ~= nil, "raw.bytes mismatch")
+assert(type(tbl_r1.LogAttributes["nested.kv"]) == "string" and tbl_r1.LogAttributes["nested.kv"]:find('"sub_k"') ~= nil, "nested.kv mismatch")
 
 -- 2. Table-mode Traces
 local table_traces_payload = {
