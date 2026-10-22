@@ -15,6 +15,10 @@ int luaopen_vector_otel(lua_State* L);
 int luaopen_vector_otel_logs(lua_State* L);
 int luaopen_vector_otel_traces(lua_State* L);
 int luaopen_vector_otel_metrics(lua_State* L);
+int luaopen_vector_native(lua_State* L);
+int luaopen_vector_native_logs(lua_State* L);
+int luaopen_vector_native_traces(lua_State* L);
+int luaopen_vector_native_metrics(lua_State* L);
 }
 
 class ModuleExportsTest : public ::testing::Test {
@@ -349,4 +353,164 @@ TEST(ModuleOomTest, ProcessLogsRecoversFromLuaMemoryErrorWithoutStickingReentran
   }
   // The sweep must actually exercise the failure path, otherwise the test proves nothing.
   EXPECT_GT(memory_errors_seen, 0);
+}
+
+TEST_F(ModuleExportsTest, NativeModuleStructureAndVersion) {
+  luaopen_vector_native(L_);
+  ASSERT_TRUE(lua_istable(L_, -1));
+
+  // Check _VERSION
+  lua_getfield(L_, -1, "_VERSION");
+  EXPECT_TRUE(lua_isstring(L_, -1));
+  EXPECT_STREQ(lua_tostring(L_, -1), "0.1.0");
+  lua_pop(L_, 1);
+
+  // Check logs submodule
+  lua_getfield(L_, -1, "logs");
+  ASSERT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, -1, "process");
+  EXPECT_TRUE(lua_iscfunction(L_, -1));
+  lua_pop(L_, 2);
+
+  // Check traces submodule
+  lua_getfield(L_, -1, "traces");
+  ASSERT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, -1, "process");
+  EXPECT_TRUE(lua_iscfunction(L_, -1));
+  lua_pop(L_, 2);
+
+  // Check metrics submodule
+  lua_getfield(L_, -1, "metrics");
+  ASSERT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, -1, "process");
+  EXPECT_TRUE(lua_iscfunction(L_, -1));
+  lua_pop(L_, 2);
+
+  lua_pop(L_, 1);
+}
+
+TEST_F(ModuleExportsTest, NativePackageLoadedRegistration) {
+  luaopen_vector_native(L_);
+  int mod_idx = lua_gettop(L_);
+
+  lua_getglobal(L_, "package");
+  ASSERT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, -1, "loaded");
+  ASSERT_TRUE(lua_istable(L_, -1));
+
+  lua_getfield(L_, -1, "vector_native");
+  EXPECT_TRUE(lua_istable(L_, -1));
+  EXPECT_TRUE(lua_rawequal(L_, -1, mod_idx));
+  lua_pop(L_, 1);
+
+  lua_getfield(L_, -1, "vector_native.logs");
+  EXPECT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, mod_idx, "logs");
+  EXPECT_TRUE(lua_rawequal(L_, -1, -2));
+  lua_pop(L_, 2);
+
+  lua_getfield(L_, -1, "vector_native.traces");
+  EXPECT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, mod_idx, "traces");
+  EXPECT_TRUE(lua_rawequal(L_, -1, -2));
+  lua_pop(L_, 2);
+
+  lua_getfield(L_, -1, "vector_native.metrics");
+  EXPECT_TRUE(lua_istable(L_, -1));
+  lua_getfield(L_, mod_idx, "metrics");
+  EXPECT_TRUE(lua_rawequal(L_, -1, -2));
+  lua_pop(L_, 2);
+
+  lua_pop(L_, 3);
+}
+
+TEST_F(ModuleExportsTest, NativeProcessContractsAndValidation) {
+  luaopen_vector_native(L_);
+  lua_setglobal(L_, "vector_native");
+
+  // 1. Logs table & string success
+  const char* logs_ok = R"(
+    local c1, e1 = vector_native.logs.process({ message = "hi" }, mock_emit)
+    local c2, e2 = vector_native.logs.process('{"message":"hi2"}', mock_emit)
+    assert(c1 == 1 and e1 == nil)
+    assert(c2 == 1 and e2 == nil)
+  )";
+  ASSERT_EQ(luaL_dostring(L_, logs_ok), LUA_OK) << lua_tostring(L_, -1);
+
+  // 2. Traces table & string success
+  const char* traces_ok = R"(
+    local c1, e1 = vector_native.traces.process({ name = "span1" }, mock_emit)
+    local c2, e2 = vector_native.traces.process('{"name":"span2"}', mock_emit)
+    assert(c1 == 1 and e1 == nil)
+    assert(c2 == 1 and e2 == nil)
+  )";
+  ASSERT_EQ(luaL_dostring(L_, traces_ok), LUA_OK) << lua_tostring(L_, -1);
+
+  // 3. Metrics table & string success + unsupported variant failure
+  const char* metrics_check = R"(
+    local c1, e1 = vector_native.metrics.process({ name = "m1", gauge = { value = 1.0 } }, mock_emit)
+    local c2, e2 = vector_native.metrics.process('{"name":"m2","counter":{"value":2}}', mock_emit)
+    assert(c1 == 1 and e1 == nil)
+    assert(c2 == 1 and e2 == nil)
+    local c_err, err_msg, partial = vector_native.metrics.process({ name = "bad", distribution = {} }, mock_emit)
+    assert(c_err == nil and type(err_msg) == "string" and partial == 0)
+  )";
+  ASSERT_EQ(luaL_dostring(L_, metrics_check), LUA_OK) << lua_tostring(L_, -1);
+
+  // 4. Argument validation
+  const char* arg_validation = R"(
+    local c1, e1, p1 = vector_native.logs.process(123, mock_emit)
+    assert(c1 == nil and e1 == "payload must be a string or table" and p1 == 0)
+    local c2, e2, p2 = vector_native.traces.process({}, "not_func")
+    assert(c2 == nil and e2 == "emit callback must be a function" and p2 == 0)
+    local c3, e3, p3 = vector_native.metrics.process(true, mock_emit)
+    assert(c3 == nil and e3 == "payload must be a string or table" and p3 == 0)
+  )";
+  ASSERT_EQ(luaL_dostring(L_, arg_validation), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(ModuleExportsTest, NativeReentrancyGuard) {
+  luaopen_vector_native(L_);
+  lua_setglobal(L_, "vector_native");
+
+  const char* reentrant_script = R"(
+    local inner_c, inner_err, inner_p
+    local count, err = vector_native.logs.process({ message = "outer" }, function(ev)
+      inner_c, inner_err, inner_p = vector_native.logs.process({ message = "inner" }, mock_emit)
+    end)
+    assert(count == 1 and err == nil)
+    assert(inner_c == nil)
+    assert(inner_err == "re-entrant vector_otel.process() invocation is not permitted")
+    assert(inner_p == 0)
+  )";
+  ASSERT_EQ(luaL_dostring(L_, reentrant_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(ModuleExportsTest, NativeStandaloneSubmoduleOpeners) {
+  lua_State* L1 = luaL_newstate();
+  luaL_openlibs(L1);
+  luaopen_vector_native_logs(L1);
+  EXPECT_TRUE(lua_istable(L1, -1));
+  lua_getfield(L1, -1, "process");
+  EXPECT_TRUE(lua_iscfunction(L1, -1));
+  lua_pop(L1, 2);
+  lua_close(L1);
+
+  lua_State* L2 = luaL_newstate();
+  luaL_openlibs(L2);
+  luaopen_vector_native_traces(L2);
+  EXPECT_TRUE(lua_istable(L2, -1));
+  lua_getfield(L2, -1, "process");
+  EXPECT_TRUE(lua_iscfunction(L2, -1));
+  lua_pop(L2, 2);
+  lua_close(L2);
+
+  lua_State* L3 = luaL_newstate();
+  luaL_openlibs(L3);
+  luaopen_vector_native_metrics(L3);
+  EXPECT_TRUE(lua_istable(L3, -1));
+  lua_getfield(L3, -1, "process");
+  EXPECT_TRUE(lua_iscfunction(L3, -1));
+  lua_pop(L3, 2);
+  lua_close(L3);
 }

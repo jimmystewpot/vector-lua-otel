@@ -6,7 +6,7 @@
 [![simdjson: 5.0.5](https://img.shields.io/badge/simdjson-5.0.5-brightgreen.svg)](https://simdjson.org/)
 [![codecov](https://codecov.io/gh/jimmystewpot/vector-lua-otel/graph/badge.svg)](https://codecov.io/gh/jimmystewpot/vector-lua-otel)
 
-**vector-lua-otel** is an ultra-high-performance C++20 dynamic module (`vector_otel.so`) for [DataDog Vector](https://vector.dev/)'s Lua 5.4 transforms (`type = "lua"`, `version = "2"`). It ingests raw OpenTelemetry (OTLP) JSON batch payloads (`ExportLogsServiceRequest`, `ExportTraceServiceRequest`, `ExportMetricsServiceRequest`), parses them using [`simdjson`](https://simdjson.org/) 5.0.5 on-demand SIMD parsing, flattens hierarchical records into ClickHouse-aligned table columns, and streams extracted events directly into Vector's pipeline via the `emit` callback with $O(1)$ streaming memory.
+**vector-lua-otel** provides ultra-high-performance C++20 dynamic modules (`vector_otel.so` and `vector_native.so`) for [DataDog Vector](https://vector.dev/)'s Lua 5.4 transforms (`type = "lua"`, `version = "2"`). It ingests both raw/decoded OpenTelemetry (OTLP) batch payloads (`vector_otel.so` with `use_otlp_decoding: true` or raw OTLP JSON) and Vector's native internal event models (`vector_native.so` with `use_otlp_decoding: false` and `trace_to_log`), parses JSON strings using [`simdjson`](https://simdjson.org/) 5.0.5 on-demand SIMD parsing or traverses native Lua tables in-place, flattens records into ClickHouse-aligned table columns, and streams extracted events directly into Vector's pipeline via the `emit` callback with $O(1)$ streaming memory.
 
 ---
 
@@ -25,13 +25,15 @@
   - [LuaRocks Installation](#luarocks-installation)
   - [Build Options](#build-options)
 - [Vector Configuration](#vector-configuration)
-  - [YAML Configuration (OTLP Source -> S3 Parquet Sink)](#yaml-configuration-industry-standard-otlp-source---lua-transform---s3-parquet-sink)
+  - [YAML Configuration (OTLP Source -> Lua Transform -> S3 Parquet Sink)](#yaml-configuration-industry-standard-otlp-source---lua-transform---s3-parquet-sink)
+  - [Vector Native Event Mode (`vector_native.so` with `use_otlp_decoding: false`)](#vector-native-event-mode-vector_nativeso-with-use_otlp_decoding-false)
   - [TOML Configuration](#toml-configuration)
   - [Configuration Invariants](#configuration-invariants)
 - [Lua Module API Reference](#lua-module-api-reference)
   - [Module Structure](#module-structure)
   - [Function Signatures](#function-signatures)
   - [Return and Error Contract](#return-and-error-contract)
+  - [Vector Native Event Behaviour & Metric Variant Exclusions](#vector-native-event-behaviour--metric-variant-exclusions)
 - [Telemetry Schema Mappings](#telemetry-schema-mappings)
   - [Parquet Schema Reference](schemas/parquet/README.md)
   - [Logs Schema](#logs-schema)
@@ -207,12 +209,13 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-The compiled shared library will be placed at:
+The compiled shared libraries will be placed at:
 ```
 build/vector_otel.so
+build/vector_native.so
 ```
 
-> **Note on Symbol Resolution:** `vector_otel.so` is built as a CMake `MODULE` library and does not link `liblua5.4.so`. When loaded inside Vector, all Lua C API symbols (`lua_*`, `luaL_*`) are resolved dynamically from the host Vector executable. Standalone tests (`vector_otel_tests`) link `liblua5.4.so` for standalone execution.
+> **Note on Symbol Resolution:** Both `vector_otel.so` and `vector_native.so` are built as CMake `MODULE` libraries and do not link `liblua5.4.so`. When loaded inside Vector, all Lua C API symbols (`lua_*`, `luaL_*`) are resolved dynamically from the host Vector executable. Standalone tests (`vector_otel_tests`) link `liblua5.4.so` for standalone execution.
 
 ### Offline Builds
 
@@ -277,9 +280,12 @@ Pass these options to `cmake -B build`:
 
 Vector's Lua transform version 2 (`version = "2"`) executes in a persistent Lua state. `package.cpath` and module loading **must** occur in the top-level `source:` script, outside the per-event `process()` hook.
 
-`vector_otel.so` supports **dual-mode ingestion**:
-- **Decoded Lua Table Mode**: Vector's industry-standard [`opentelemetry` source](https://vector.dev/docs/reference/configuration/sources/opentelemetry/) with [`use_otlp_decoding: true`](https://vector.dev/docs/reference/configuration/sources/opentelemetry/#use_otlp_decoding) parses incoming Protobuf/gRPC or HTTP payloads into native Lua tables (`event.log.resourceLogs`, `resourceSpans`, `resourceMetrics`). `vector_otel.so` traverses these tables directly in C++ with zero intermediate JSON serialisation.
-- **Raw JSON String Mode**: When receiving raw JSON / NDJSON strings via HTTP server, Kafka, or stdin (`event.log.message`), `vector_otel.so` executes SIMD-accelerated on-demand parsing via `simdjson`.
+This repository provides two shared modules tailored to how your Vector `opentelemetry` source is configured:
+1. **`vector_otel.so` (`require("vector_otel")`) — OTLP Envelope Mode (`use_otlp_decoding: true` or raw OTLP JSON)**:
+   - **Decoded Lua Table Mode**: Traverses OTLP-preserving Lua tables (`event.log.resourceLogs`, `resourceSpans`, `resourceMetrics`) directly in C++.
+   - **Raw JSON String Mode**: Parses raw OTLP JSON strings (`ExportLogsServiceRequest`, `ExportTraceServiceRequest`, `ExportMetricsServiceRequest`) via `simdjson`.
+2. **`vector_native.so` (`require("vector_native")`) — Vector Native Event Mode (`use_otlp_decoding: false`)**:
+   - Ingests Vector's native internal Log, Trace (via `trace_to_log` with `log_namespace: false`), and Metric event models (both Lua tables and JSON-encoded strings) and flattens them into the exact same ClickHouse/Parquet column schemas as `vector_otel.so`.
 
 ### YAML Configuration (Industry Standard: OTLP Source -> Lua Transform -> S3 Parquet Sink)
 
@@ -357,6 +363,85 @@ sinks:
 >
 > Sinks such as ClickHouse (`type = "clickhouse"`) and Kafka (`type = "kafka"`) are also fully supported.
 
+### Vector Native Event Mode (`vector_native.so` with `use_otlp_decoding: false`)
+
+When `use_otlp_decoding: false` (Vector's default on the `opentelemetry` source), Vector converts incoming OTLP payloads into flat native Log, Trace, and Metric events. Because Vector's Lua v2 transform only accepts `Log` and `Metric` events (not raw `Trace` events), route `otel_in.traces` through Vector's built-in `trace_to_log` transform with `log_namespace: false` before passing spans to `vector_native.traces`:
+
+```yaml
+sources:
+  otel_native_in:
+    type: opentelemetry
+    http:
+      address: "0.0.0.0:4318"
+    grpc:
+      address: "0.0.0.0:4317"
+    use_otlp_decoding: false
+
+transforms:
+  traces_to_logs:
+    type: trace_to_log
+    inputs:
+      - otel_native_in.traces
+    log_namespace: false
+
+  extract_native_logs:
+    type: lua
+    version: "2"
+    inputs:
+      - otel_native_in.logs
+    source: |
+      package.cpath = "/usr/local/lib/lua/5.4/?.so;/opt/vector/lib/?.so;" .. package.cpath
+      local native_logs = require("vector_native").logs
+
+      function process(event, emit)
+        local payload = event.log or event
+        local count, err = native_logs.process(payload, emit)
+        if not count then
+          error("Vector native logs extraction failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+
+  extract_native_traces:
+    type: lua
+    version: "2"
+    inputs:
+      - traces_to_logs
+    source: |
+      package.cpath = "/usr/local/lib/lua/5.4/?.so;/opt/vector/lib/?.so;" .. package.cpath
+      local native_traces = require("vector_native").traces
+
+      function process(event, emit)
+        local payload = event.log or event
+        local count, err = native_traces.process(payload, emit)
+        if not count then
+          error("Vector native traces extraction failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+
+  extract_native_metrics:
+    type: lua
+    version: "2"
+    inputs:
+      - otel_native_in.metrics
+    source: |
+      package.cpath = "/usr/local/lib/lua/5.4/?.so;/opt/vector/lib/?.so;" .. package.cpath
+      local native_metrics = require("vector_native").metrics
+
+      function process(event, emit)
+        local payload = event.metric or event
+        local count, err = native_metrics.process(payload, emit)
+        if not count then
+          error("Vector native metrics extraction failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+```
+
 ### TOML Configuration
 
 ```toml
@@ -418,12 +503,14 @@ level = 3
 ### Configuration Invariants
 
 1. **Top-Level `source:` Initialisation**:
-   - `package.cpath` modifications and `require("vector_otel")` calls must happen **once** in the top-level script block.
+   - `package.cpath` modifications and `require("vector_otel")` / `require("vector_native")` calls must happen **once** in the top-level script block.
    - **Never** call `require()` or alter `package.cpath` inside `hooks.process`. Doing so causes severe CPU overhead and memory leaks.
 2. **Error Handling (`if not count then`)**:
    - Always check `if not count then`.
    - In Lua, `0` is truthy (`not 0 == false`). A batch that safely emits 0 records returns `(0, nil)`, which evaluates as success.
    - On error, the function returns `(nil, err_string, count_before_failure)`. Checking `if not count then` correctly detects failure.
+3. **`log_namespace: false` on `trace_to_log`**:
+   - When using `vector_native.traces`, configure `log_namespace: false` on the upstream `trace_to_log` transform so span fields (`trace_id`, `span_id`, `start_time_unix_nano`, `end_time_unix_nano`, `events`, `links`) are placed directly on `event.log`.
 
 ---
 
@@ -431,37 +518,51 @@ level = 3
 
 ### Module Structure
 
-When required via `require("vector_otel")`, the module exposes:
+When required via `require("vector_otel")` or `require("vector_native")`, each module exposes:
 
 ```lua
-local vector_otel = require("vector_otel")
+local vector_otel   = require("vector_otel")
+local vector_native = require("vector_native")
 
-vector_otel._VERSION   -- "0.1.0"
-vector_otel.logs      -- Logs extractor submodule
-vector_otel.traces    -- Traces extractor submodule
-vector_otel.metrics   -- Metrics extractor submodule
+vector_otel._VERSION     -- "0.1.0"
+vector_otel.logs         -- OTLP Logs extractor submodule
+vector_otel.traces       -- OTLP Traces extractor submodule
+vector_otel.metrics      -- OTLP Metrics extractor submodule
+
+vector_native._VERSION   -- "0.1.0"
+vector_native.logs       -- Vector native Logs extractor submodule
+vector_native.traces     -- Vector native Traces (trace_to_log) extractor submodule
+vector_native.metrics    -- Vector native Metrics extractor submodule
 ```
 
 Submodules are also registered in `package.loaded`, allowing direct imports:
 ```lua
-local otel_logs    = require("vector_otel.logs")
-local otel_traces  = require("vector_otel.traces")
-local otel_metrics = require("vector_otel.metrics")
+local otel_logs      = require("vector_otel.logs")
+local otel_traces    = require("vector_otel.traces")
+local otel_metrics   = require("vector_otel.metrics")
+
+local native_logs    = require("vector_native.logs")
+local native_traces  = require("vector_native.traces")
+local native_metrics = require("vector_native.metrics")
 ```
 
 ### Function Signatures
 
-All three submodules export an identical dual-mode `process` signature:
+All submodules across both `vector_otel` and `vector_native` export an identical dual-mode `process` signature:
 
 ```lua
 otel_logs.process(payload: string | table, emit: function) -> (integer, nil) | (nil, string, integer)
 otel_traces.process(payload: string | table, emit: function) -> (integer, nil) | (nil, string, integer)
 otel_metrics.process(payload: string | table, emit: function) -> (integer, nil) | (nil, string, integer)
+
+native_logs.process(payload: string | table, emit: function) -> (integer, nil) | (nil, string, integer)
+native_traces.process(payload: string | table, emit: function) -> (integer, nil) | (nil, string, integer)
+native_metrics.process(payload: string | table, emit: function) -> (integer, nil) | (nil, string, integer)
 ```
 
 - **`payload`** (`string | table`):
-  - **`table`**: Decoded OTLP Lua table (e.g. `event.log.resourceLogs` from Vector's `use_otlp_decoding: true`).
-  - **`string`**: Raw OTLP JSON string (e.g. `ExportLogsServiceRequest` from HTTP or Kafka), parsed via `simdjson`.
+  - **`table`**: Decoded OTLP Lua table (`vector_otel`) or Vector native `event` / `event.log` / `event.metric` / array of events (`vector_native`).
+  - **`string`**: Raw JSON string (OTLP JSON for `vector_otel`, or Vector JSON-encoded native event / array for `vector_native`), parsed via `simdjson`.
 - **`emit`** (`function`): Vector callback invoked for each emitted record: `emit(event)`.
 
 ### Return and Error Contract
@@ -485,6 +586,19 @@ otel_metrics.process(payload: string | table, emit: function) -> (integer, nil) 
 ### Emitted Tables Are Shared
 
 Within one resource, every emitted record's `ResourceAttributes` points at the **same** Lua table, and likewise `ScopeAttributes` within one scope. This avoids rebuilding the table for every record. Treat both as **read-only**: copy a table before mutating it, because a change made while handling one event is visible to every other event of the same resource/scope (including events your `emit` callback has already stored).
+
+### Vector Native Event Behaviour & Metric Variant Exclusions
+
+- **`now()` (`processed_at`) Timestamp Fallback**:
+  - **Native Logs**: Uses `timestamp` if present and non-zero, else `observed_timestamp` if present and non-zero. If an explicit epoch zero (`timestamp = 0` with no `observed_timestamp`) is present, formats `"1970-01-01T00:00:00.000000000Z"`. When both timestamps are absent, falls back to the record's `processed_at` (`now()`) ISO-8601 UTC nanosecond timestamp.
+  - **Native Traces**: Uses `start_time_unix_nano` if present and non-zero, else `ingest_timestamp` / `timestamp` if present and non-zero, else `processed_at` (`now()`). `Duration` is computed as `end_time_unix_nano - start_time_unix_nano` (clamped to `INT64_MAX`) only when both `start_time_unix_nano` and `end_time_unix_nano` are non-zero (`end >= start`), and `0` otherwise.
+  - **Native Metrics**: Uses `timestamp` if present and non-zero, else `processed_at` (`now()`). `StartTimeUnix` is computed as `timestamp - (interval_ms * 1,000,000)` when both `timestamp` and `interval_ms > 0` are present, and `""` otherwise.
+- **Tag Prefix Splitting & Multi-Value Tags**:
+  - In `vector_native.metrics`, tags prefixed with `resource.` populate `ResourceAttributes` (with `resource.service.name` setting `ServiceName`), tags prefixed with `scope.` populate `ScopeName`, `ScopeVersion`, or `ScopeAttributes`, and all remaining tags populate `Attributes`.
+  - Both single-value string tags and Vector's `tag-values: full` array tags (selecting the last non-null element) are supported.
+- **Exclusion of Vector-Only Non-OTLP Metric Variants (`distribution`, `set`, `sketch`)**:
+  - `vector_native.metrics` supports the four OTLP-aligned Vector metric variants: `counter` (`MetricType = "sum"`), `gauge` (`MetricType = "gauge"`), `aggregated_histogram` (`MetricType = "histogram"`, stripping trailing `+Inf` / `"inf"` upper bounds and populating both PascalCase and camelCase histogram keys), and `aggregated_summary` (`MetricType = "summary"`).
+  - Vector-only non-OTLP metric variants (`distribution`, `set`, `sketch`) are intentionally excluded and return the standard error tuple `(nil, "Unsupported non-OTLP metric variant: <variant>", partial_count)`.
 
 ---
 
@@ -586,9 +700,9 @@ The project enforces strict automated verification protocols across multiple tes
 
 3. **End-to-End Vector Pipeline Validation**:
    ```bash
-   vector validate --no-environment tests/vector/vector_test.yaml
+   vector validate --no-environment tests/vector/vector_test.yaml tests/vector/vector_native_test.yaml
    ```
-   Validates syntax and schema compatibility against official Vector release binaries.
+   Validates syntax and schema compatibility against official Vector release binaries for both OTLP-decoded (`vector_otel.so`) and Vector native (`vector_native.so`) pipelines.
 
 4. **Comparative Benchmark Matrix** (`bench/compare.sh`):
    ```bash

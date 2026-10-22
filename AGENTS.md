@@ -6,7 +6,11 @@ This document provides architectural rules, code invariants, formatting requirem
 
 ## 1. Project Mission & Core Architecture
 
-`vector-lua-otel` is a high-performance C++20 dynamic library exposing a native Lua 5.4 module interface (`vector_otel.so`) for DataDog Vector's Lua transforms. It processes raw OpenTelemetry (OTLP) JSON batch payloads (`ExportLogsServiceRequest`, `ExportTraceServiceRequest`, `ExportMetricsServiceRequest`), flattens nested records into ClickHouse-aligned table columns, and streams extracted events directly into Vector's pipeline via the `emit` callback.
+`vector-lua-otel` is a high-performance C++20 dynamic library suite exposing two native Lua 5.4 module interfaces for DataDog Vector's Lua transforms:
+- `vector_otel.so` (`require("vector_otel")`): Processes raw OpenTelemetry (OTLP) JSON batch payloads (`ExportLogsServiceRequest`, `ExportTraceServiceRequest`, `ExportMetricsServiceRequest`) or OTLP-decoded Lua tables (`use_otlp_decoding: true`).
+- `vector_native.so` (`require("vector_native")`): Processes Vector's native internal Log, Trace (via `trace_to_log` with `log_namespace: false`), and Metric event models (`use_otlp_decoding: false` or JSON-encoded native events).
+
+Both modules flatten records into identical ClickHouse/Parquet-aligned table columns and stream extracted events directly into Vector's pipeline via the `emit` callback.
 
 ### Non-Negotiable Architectural Invariants
 
@@ -25,11 +29,11 @@ Every modification to this repository **must** strictly adhere to the following 
 
 3. **Non-Throwing C API / FFI Boundary Contract**:
    - **Never allow C++ exceptions or Lua panics to escape** across the C API boundary.
-   - All `lua_CFunction` entry points (`l_logs_process`, `l_traces_process`, `l_metrics_process`) must wrap processing in `try ... catch` blocks.
+   - All `lua_CFunction` entry points (`ProcessDispatcher` in `include/vector_otel/core/module_runner.hpp`) must wrap processing in `try ... catch` blocks.
    - **Success return**: `(integer count, nil)` (pushes count, then `nil`).
    - **Failure return**: `(nil, string error_message, integer partial_count)` (pushes `nil`, error string, then partial count).
    - **Why `nil` first?** In Lua, `0` is truthy (`not 0 == false`). A return of `0` on error would bypass `if not count then` guards. Returning `nil` ensures Lua error checks work correctly.
-   - Empty or sparse payloads (`resourceLogs: []`, missing scopes, 0 records) are **not** errors; they must safely return `(0, nil)`.
+   - Empty or sparse payloads (`resourceLogs: []`, missing scopes, `{}` or `{ log = {} }`, 0 records) are **not** errors; they must safely return `(0, nil)`.
 
 4. **Exact 64-bit Integer & Nanosecond Timestamp Preservation**:
    - Never cast string-encoded 64-bit numbers (`timeUnixNano`, `intValue`, `duration`) to standard `double` (which truncates at 53 bits).
@@ -37,7 +41,7 @@ Every modification to this repository **must** strictly adhere to the following 
    - Format all timestamps as ISO-8601 UTC strings with exactly 9 fractional digits (nanoseconds), e.g. `2026-10-16T12:00:00.123456789Z`.
 
 5. **Shared Module Symbol Resolution (`MODULE` vs `EXECUTABLE`)**:
-   - The shared library `vector_otel.so` (`MODULE` library) **MUST NOT link `liblua` or `-llua5.4`**.
+   - The shared libraries `vector_otel.so` and `vector_native.so` (`MODULE` libraries) **MUST NOT link `liblua` or `-llua5.4`**.
    - All Lua C API symbols (`lua_*`, `luaL_*`) must resolve dynamically from the host Vector executable at runtime.
    - Standalone unit test binaries (`vector_otel_tests`) link `${LUA_LIBRARIES}` to enable standalone execution without Vector.
 
@@ -46,7 +50,7 @@ Every modification to this repository **must** strictly adhere to the following 
    - Input strings passed from Lua (`lua_tolstring`) must be inspected and safely copied to a padded `thread_local` buffer if not already padded.
 
 7. **Top-Level `source:` Initialisation in Vector Transforms**:
-   - Modifying `package.cpath` and calling `require("vector_otel")` must occur strictly in the top-level `source:` block.
+   - Modifying `package.cpath` and calling `require("vector_otel")` or `require("vector_native")` must occur strictly in the top-level `source:` block.
    - **Never** call `require()` or alter `package.cpath` inside `hooks.process`. This would trigger repetitive module table initialisation and cause memory leaks.
 
 8. **No Network Access in Build or Test**:
@@ -54,6 +58,11 @@ Every modification to this repository **must** strictly adhere to the following 
    - Do not hand-edit or manually patch vendored files; use `scripts/vendor_deps.sh` to refresh a dependency.
    - Changes must pass `bash scripts/vendor_deps.sh --verify` (verify checksums match).
    - Do not reintroduce `FetchContent_Declare`, `FetchContent_MakeAvailable`, or `ExternalProject` commands that fetch from the network.
+
+9. **Vector Native Event Invariants (`vector_native.so`)**:
+   - **Traces via `trace_to_log` (`log_namespace: false`)**: Vector's Lua v2 transform only accepts `Log` and `Metric` events, so native `Trace` events from `opentelemetry` (`use_otlp_decoding: false`) must pass through `trace_to_log` (`log_namespace: false`) before `vector_native.traces.process`.
+   - **Timestamp Fallback to `processed_at` (`now()`)**: When primary and secondary timestamps are absent in native events, `Timestamp` (or `TimeUnix` for metrics) falls back to the record's `processed_at` (`now()`) timestamp.
+   - **Non-OTLP Metric Variant Exclusion**: Vector-only metric variants (`distribution`, `set`, `sketch`) are intentionally unsupported in `vector_native.metrics.process` and must return `(nil, "Unsupported non-OTLP metric variant: <variant>", partial_count)`.
 
 ---
 
@@ -113,24 +122,34 @@ Every modification to this repository **must** strictly adhere to the following 
 │   ├── core/
 │   │   ├── fast_json_writer.hpp        # Allocation-free JSON serialiser
 │   │   ├── lua_bridge.hpp              # Lua stack management & batch emitter
+│   │   ├── module_runner.hpp           # Shared ProcessDispatcher & package.loaded helper
 │   │   ├── otlp_common.hpp             # Shared AnyValue decoding & attributes
 │   │   ├── parser.hpp                  # simdjson ondemand & padding manager
-│   │   └── timestamp.hpp               # ISO-8601 nanosecond UTC formatter
-│   └── extractors/
-│       ├── logs_extractor.hpp          # OTLP logs -> ClickHouse columns
-│       ├── traces_extractor.hpp        # OTLP traces -> ClickHouse columns
-│       └── metrics_extractor.hpp       # OTLP metrics -> ClickHouse columns
+│   │   ├── table_reader.hpp            # Lua table traversal & native timestamp parser
+│   │   └── timestamp.hpp               # ISO-8601 nanosecond UTC formatter & RFC-3339 parser
+│   ├── extractors/
+│   │   ├── logs_extractor.hpp          # OTLP logs -> ClickHouse columns
+│   │   ├── traces_extractor.hpp        # OTLP traces -> ClickHouse columns
+│   │   └── metrics_extractor.hpp       # OTLP metrics -> ClickHouse columns
+│   └── native_extractors/
+│       ├── native_logs_extractor.hpp   # Vector native logs -> ClickHouse columns
+│       ├── native_traces_extractor.hpp # Vector native traces (trace_to_log) -> ClickHouse columns
+│       └── native_metrics_extractor.hpp# Vector native metrics -> ClickHouse columns
 ├── src/
 │   ├── core/                           # Core component implementations
-│   ├── extractors/                     # Extractor implementations
-│   └── module.cpp                      # luaopen_vector_otel & submodule bindings
+│   ├── extractors/                     # OTLP extractor implementations
+│   ├── native_extractors/              # Vector native extractor implementations
+│   ├── module.cpp                      # luaopen_vector_otel & submodule bindings
+│   └── native_module.cpp               # luaopen_vector_native & submodule bindings
 ├── tests/
 │   ├── cpp/                            # GoogleTest C++ test suite
 │   ├── lua/                            # Standalone Lua 5.4 test suite & GC checks
 │   │   ├── run_tests.sh                # Test runner script
-│   │   └── test_vector_otel.lua        # Functional & 50k-loop leak tests
+│   │   ├── test_vector_otel.lua        # OTLP functional & 50k-loop leak tests
+│   │   └── test_vector_native.lua      # Native event functional & 50k-loop leak tests
 │   └── vector/
-│       └── vector_test.yaml            # Vector end-to-end pipeline config
+│       ├── vector_test.yaml            # Vector OTLP-decoded pipeline config
+│       └── vector_native_test.yaml     # Vector native event + trace_to_log pipeline config
 ├── bench/                              # Benchmark harness & comparative scripts
 │   ├── compare.sh                      # Automated VRL vs Lua comparison runner
 │   ├── gen_fixtures.py                 # OTLP test fixture generator
@@ -158,14 +177,14 @@ ctest --test-dir build --output-on-failure
 bash tests/lua/run_tests.sh
 ```
 **Expected**:
-- Module loading passes.
-- Error contracts pass.
-- Logs, Traces, and Metrics schemas validate against golden fixtures.
-- 50,000-event stress loop completes with `Memory Delta: 0.00 KB` (`0 leaks`).
+- Module loading passes for both `vector_otel` and `vector_native`.
+- Error contracts and non-OTLP metric variant exclusions pass.
+- Logs, Traces, and Metrics schemas validate against golden fixtures and schema parity assertions.
+- 50,000-event stress loops complete with `Memory Delta: 0.00 KB` (`0 leaks`).
 
 ### Step 3: Vector Pipeline Validation
 ```bash
-vector validate --no-environment tests/vector/vector_test.yaml
+vector validate --no-environment tests/vector/vector_test.yaml tests/vector/vector_native_test.yaml
 ```
 *(If `vector` is installed or available in `/tmp/vector-bench/`)*
 **Expected**: `Validated` (exit code 0).
@@ -191,7 +210,7 @@ cmake --build build-asan -j$(nproc)
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir build-asan --output-on-failure
 ```
 **Expected**: 100% tests passing (`vector_otel_tests`) with 0 ASAN/UBSAN errors.
-*(Note: `tests/lua/run_tests.sh` is not run under ASAN because loading an ASAN-instrumented `vector_otel.so` into an uninstrumented system `lua5.4` binary requires `LD_PRELOAD` of the ASAN runtime.)*
+*(Note: `tests/lua/run_tests.sh` is not run under ASAN because loading an ASAN-instrumented `vector_otel.so` or `vector_native.so` into an uninstrumented system `lua5.4` binary requires `LD_PRELOAD` of the ASAN runtime.)*
 
 ---
 

@@ -67,23 +67,29 @@ target_compile_definitions(vector_otel_core PUBLIC
   VECTOR_OTEL_EMIT_BATCH_SIZE=${VECTOR_OTEL_EMIT_BATCH_SIZE}
 )
 
-# Production shared module: MUST NOT link liblua
+# Production shared modules: MUST NOT link liblua
 add_library(vector_otel MODULE src/module.cpp)
 set_target_properties(vector_otel PROPERTIES PREFIX "" SUFFIX ".so")
-if(APPLE)
-  set_target_properties(vector_otel PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
-endif()
 target_link_libraries(vector_otel PRIVATE vector_otel_core)
+
+add_library(vector_native MODULE src/native_module.cpp)
+set_target_properties(vector_native PROPERTIES PREFIX "" SUFFIX ".so")
+target_link_libraries(vector_native PRIVATE vector_otel_core)
+
+if(APPLE)
+  set_target_properties(vector_otel vector_native PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
+endif()
 
 if(NOT DEFINED LIBDIR)
   set(LIBDIR lib)
 endif()
-install(TARGETS vector_otel LIBRARY DESTINATION "${LIBDIR}")
+install(TARGETS vector_otel vector_native LIBRARY DESTINATION "${LIBDIR}")
 
 # Unit test runner: MUST link ${LUA_LIBRARIES} so standalone tests can call luaL_newstate()
 enable_testing()
 add_executable(vector_otel_tests
   src/module.cpp
+  src/native_module.cpp
   tests/cpp/test_main.cpp
   tests/cpp/test_fast_json_writer.cpp
   tests/cpp/test_timestamp.cpp
