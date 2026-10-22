@@ -9,6 +9,9 @@ extern "C" {
 #include <lualib.h>
 }
 
+#include "vector_otel/core/fast_json_writer.hpp"
+#include "vector_otel/core/lua_bridge.hpp"
+#include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
@@ -2062,6 +2065,365 @@ TEST_F(TableModeTest, TableModeMetricStringsSurviveInputMutationInEmit) {
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
+}
+
+TEST_F(TableModeTest, GetTableFieldThreeKeys) {
+  // Test looking up camelCase, snake_case, and PascalCase keys
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    t1 = { traceId = "val_camel" }
+    t2 = { trace_id = "val_snake" }
+    t3 = { TraceId = "val_pascal" }
+    t4 = { other_key = "val_other" }
+  )"),
+            LUA_OK);
+
+  // t1: matches name1 (traceId)
+  lua_getglobal(L_, "t1");
+  EXPECT_TRUE(core::GetTableField(L_, -1, "traceId", "trace_id", "TraceId"));
+  EXPECT_STREQ(lua_tostring(L_, -1), "val_camel");
+  lua_pop(L_, 2);  // pop value and table
+
+  // t2: matches name2 (trace_id)
+  lua_getglobal(L_, "t2");
+  EXPECT_TRUE(core::GetTableField(L_, -1, "traceId", "trace_id", "TraceId"));
+  EXPECT_STREQ(lua_tostring(L_, -1), "val_snake");
+  lua_pop(L_, 2);
+
+  // t3: matches name3 (TraceId)
+  lua_getglobal(L_, "t3");
+  EXPECT_TRUE(core::GetTableField(L_, -1, "traceId", "trace_id", "TraceId"));
+  EXPECT_STREQ(lua_tostring(L_, -1), "val_pascal");
+  lua_pop(L_, 2);
+
+  // t4: none match
+  int top_before = lua_gettop(L_);
+  lua_getglobal(L_, "t4");
+  EXPECT_FALSE(core::GetTableField(L_, -1, "traceId", "trace_id", "TraceId"));
+  lua_pop(L_, 1);  // pop table
+  EXPECT_EQ(lua_gettop(L_), top_before);
+}
+
+TEST_F(TableModeTest, CopyIdFieldNormalizationAndMissingDefaults) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    emitted = {}
+    function capture_emit(ev)
+      emitted[#emitted + 1] = ev
+    end
+    t_bin = {
+      trace_bin = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+      span_bin = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+      trace_upper = "4BF92F3577B34DA6A3CE929D0E0E4736",
+      span_upper = "00F067AA0BA902B7",
+      bad_number = 12345,
+      bad_table = {},
+      bad_bool = true
+    }
+  )"),
+            LUA_OK);
+
+  lua_getglobal(L_, "capture_emit");
+  int emit_cb = lua_gettop(L_);
+
+  lua_getglobal(L_, "t_bin");
+  int t_idx = lua_gettop(L_);
+
+  core::LuaEmitter emitter(L_, emit_cb, 1, "log");
+  emitter.StartRecord();
+
+  // 16-byte binary traceId -> 32 lowercase hex chars
+  core::CopyIdField(L_, t_idx, "trace_bin", nullptr, core::kTraceIdBinaryLen, emitter, "TraceId");
+
+  // 8-byte binary spanId -> 16 lowercase hex chars
+  core::CopyIdField(L_, t_idx, "span_bin", nullptr, core::kSpanIdBinaryLen, emitter, "SpanId");
+
+  // 32-char uppercase traceId -> 32 lowercase hex chars
+  core::CopyIdField(L_, t_idx, "trace_upper", nullptr, core::kTraceIdBinaryLen, emitter,
+                    "TraceUpper");
+
+  // 16-char uppercase spanId -> 16 lowercase hex chars
+  core::CopyIdField(L_, t_idx, "span_upper", nullptr, core::kSpanIdBinaryLen, emitter, "SpanUpper");
+
+  // Absent field -> empty string ""
+  core::CopyIdField(L_, t_idx, "absent_key", "also_absent", core::kTraceIdBinaryLen, emitter,
+                    "AbsentId");
+
+  // Non-string fields (number, table, bool) -> empty string ""
+  core::CopyIdField(L_, t_idx, "bad_number", nullptr, core::kTraceIdBinaryLen, emitter,
+                    "BadNumber");
+  core::CopyIdField(L_, t_idx, "bad_table", nullptr, core::kTraceIdBinaryLen, emitter, "BadTable");
+  core::CopyIdField(L_, t_idx, "bad_bool", nullptr, core::kTraceIdBinaryLen, emitter, "BadBool");
+
+  emitter.EndRecord();
+  lua_pop(L_, 2);  // pop t_bin, capture_emit
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#emitted == 1, "expected 1 event")
+    local r = emitted[1].log
+    assert(r.TraceId == "000102030405060708090a0b0c0d0e0f",
+           "TraceId mismatch: " .. tostring(r.TraceId))
+    assert(r.SpanId == "00f067aa0ba902b7", "SpanId mismatch: " .. tostring(r.SpanId))
+    assert(r.TraceUpper == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "TraceUpper mismatch: " .. tostring(r.TraceUpper))
+    assert(r.SpanUpper == "00f067aa0ba902b7", "SpanUpper mismatch: " .. tostring(r.SpanUpper))
+    assert(r.AbsentId == "", "AbsentId mismatch: " .. tostring(r.AbsentId))
+    assert(r.BadNumber == "", "BadNumber mismatch: " .. tostring(r.BadNumber))
+    assert(r.BadTable == "", "BadTable mismatch: " .. tostring(r.BadTable))
+    assert(r.BadBool == "", "BadBool mismatch: " .. tostring(r.BadBool))
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
+TEST_F(TableModeTest, SerializeTableSpanEventsToJsonClickHouseParity) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    events_arr = {
+      {
+        timeUnixNano = 1700000000123456789,
+        name = "exception",
+        attributes = {
+          { key = "exception.type", value = { stringValue = "NullPointerException" } },
+          { key = "exception.escaped", value = { boolValue = false } },
+          { key = "retry_count", value = { intValue = 3 } }
+        }
+      },
+      {
+        time_unix_nano = 0,
+        Name = "custom_event",
+        Attributes = {
+          direct_key = "direct_val"
+        }
+      }
+    }
+  )"),
+            LUA_OK);
+
+  lua_getglobal(L_, "events_arr");
+  int events_idx = lua_gettop(L_);
+
+  core::FastJsonWriter writer;
+  // Test buffer isolation: writer already has prefix
+  writer.RawJson(R"({"prefix":"test",)");
+  writer.Key("Events");
+
+  core::SerializeTableSpanEventsToJson(L_, events_idx, writer);
+  writer.EndObject();
+
+  lua_pop(L_, 1);  // pop events_arr
+
+  std::string_view json = writer.Str();
+  EXPECT_NE(json.find(R"("prefix":"test")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("Timestamp":"2023-11-14T22:13:20.123456789Z")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("Name":"exception")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("exception.type":"NullPointerException")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("exception.escaped":false)"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("retry_count":3)"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("Timestamp":"1970-01-01T00:00:00.000000000Z")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("Name":"custom_event")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("direct_key":"direct_val")"), std::string_view::npos);
+}
+
+TEST_F(TableModeTest, SerializeTableSpanLinksToJsonNormalizedAndNoUfffd) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    links_arr = {
+      {
+        traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+        spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+        traceState = "rojo=1",
+        attributes = {
+          { key = "link.type", value = { stringValue = "parent" } }
+        }
+      },
+      {
+        trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+        span_id = "00F067AA0BA902B7",
+        trace_state = "congo=2",
+        Attributes = {
+          link_num = 42
+        }
+      },
+      {
+        -- empty/missing fields
+      }
+    }
+  )"),
+            LUA_OK);
+
+  lua_getglobal(L_, "links_arr");
+  int links_idx = lua_gettop(L_);
+
+  core::FastJsonWriter writer;
+  core::SerializeTableSpanLinksToJson(L_, links_idx, writer);
+  lua_pop(L_, 1);  // pop links_arr
+
+  std::string_view json = writer.Str();
+  // Normalized 16B binary to 32 lowercase hex chars
+  EXPECT_NE(json.find(R"("TraceId":"000102030405060708090a0b0c0d0e0f")"), std::string_view::npos);
+  // Normalized 8B binary to 16 lowercase hex chars
+  EXPECT_NE(json.find(R"("SpanId":"00f067aa0ba902b7")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("TraceState":"rojo=1")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("link.type":"parent")"), std::string_view::npos);
+
+  // Uppercase hex normalized to lowercase
+  EXPECT_NE(json.find(R"("TraceId":"4bf92f3577b34da6a3ce929d0e0e4736")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("SpanId":"00f067aa0ba902b7")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("TraceState":"congo=2")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("link_num":42)"), std::string_view::npos);
+
+  // Missing fields default to ""
+  EXPECT_NE(json.find(R"("TraceId":"")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("SpanId":"")"), std::string_view::npos);
+  EXPECT_NE(json.find(R"("TraceState":"")"), std::string_view::npos);
+
+  // Verify NO control escapes from binary bytes or replacement characters U+FFFD
+  EXPECT_EQ(json.find(R"(\u0000)"), std::string_view::npos);
+  EXPECT_EQ(json.find(R"(\u0001)"), std::string_view::npos);
+  EXPECT_EQ(json.find("\xef\xbf\xbd"), std::string_view::npos);
+}
+
+TEST_F(TableModeTest, PushTableExemplarsNormalization) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    raw_exemplars = {
+      {
+        timeUnixNano = 1700000000123456789,
+        traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+        spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+        asDouble = 3.1415,
+        filteredAttributes = {
+          { key = "region", value = { stringValue = "us-east-1" } }
+        }
+      },
+      {
+        time_unix_nano = 0,
+        TimeUnix = "2024-01-01T00:00:00.000000000Z",
+        trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+        span_id = "00F067AA0BA902B7",
+        asInt = 999,
+        FilteredAttributes = {
+          zone = "zone-a"
+        }
+      },
+      {
+        -- Missing fields
+        value = "42.5"
+      }
+    }
+  )"),
+            LUA_OK);
+
+  lua_getglobal(L_, "raw_exemplars");
+  int raw_idx = lua_gettop(L_);
+
+  core::FastJsonWriter writer;
+  core::PushTableExemplars(L_, raw_idx, writer);
+  int norm_idx = lua_gettop(L_);
+
+  // Verify result is a table of 3 elements
+  ASSERT_TRUE(lua_istable(L_, norm_idx));
+  lua_setglobal(L_, "norm_exemplars");
+  lua_pop(L_, 1);  // pop raw_exemplars
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#norm_exemplars == 3, "expected 3 exemplars, got " .. #norm_exemplars)
+    local e1 = norm_exemplars[1]
+    assert(e1.TimeUnix == "2023-11-14T22:13:20.123456789Z",
+           "e1 TimeUnix mismatch: " .. tostring(e1.TimeUnix))
+    assert(e1.TraceId == "000102030405060708090a0b0c0d0e0f",
+           "e1 TraceId mismatch: " .. tostring(e1.TraceId))
+    assert(e1.SpanId == "00f067aa0ba902b7", "e1 SpanId mismatch: " .. tostring(e1.SpanId))
+    assert(math.abs(e1.Value - 3.1415) < 0.0001, "e1 Value mismatch: " .. tostring(e1.Value))
+    assert(e1.FilteredAttributes.region == "us-east-1", "e1 FilteredAttributes mismatch")
+
+    local e2 = norm_exemplars[2]
+    assert(e2.TimeUnix == "2024-01-01T00:00:00.000000000Z",
+           "e2 TimeUnix mismatch: " .. tostring(e2.TimeUnix))
+    assert(e2.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "e2 TraceId mismatch: " .. tostring(e2.TraceId))
+    assert(e2.SpanId == "00f067aa0ba902b7", "e2 SpanId mismatch: " .. tostring(e2.SpanId))
+    assert(e2.Value == 999, "e2 Value mismatch: " .. tostring(e2.Value))
+    assert(e2.FilteredAttributes.zone == "zone-a", "e2 FilteredAttributes mismatch")
+
+    local e3 = norm_exemplars[3]
+    assert(e3.TimeUnix == "", "e3 TimeUnix mismatch: " .. tostring(e3.TimeUnix))
+    assert(e3.TraceId == "", "e3 TraceId mismatch: " .. tostring(e3.TraceId))
+    assert(e3.SpanId == "", "e3 SpanId mismatch: " .. tostring(e3.SpanId))
+    assert(math.abs(e3.Value - 42.5) < 0.0001, "e3 Value mismatch: " .. tostring(e3.Value))
+    assert(type(e3.FilteredAttributes) == "table", "e3 FilteredAttributes must be table")
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
+TEST_F(TableModeTest, StackSafetyCheck) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    table_sample = {
+      traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f",
+      spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+      attributes = { { key = "k", value = { stringValue = "v" } } },
+      events = { { name = "e", timeUnixNano = 100 } },
+      links = { { traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f" } },
+      exemplars = {
+        { traceId = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f" }
+      }
+    }
+    function dummy_emit(ev) end
+  )"),
+            LUA_OK);
+
+  lua_getglobal(L_, "dummy_emit");
+  int emit_cb = lua_gettop(L_);
+  lua_getglobal(L_, "table_sample");
+  int t_idx = lua_gettop(L_);
+
+  int initial_top = lua_gettop(L_);
+
+  // GetTableField: matches -> +1 top; not matches -> 0 top change
+  EXPECT_TRUE(core::GetTableField(L_, t_idx, "traceId", "trace_id", "TraceId"));
+  EXPECT_EQ(lua_gettop(L_), initial_top + 1);
+  lua_pop(L_, 1);
+
+  EXPECT_FALSE(core::GetTableField(L_, t_idx, "nonexistent", "not_here", "nope"));
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  // CopyIdField: stack top balanced
+  core::LuaEmitter emitter(L_, emit_cb, 1, "log");
+  emitter.StartRecord();
+  int before_copy = lua_gettop(L_);
+  core::CopyIdField(L_, t_idx, "traceId", "trace_id", core::kTraceIdBinaryLen, emitter, "TraceId");
+  EXPECT_EQ(lua_gettop(L_), before_copy);
+  emitter.EndRecord();
+  EXPECT_EQ(lua_gettop(L_), initial_top);
+
+  // WriteTableAttributesJson: stack top balanced
+  core::FastJsonWriter writer;
+  int before_attrs = lua_gettop(L_);
+  EXPECT_TRUE(core::GetTableField(L_, t_idx, "attributes"));
+  core::WriteTableAttributesJson(L_, -1, writer);
+  lua_pop(L_, 1);
+  EXPECT_EQ(lua_gettop(L_), before_attrs);
+
+  // SerializeTableSpanEventsToJson: stack top balanced
+  int before_events = lua_gettop(L_);
+  EXPECT_TRUE(core::GetTableField(L_, t_idx, "events"));
+  core::SerializeTableSpanEventsToJson(L_, -1, writer);
+  lua_pop(L_, 1);
+  EXPECT_EQ(lua_gettop(L_), before_events);
+
+  // SerializeTableSpanLinksToJson: stack top balanced
+  int before_links = lua_gettop(L_);
+  EXPECT_TRUE(core::GetTableField(L_, t_idx, "links"));
+  core::SerializeTableSpanLinksToJson(L_, -1, writer);
+  lua_pop(L_, 1);
+  EXPECT_EQ(lua_gettop(L_), before_links);
+
+  // PushTableExemplars: pushes exactly 1 table
+  int before_ex = lua_gettop(L_);
+  EXPECT_TRUE(core::GetTableField(L_, t_idx, "exemplars"));
+  core::PushTableExemplars(L_, -1, writer);
+  EXPECT_EQ(lua_gettop(L_), before_ex + 2);  // [exemplars input, new table]
+  lua_pop(L_, 2);
+  EXPECT_EQ(lua_gettop(L_), before_ex);
+
+  lua_pop(L_, 2);  // pop table_sample and dummy_emit
 }
 
 }  // namespace

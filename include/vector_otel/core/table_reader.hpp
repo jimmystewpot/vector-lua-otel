@@ -15,10 +15,11 @@ namespace vector_otel::core {
 
 class LuaEmitter;
 
-// Pushes table[name1] (or table[name2] if name1 is nil).
+// Pushes table[name1] (or table[name2] if name1 is nil, or table[name3] if name2 is nil).
 // Returns true if field was found and is not nil.
 // If nil or not found, pops the nil and returns false.
-bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr);
+bool GetTableField(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,
+                   const char* name3 = nullptr);
 
 // Reads string field from table at table_idx, or returns default_val.
 std::string ReadTableString(lua_State* L, int table_idx, const char* name1,
@@ -39,6 +40,13 @@ std::string_view ReadTableStringView(lua_State* L, int table_idx, const char* na
 void CopyStringField(lua_State* L, int table_idx, const char* name1, const char* name2,
                      LuaEmitter& emitter, std::string_view dst_key,
                      std::string_view default_val = "");
+
+// Copies correlation ID field from table at table_idx to emitter, normalizing
+// binary strings (16B trace ID, 8B span ID) or uppercase hex into canonical
+// lowercase hex. If absent or non-string, emits empty string "".
+void CopyIdField(lua_State* L, int table_idx, const char* name1, const char* name2,
+                 size_t expected_binary_len, LuaEmitter& emitter, std::string_view dst_key,
+                 const char* name3 = nullptr);
 
 // Reads int64 field from table at table_idx (handles integers and numeric
 // strings).
@@ -86,6 +94,23 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer);
 // Serialises any Lua value or OTLP AnyValue table to JSON via FastJsonWriter
 // with maximum recursion depth protection against stack exhaustion.
 void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, int depth = 0);
+
+// Serialises attributes table (OTLP array-of-KeyValue or direct key-value map)
+// directly to FastJsonWriter as a flattened JSON object without calling writer.Reset().
+void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer);
+
+// Serialises span events array to FastJsonWriter in ClickHouse JSON format
+// [{"Timestamp":"...","Name":"...","Attributes":{...}}, ...] without calling writer.Reset().
+void SerializeTableSpanEventsToJson(lua_State* L, int events_idx, FastJsonWriter& writer);
+
+// Serialises span links array to FastJsonWriter in ClickHouse JSON format
+// [{"TraceId":"...","SpanId":"...","TraceState":"...","Attributes":{...}}, ...]
+// with normalized hex IDs and without calling writer.Reset().
+void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& writer);
+
+// Pushes a new normalized array table of metric exemplars onto the Lua stack,
+// matching ParseExemplars ClickHouse schema (FilteredAttributes, TimeUnix, Value, SpanId, TraceId).
+void PushTableExemplars(lua_State* L, int exemplars_idx, FastJsonWriter& writer);
 
 // Pushes an array of Events table for traces onto the Lua stack.
 void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer);
