@@ -2799,5 +2799,131 @@ TEST_F(TableModeTest, SerializeLuaValueToJsonEdgeCasesCoverage) {
   lua_pop(L_, 1);
 }
 
+TEST_F(TableModeTest, OtlpTableWrappersLogAndTraceAndMetric) {
+  // 1. Logs wrapped in { log = { resourceLogs = { ... } } }
+  const char* script_logs = R"(
+    return {
+      log = {
+        resourceLogs = {
+          {
+            scopeLogs = {
+              {
+                logRecords = {
+                  { body = "wrapped log message" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_logs), LUA_OK);
+  auto res_log = extractors::ProcessLogsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res_log.success) << res_log.error;
+  EXPECT_EQ(res_log.emitted_count, 1);
+
+  // 2. Traces wrapped in { trace = { resourceSpans = { ... } } } and { log = { resourceSpans = { ... } } }
+  const char* script_traces1 = R"(
+    return {
+      trace = {
+        resourceSpans = {
+          {
+            scopeSpans = {
+              {
+                spans = {
+                  { name = "trace-wrapped span" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_traces1), LUA_OK);
+  auto res_tr1 = extractors::ProcessTracesTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res_tr1.success) << res_tr1.error;
+  EXPECT_EQ(res_tr1.emitted_count, 1);
+
+  const char* script_traces2 = R"(
+    return {
+      log = {
+        resourceSpans = {
+          {
+            scopeSpans = {
+              {
+                spans = {
+                  { name = "log-wrapped span" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_traces2), LUA_OK);
+  auto res_tr2 = extractors::ProcessTracesTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res_tr2.success) << res_tr2.error;
+  EXPECT_EQ(res_tr2.emitted_count, 1);
+
+  // 3. Metrics wrapped in { metric = { resourceMetrics = { ... } } } and { log = { resourceMetrics = { ... } } }
+  const char* script_metrics1 = R"(
+    return {
+      metric = {
+        resourceMetrics = {
+          {
+            scopeMetrics = {
+              {
+                metrics = {
+                  {
+                    name = "metric-wrapped",
+                    gauge = { dataPoints = { { asInt = 42 } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_metrics1), LUA_OK);
+  auto res_m1 = extractors::ProcessMetricsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res_m1.success) << res_m1.error;
+  EXPECT_EQ(res_m1.emitted_count, 1);
+
+  const char* script_metrics2 = R"(
+    return {
+      log = {
+        resourceMetrics = {
+          {
+            scopeMetrics = {
+              {
+                metrics = {
+                  {
+                    name = "log-wrapped-metric",
+                    gauge = { dataPoints = { { asInt = 84 } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_metrics2), LUA_OK);
+  auto res_m2 = extractors::ProcessMetricsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res_m2.success) << res_m2.error;
+  EXPECT_EQ(res_m2.emitted_count, 1);
+}
+
 }  // namespace
 }  // namespace vector_otel

@@ -2420,6 +2420,52 @@ TEST_F(MetricsExtractorTest, MetricAttributesNotAlteredByIdNormalization) {
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(MetricsExtractorTest, SnakeCaseJsonOtlpFieldsCoverage) {
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  std::string json = R"({
+    "resource_metrics": [
+      {
+        "resource": {
+          "attributes": [
+            {"key": "service.name", "value": {"string_value": "snake-metric-svc"}}
+          ]
+        },
+        "scope_metrics": [
+          {
+            "scope": {"name": "snake-meter", "version": "1.0"},
+            "metrics": [
+              {
+                "name": "snake_counter",
+                "sum": {
+                  "data_points": [
+                    {
+                      "time_unix_nano": "1700000000000000000",
+                      "as_int": 55
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  })";
+  auto res = ProcessMetrics(L_, json, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.ServiceName == "snake-metric-svc")
+    assert(r.ScopeName == "snake-meter")
+    assert(r.MetricName == "snake_counter")
+    assert(r.Value == 55)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 
 }  // namespace extractors

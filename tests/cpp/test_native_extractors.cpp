@@ -2099,6 +2099,389 @@ TEST_F(NativeExtractorsTest, MetricsZeroBucketCountsAndNonOtlpExclusions) {
   EXPECT_NE(res3.error.find("Unsupported non-OTLP metric variant 'sketch'"), std::string::npos);
 }
 
+TEST_F(NativeExtractorsTest, MetricsOtelPrefixTagsAndParallelQuantilesJson) {
+  // 1. JSON metric with otel prefix tags and array tags
+  std::string json_tags = R"({
+    "name": "rpc.calls",
+    "tags": {
+      "otel.unit": "requests",
+      "otel.description": "Number of RPC requests",
+      "otel.scope.name": "rpc.meter",
+      "otel.scope.version": "1.5.0",
+      "endpoints": ["/api/v1", "/api/v2"]
+    },
+    "counter": {"value": 100}
+  })";
+  auto res1 = ProcessNativeMetrics(L_, json_tags, emit_idx_);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 1);
+
+  // 2. JSON summary with parallel quantiles and values
+  std::string json_summary = R"({
+    "name": "rpc.duration",
+    "aggregated_summary": {
+      "count": 50,
+      "sum": 125.5,
+      "quantiles": [0.5, 0.95, 0.99],
+      "values": [1.0, 5.0, 10.0]
+    }
+  })";
+  auto res2 = ProcessNativeMetrics(L_, json_summary, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  // 3. JSON histogram with min, max, counts, and explicitBounds
+  std::string json_hist = R"({
+    "name": "rpc.payload_size",
+    "aggregated_histogram": {
+      "count": 20,
+      "sum": 2048.0,
+      "min": 10.0,
+      "max": 500.0,
+      "counts": [5, 10, 5],
+      "explicitBounds": [50.0, 200.0]
+    }
+  })";
+  auto res3 = ProcessNativeMetrics(L_, json_hist, emit_idx_);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted >= 3)
+    local m1 = emitted[#emitted - 2].log
+    assert(m1.MetricUnit == "requests")
+    assert(m1.MetricDescription == "Number of RPC requests")
+    assert(m1.ScopeName == "rpc.meter")
+    assert(m1.ScopeVersion == "1.5.0")
+    assert(type(m1.Attributes.endpoints) == "string")
+
+    local m2 = emitted[#emitted - 1].log
+    assert(m2.MetricType == "summary")
+    assert(type(m2.Summary) == "table")
+    assert(#m2.Summary.QuantileValues == 3)
+    assert(m2.Summary.QuantileValues[1].Quantile == 0.5)
+    assert(m2.Summary.QuantileValues[1].Value == 1.0)
+
+    local m3 = emitted[#emitted].log
+    assert(m3.MetricType == "histogram")
+    assert(type(m3.Histogram) == "table")
+    assert(m3.Histogram.Min == 10.0)
+    assert(m3.Histogram.Max == 500.0)
+    assert(#m3.Histogram.BucketCounts == 3)
+    assert(#m3.Histogram.ExplicitBounds == 2)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsJsonFullAllFieldsCoverage) {
+  std::string json = R"({
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "flags": 1,
+    "severity_text": "WARN",
+    "severity_number": "SEVERITY_NUMBER_WARN",
+    "body": {"stringValue": "log body via stringValue"},
+    "event_name": "app.boot",
+    "resource_schema_url": "https://opentelemetry.io/schemas/1.21.0",
+    "resources": {
+      "service.name": "full-svc",
+      "env": "prod"
+    },
+    "scope": {
+      "name": "app.logger",
+      "version": "1.0.0",
+      "schema_url": "https://opentelemetry.io/schemas/scope/1.0",
+      "attributes": {"sc_key": "sc_val"}
+    },
+    "attributes": {
+      "http.status": 200,
+      "user": "alice"
+    }
+  })";
+  auto res = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    local l = emitted[#emitted].log
+    assert(l.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert(l.SpanId == "00f067aa0ba902b7")
+    assert(l.TraceFlags == 1)
+    assert(l.SeverityText == "WARN")
+    assert(l.SeverityNumber == 13)
+    assert(l.Body == "log body via stringValue")
+    assert(l.EventName == "app.boot")
+    assert(l.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.21.0")
+    assert(l.ServiceName == "full-svc")
+    assert(l.ResourceAttributes["service.name"] == "full-svc")
+    assert(l.ScopeName == "app.logger")
+    assert(l.ScopeVersion == "1.0.0")
+    assert(l.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope/1.0")
+    assert(l.ScopeAttributes.sc_key == "sc_val")
+    assert(l.LogAttributes["http.status"] == 200)
+    assert(l.LogAttributes.user == "alice")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeTracesJsonFullAllFieldsCoverage) {
+  std::string json = R"({
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "parent_span_id": "5fb397be34d23b0f",
+    "name": "full_trace_span",
+    "kind": "client",
+    "start_time_unix_nano": "1700000000000000000",
+    "end_time_unix_nano": "1700000000050000000",
+    "status": {"code": "STATUS_CODE_UNSET", "message": "unset status"},
+    "resources": {"service.name": "trace-client-svc"},
+    "scope": {"name": "client.tracer", "version": "2.0"},
+    "attributes": {"req.header": "custom"},
+    "events": [
+      {
+        "name": "cache_lookup",
+        "time_unix_nano": "1700000000010000000",
+        "attributes": {
+          "hit": true,
+          "u_val": {"uint_value": 100},
+          "arr_val": {"array_value": {"values": []}},
+          "kv_val": {"kvlist_value": {"values": []}}
+        }
+      }
+    ],
+    "links": [
+      {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4737",
+        "span_id": "00f067aa0ba902b8",
+        "attributes": {"link.reason": "parent_job"}
+      }
+    ]
+  })";
+  auto res = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    local t = emitted[#emitted].log
+    assert(t.SpanKind == "SPAN_KIND_CLIENT")
+    assert(t.StatusCode == "STATUS_CODE_UNSET")
+    assert(t.ServiceName == "trace-client-svc")
+    assert(t.ScopeName == "client.tracer")
+    assert(type(t.Events) == "string" and t.Events:find("cache_lookup") ~= nil)
+    assert(type(t.Links) == "string" and t.Links:find("parent_job") ~= nil)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsAll24SeverityStringsJson) {
+  const char* sev_names[] = {
+      "SEVERITY_NUMBER_TRACE",  "SEVERITY_NUMBER_TRACE2", "SEVERITY_NUMBER_TRACE3",
+      "SEVERITY_NUMBER_TRACE4", "SEVERITY_NUMBER_DEBUG",  "SEVERITY_NUMBER_DEBUG2",
+      "SEVERITY_NUMBER_DEBUG3", "SEVERITY_NUMBER_DEBUG4", "SEVERITY_NUMBER_INFO",
+      "SEVERITY_NUMBER_INFO2",  "SEVERITY_NUMBER_INFO3",  "SEVERITY_NUMBER_INFO4",
+      "SEVERITY_NUMBER_WARN",   "SEVERITY_NUMBER_WARN2",  "SEVERITY_NUMBER_WARN3",
+      "SEVERITY_NUMBER_WARN4",  "SEVERITY_NUMBER_ERROR",  "SEVERITY_NUMBER_ERROR2",
+      "SEVERITY_NUMBER_ERROR3", "SEVERITY_NUMBER_ERROR4", "SEVERITY_NUMBER_FATAL",
+      "SEVERITY_NUMBER_FATAL2", "SEVERITY_NUMBER_FATAL3", "SEVERITY_NUMBER_FATAL4"};
+
+  std::string json = "[";
+  for (int i = 0; i < 24; ++i) {
+    if (i > 0) json += ",";
+    json += R"({"severity_number":")" + std::string(sev_names[i]) + R"(","message":"msg"})";
+  }
+  json += "]";
+
+  auto res = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 24);
+
+  const char* verify = R"(
+    assert(#emitted >= 24)
+    for i = 1, 24 do
+      local l = emitted[#emitted - 24 + i].log
+      assert(l.SeverityNumber == i, "Expected severity " .. i .. ", got " .. tostring(l.SeverityNumber))
+    end
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsNestedResourceAttributesAndTopLevelServiceTable) {
+  // Test nested attributes table in resources, top-level scope_attributes, and service_name
+  const char* script = R"(
+    return {
+      message = "nested res test",
+      service_name = "top-level-svc",
+      resources = {
+        schema_url = "https://schema.example.com",
+        attributes = {
+          ["env"] = "staging"
+        }
+      },
+      scope_attributes = {
+        ["scope_k"] = "scope_v"
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  auto res = ProcessNativeLogsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    local l = emitted[#emitted].log
+    assert(l.ServiceName == "top-level-svc")
+    assert(l.ResourceSchemaUrl == "https://schema.example.com")
+    assert(l.ResourceAttributes["env"] == "staging")
+    assert(l.ScopeAttributes["scope_k"] == "scope_v")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeTracesAllSpanKindsAndStatusCodesJsonAndTable) {
+  // Test kinds 1..5 and status codes 0..2 in JSON and table modes
+  std::string json = R"([
+    {"trace_id":"1","span_id":"1","name":"k1","kind":1,"status":{"code":0}},
+    {"trace_id":"2","span_id":"2","name":"k2","kind":2,"status":{"code":1}},
+    {"trace_id":"3","span_id":"3","name":"k3","kind":3,"status":{"code":2}},
+    {"trace_id":"4","span_id":"4","name":"k4","kind":4,"status":{"code":"STATUS_CODE_OK"}},
+    {"trace_id":"5","span_id":"5","name":"k5","kind":5,"status":{"code":"STATUS_CODE_ERROR"}},
+    {"trace_id":"6","span_id":"6","name":"k0","kind":0,"status":{"code":99}}
+  ])";
+  auto res_json = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res_json.success) << res_json.error;
+  EXPECT_EQ(res_json.emitted_count, 6);
+
+  const char* verify = R"(
+    local s1 = emitted[#emitted - 5].log
+    assert(s1.SpanKind == "SPAN_KIND_INTERNAL")
+    assert(s1.StatusCode == "STATUS_CODE_UNSET")
+
+    local s2 = emitted[#emitted - 4].log
+    assert(s2.SpanKind == "SPAN_KIND_SERVER")
+    assert(s2.StatusCode == "STATUS_CODE_OK")
+
+    local s3 = emitted[#emitted - 3].log
+    assert(s3.SpanKind == "SPAN_KIND_CLIENT")
+    assert(s3.StatusCode == "STATUS_CODE_ERROR")
+
+    local s4 = emitted[#emitted - 2].log
+    assert(s4.SpanKind == "SPAN_KIND_PRODUCER")
+    assert(s4.StatusCode == "STATUS_CODE_OK")
+
+    local s5 = emitted[#emitted - 1].log
+    assert(s5.SpanKind == "SPAN_KIND_CONSUMER")
+    assert(s5.StatusCode == "STATUS_CODE_ERROR")
+
+    local s6 = emitted[#emitted].log
+    assert(s6.SpanKind == "SPAN_KIND_UNSPECIFIED")
+    assert(s6.StatusCode == "STATUS_CODE_UNSET")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricsMergeTagsAndResourcesAttributesJsonAndStringBoundsTable) {
+  // 1. JSON metric with tags AND resources/scope/attributes/service_name merging
+  std::string json = R"({
+    "name": "merged.metric",
+    "service_name": "top-svc-metric",
+    "tags": {
+      "resource.k1": "v1",
+      "scope.s1": "sv1",
+      "attr1": "val1"
+    },
+    "resources": {
+      "k2": "v2"
+    },
+    "scope": {
+      "name": "scope-merged",
+      "attributes": {
+        "s2": "sv2"
+      }
+    },
+    "attributes": {
+      "attr2": "val2"
+    },
+    "counter": {"value": "99.9"}
+  })";
+  auto res_json = ProcessNativeMetrics(L_, json, emit_idx_);
+  EXPECT_TRUE(res_json.success) << res_json.error;
+  EXPECT_EQ(res_json.emitted_count, 1);
+
+  // 2. Table metric with string explicit bounds and string counter
+  const char* script_bounds = R"(
+    return {
+      name = "hist.str.bounds",
+      histogram = {
+        count = 10,
+        sum = 25.0,
+        bucket_counts = { 2, 8 },
+        explicit_bounds = { "1.5", "10.0" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script_bounds), LUA_OK) << lua_tostring(L_, -1);
+  auto res_tbl = ProcessNativeMetricsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res_tbl.success) << res_tbl.error;
+  EXPECT_EQ(res_tbl.emitted_count, 1);
+
+  const char* verify = R"(
+    local m1 = emitted[#emitted - 1].log
+    assert(m1.ServiceName == "top-svc-metric")
+    assert(m1.ResourceAttributes.k1 == "v1")
+    assert(m1.ResourceAttributes.k2 == "v2")
+    assert(m1.ScopeAttributes.s1 == "sv1")
+    assert(m1.ScopeAttributes.s2 == "sv2")
+    assert(m1.Attributes.attr1 == "val1")
+    assert(m1.Attributes.attr2 == "val2")
+    assert(math.abs(m1.Value - 99.9) < 1e-4)
+
+    local m2 = emitted[#emitted].log
+    assert(type(m2.Histogram) == "table")
+    assert(#m2.Histogram.ExplicitBounds == 2)
+    assert(m2.Histogram.ExplicitBounds[1] == 1.5)
+    assert(m2.Histogram.ExplicitBounds[2] == 10.0)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, MetricTableAsDoubleAndAsIntVariants) {
+  const char* script = R"(
+    return {
+      {
+        name = "m.as_double",
+        gauge = { as_double = 12.34 }
+      },
+      {
+        name = "m.as_int",
+        counter = { as_int = 5678 }
+      },
+      {
+        name = "m.asDouble",
+        gauge = { asDouble = "99.5" }
+      },
+      {
+        name = "m.asInt",
+        counter = { asInt = "4321" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  auto res = ProcessNativeMetricsTable(L_, lua_gettop(L_), emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 4);
+
+  const char* verify = R"(
+    assert(math.abs(emitted[#emitted - 3].log.Value - 12.34) < 1e-4)
+    assert(emitted[#emitted - 2].log.Value == 5678)
+    assert(math.abs(emitted[#emitted - 1].log.Value - 99.5) < 1e-4)
+    assert(emitted[#emitted].log.Value == 4321)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace native_extractors
 }  // namespace vector_otel
