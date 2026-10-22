@@ -300,6 +300,9 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
         bool has_log_attrs = false;
         ScopedLuaRef log_attrs_scoped(L, LUA_NOREF);
 
+        core::IdHexBuffer trace_id_buf;
+        core::IdHexBuffer span_id_buf;
+
         for (auto field_res : rec_obj) {
           if (field_res.error() != simdjson::SUCCESS) continue;
           auto k_res = field_res.unescaped_key();
@@ -316,12 +319,12 @@ ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_i
           } else if (k == "traceId" || k == "trace_id") {
             auto s_res = fv.get_string();
             if (s_res.error() == simdjson::SUCCESS) {
-              trace_id = s_res.value();
+              trace_id = core::NormalizeTraceId(s_res.value(), trace_id_buf);
             }
           } else if (k == "spanId" || k == "span_id") {
             auto s_res = fv.get_string();
             if (s_res.error() == simdjson::SUCCESS) {
-              span_id = s_res.value();
+              span_id = core::NormalizeSpanId(s_res.value(), span_id_buf);
             }
           } else if (k == "flags" || k == "traceFlags" || k == "trace_flags") {
             flags = core::ParseInt64(fv);
@@ -567,10 +570,12 @@ ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
             emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
 
             // 2. TraceId
-            core::CopyStringField(L, rec_obj_idx, "traceId", "trace_id", emitter, "TraceId");
+            core::CopyIdField(L, rec_obj_idx, "traceId", "trace_id", core::kTraceIdBinaryLen,
+                              emitter, "TraceId", "TraceId");
 
             // 3. SpanId
-            core::CopyStringField(L, rec_obj_idx, "spanId", "span_id", emitter, "SpanId");
+            core::CopyIdField(L, rec_obj_idx, "spanId", "span_id", core::kSpanIdBinaryLen, emitter,
+                              "SpanId", "SpanId");
 
             // 4. TraceFlags
             emitter.SetInt64("TraceFlags",

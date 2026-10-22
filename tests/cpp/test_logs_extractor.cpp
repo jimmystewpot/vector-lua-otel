@@ -626,7 +626,8 @@ TEST_F(LogsExtractorTest, TableModeNumericScopeMetadataStillCoerced) {
     assert(r ~= nil)
     assert(r.ScopeName == "999", "ScopeName mismatch: " .. tostring(r.ScopeName))
     assert(r.ScopeVersion == "888", "ScopeVersion mismatch: " .. tostring(r.ScopeVersion))
-    assert(r.TraceId == "12345", "TraceId mismatch: " .. tostring(r.TraceId))
+    assert(r.TraceId == "",
+           "Non-string TraceId must emit empty string, got: " .. tostring(r.TraceId))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -842,6 +843,328 @@ TEST_F(LogsExtractorTest, ResourceAttributesTableIsSharedAcrossRecordsOfOneResou
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, TableModeBinaryIdsNormalizedToHex) {
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  // Binary 16B trace ID: \x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36
+  // Binary 8B span ID (with embedded \0): \x00\xf0\x67\xaa\x0b\xa9\x02\xb7
+  const char* script = R"(
+    return {
+      resourceLogs = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "tbl-id-svc" } }
+            }
+          },
+          scopeLogs = {
+            {
+              scope = { name = "test-scope", version = "1.0" },
+              logRecords = {
+                {
+                  timeUnixNano = 1000,
+                  traceId = "\x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36",
+                  spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+                  body = { stringValue = "binary-ids-log" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessLogsTable(L_, table_idx, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record, got " .. #emitted)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "TraceId must be 32 lowercase hex chars, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "00f067aa0ba902b7",
+           "SpanId must be 16 lowercase hex chars, got: " .. tostring(r.SpanId))
+    assert(r.Body == "binary-ids-log", "Body must match")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, JsonModeUppercaseIdsNormalizedToLowercaseHex) {
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const std::string json = R"({
+    "resourceLogs": [{
+      "resource": {
+        "attributes": [{"key": "service.name", "value": {"stringValue": "json-norm-svc"}}]
+      },
+      "scopeLogs": [{
+        "scope": {"name": "test-scope", "version": "1.0"},
+        "logRecords": [{
+          "timeUnixNano": "1000",
+          "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+          "spanId": "00F067AA0BA902B7",
+          "body": "uppercase-ids-log"
+        }]
+      }]
+    }]
+  })";
+
+  auto res = ProcessLogs(L_, json, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record, got " .. #emitted)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "TraceId must be normalized to lowercase hex, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "00f067aa0ba902b7",
+           "SpanId must be normalized to lowercase hex, got: " .. tostring(r.SpanId))
+    assert(r.Body == "uppercase-ids-log")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, JsonAndTableModeMissingIdsEmitEmptyString) {
+  // 1. JSON mode with missing traceId and spanId
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const std::string json = R"({
+    "resourceLogs": [{
+      "scopeLogs": [{
+        "logRecords": [{
+          "timeUnixNano": "1000",
+          "body": "no-ids-log"
+        }]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessLogs(L_, json, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  const char* verify_json = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "",
+           "Missing TraceId in JSON mode must emit empty string, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "",
+           "Missing SpanId in JSON mode must emit empty string, got: " .. tostring(r.SpanId))
+    assert(r.Body == "no-ids-log")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_json), LUA_OK) << lua_tostring(L_, -1);
+
+  // 2. Table mode with missing traceId and spanId
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* table_script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  timeUnixNano = 1000,
+                  body = { stringValue = "no-ids-table-log" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessLogsTable(L_, table_idx, 1);
+  EXPECT_TRUE(table_res.success) << table_res.error;
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_table = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "",
+           "Missing TraceId in table mode must emit empty string, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "",
+           "Missing SpanId in table mode must emit empty string, got: " .. tostring(r.SpanId))
+    assert(r.Body == "no-ids-table-log")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, TableModeEmbeddedNulBinaryTraceIdEmitsAllZeros) {
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  timeUnixNano = 1000,
+                  traceId = string.rep("\0", 16),
+                  spanId = string.rep("\0", 8),
+                  body = { stringValue = "all-zero-ids" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessLogsTable(L_, table_idx, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == string.rep("0", 32),
+           "TraceId with 16 NUL bytes must emit 32 '0's, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == string.rep("0", 16),
+           "SpanId with 8 NUL bytes must emit 16 '0's, got: " .. tostring(r.SpanId))
+    assert(r.Body == "all-zero-ids")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, MixedSnakeCaseAndCamelCaseParity) {
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const std::string json = R"({
+    "resourceLogs": [{
+      "scopeLogs": [{
+        "logRecords": [{
+          "time_unix_nano": "1000",
+          "trace_id": "4BF92F3577B34DA6A3CE929D0E0E4736",
+          "span_id": "00F067AA0BA902B7",
+          "body": "mixed-json-log"
+        }]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessLogs(L_, json, 1);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  const char* verify_json = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert(r.SpanId == "00f067aa0ba902b7")
+    assert(r.Body == "mixed-json-log")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_json), LUA_OK) << lua_tostring(L_, -1);
+
+  // Table mode parity with snake_case
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* table_script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  time_unix_nano = 1000,
+                  trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+                  span_id = "00F067AA0BA902B7",
+                  body = { stringValue = "mixed-table-log" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessLogsTable(L_, table_idx, 1);
+  EXPECT_TRUE(table_res.success) << table_res.error;
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_table = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert(r.SpanId == "00f067aa0ba902b7")
+    assert(r.Body == "mixed-table-log")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(LogsExtractorTest, BodyAndLogAttributesNotAlteredByNormalization) {
+  // Verify that Body and LogAttributes/ResourceAttributes strings (including uppercase hex
+  // or 16-byte raw strings) are NOT altered by ID normalizers.
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* script = R"(
+    return {
+      resourceLogs = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "attr-svc" } },
+              { key = "res.hex", value = { stringValue = "4BF92F3577B34DA6A3CE929D0E0E4736" } }
+            }
+          },
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  traceId = "0123456789abcdef0123456789abcdef",
+                  spanId = "0123456789abcdef",
+                  timeUnixNano = 1000,
+                  body = { stringValue = "BODY_WITH_UPPER_HEX_4BF9" },
+                  attributes = {
+                    { key = "log.raw_id", value = { stringValue = "UPPERCASE_AND_HEX_4BF9" } },
+                    { key = "log.exact_16", value = { stringValue = "1234567812345678" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessLogsTable(L_, table_idx, 1);
+  EXPECT_TRUE(table_res.success) << table_res.error;
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "0123456789abcdef0123456789abcdef")
+    assert(r.SpanId == "0123456789abcdef")
+    assert(r.Body == "BODY_WITH_UPPER_HEX_4BF9", "Body string must not be altered")
+    assert(r.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
+           "ResourceAttributes string must not be altered")
+    assert(r.LogAttributes["log.raw_id"] == "UPPERCASE_AND_HEX_4BF9",
+           "LogAttributes string must not be altered")
+    assert(r.LogAttributes["log.exact_16"] == "1234567812345678",
+           "LogAttributes string must not be altered")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
 }  // namespace
