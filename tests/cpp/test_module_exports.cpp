@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <string>
 
+#include "vector_otel/core/module_runner.hpp"
+
 extern "C" {
 #include <lauxlib.h>
 #include <lua.h>
@@ -513,4 +515,172 @@ TEST_F(ModuleExportsTest, NativeStandaloneSubmoduleOpeners) {
   EXPECT_TRUE(lua_iscfunction(L3, -1));
   lua_pop(L3, 2);
   lua_close(L3);
+}
+
+TEST_F(ModuleExportsTest, ReentrantProcessCallReturnsErrorContract) {
+  luaopen_vector_otel(L_);
+  lua_setglobal(L_, "vector_otel");
+
+  const char* script = R"(
+    local reentrant_err = nil
+    local function reentrant_emit(event)
+      local count, err = vector_otel.logs.process('{"resourceLogs":[]}', function() end)
+      reentrant_err = err
+    end
+    local payload = '{"resourceLogs":[{"resource":{},"scopeLogs":[{"scope":{},"logRecords":[{"body":{"stringValue":"hi"}}]}]}]}'
+    local count, err = vector_otel.logs.process(payload, reentrant_emit)
+    return count, err, reentrant_err
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  EXPECT_EQ(lua_gettop(L_), 3);
+  EXPECT_TRUE(lua_isinteger(L_, 1));
+  EXPECT_TRUE(lua_isnil(L_, 2));
+  EXPECT_TRUE(lua_isstring(L_, 3));
+  EXPECT_TRUE(std::string(lua_tostring(L_, 3)).find("re-entrant") != std::string::npos);
+  lua_pop(L_, 3);
+}
+
+TEST_F(ModuleExportsTest, EmitCallbackThrowsLuaErrorReturnsContract) {
+  luaopen_vector_native(L_);
+  lua_setglobal(L_, "vector_native");
+
+  const char* script = R"(
+    local function exploding_emit(event)
+      error("emit exploded!")
+    end
+    local payload = { message = "boom" }
+    local count, err, partial = vector_native.logs.process(payload, exploding_emit)
+    return count, err, partial
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  EXPECT_EQ(lua_gettop(L_), 3);
+  EXPECT_TRUE(lua_isnil(L_, 1));
+  EXPECT_TRUE(lua_isstring(L_, 2));
+  EXPECT_TRUE(std::string(lua_tostring(L_, 2)).find("emit exploded") != std::string::npos);
+  EXPECT_TRUE(lua_isinteger(L_, 3));
+  lua_pop(L_, 3);
+}
+
+TEST_F(ModuleExportsTest, NonCallableEmitCallbackReturnsErrorContract) {
+  luaopen_vector_otel(L_);
+  lua_setglobal(L_, "vector_otel");
+  luaopen_vector_native(L_);
+  lua_setglobal(L_, "vector_native");
+
+  const char* script = R"(
+    local c1, e1, p1 = vector_otel.logs.process("{}", "not_a_function")
+    local c2, e2, p2 = vector_native.logs.process({}, 12345)
+    return c1, e1, p1, c2, e2, p2
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  EXPECT_EQ(lua_gettop(L_), 6);
+  EXPECT_TRUE(lua_isnil(L_, 1));
+  EXPECT_TRUE(lua_isstring(L_, 2));
+  EXPECT_STREQ(lua_tostring(L_, 2), "emit callback must be a function");
+  EXPECT_EQ(lua_tointeger(L_, 3), 0);
+
+  EXPECT_TRUE(lua_isnil(L_, 4));
+  EXPECT_TRUE(lua_isstring(L_, 5));
+  EXPECT_STREQ(lua_tostring(L_, 5), "emit callback must be a function");
+  EXPECT_EQ(lua_tointeger(L_, 6), 0);
+  lua_pop(L_, 6);
+}
+
+TEST_F(ModuleExportsTest, InvalidPayloadTypeReturnsErrorContract) {
+  luaopen_vector_otel(L_);
+  lua_setglobal(L_, "vector_otel");
+  luaopen_vector_native(L_);
+  lua_setglobal(L_, "vector_native");
+
+  const char* script = R"(
+    local noop = function() end
+    local c1, e1, p1 = vector_otel.logs.process(true, noop)
+    local c2, e2, p2 = vector_native.logs.process(12345, noop)
+    return c1, e1, p1, c2, e2, p2
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  EXPECT_EQ(lua_gettop(L_), 6);
+  EXPECT_TRUE(lua_isnil(L_, 1));
+  EXPECT_TRUE(lua_isstring(L_, 2));
+  EXPECT_STREQ(lua_tostring(L_, 2), "payload must be a string or table");
+  EXPECT_EQ(lua_tointeger(L_, 3), 0);
+
+  EXPECT_TRUE(lua_isnil(L_, 4));
+  EXPECT_TRUE(lua_isstring(L_, 5));
+  EXPECT_STREQ(lua_tostring(L_, 5), "payload must be a string or table");
+  EXPECT_EQ(lua_tointeger(L_, 6), 0);
+  lua_pop(L_, 6);
+}
+
+namespace {
+vector_otel::extractors::ExtractionResult ThrowingStdExtractor(lua_State*, std::string_view, int) {
+  throw std::runtime_error("simulated std::exception");
+}
+vector_otel::extractors::ExtractionResult ThrowingNonStdExtractor(lua_State*, std::string_view, int) {
+  throw 42;
+}
+vector_otel::extractors::ExtractionResult EmptyErrorExtractor(lua_State*, std::string_view, int) {
+  return vector_otel::extractors::ExtractionResult{.success = false, .error = "", .emitted_count = 0};
+}
+vector_otel::extractors::ExtractionResult DummyTableExtractor(lua_State*, int, int) {
+  return vector_otel::extractors::ExtractionResult{.success = true, .error = "", .emitted_count = 0};
+}
+}  // namespace
+
+TEST_F(ModuleExportsTest, ProcessDispatcherExceptionHandlingAndEmptyError) {
+  lua_pushcfunction(L_, (vector_otel::core::ProcessDispatcher<ThrowingStdExtractor, DummyTableExtractor>));
+  lua_setglobal(L_, "test_std_throw");
+
+  lua_pushcfunction(L_, (vector_otel::core::ProcessDispatcher<ThrowingNonStdExtractor, DummyTableExtractor>));
+  lua_setglobal(L_, "test_non_std_throw");
+
+  lua_pushcfunction(L_, (vector_otel::core::ProcessDispatcher<EmptyErrorExtractor, DummyTableExtractor>));
+  lua_setglobal(L_, "test_empty_err");
+
+  const char* script = R"(
+    local noop = function() end
+    local c1, e1, p1 = test_std_throw("{}", noop)
+    local c2, e2, p2 = test_non_std_throw("{}", noop)
+    local c3, e3, p3 = test_empty_err("{}", noop)
+    return c1, e1, p1, c2, e2, p2, c3, e3, p3
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  EXPECT_EQ(lua_gettop(L_), 9);
+
+  // std::exception
+  EXPECT_TRUE(lua_isnil(L_, 1));
+  EXPECT_TRUE(lua_isstring(L_, 2));
+  EXPECT_STREQ(lua_tostring(L_, 2), "simulated std::exception");
+  EXPECT_EQ(lua_tointeger(L_, 3), 0);
+
+  // non-std exception
+  EXPECT_TRUE(lua_isnil(L_, 4));
+  EXPECT_TRUE(lua_isstring(L_, 5));
+  EXPECT_STREQ(lua_tostring(L_, 5), "unknown C++ exception");
+  EXPECT_EQ(lua_tointeger(L_, 6), 0);
+
+  // empty error string -> "unknown extraction error"
+  EXPECT_TRUE(lua_isnil(L_, 7));
+  EXPECT_TRUE(lua_isstring(L_, 8));
+  EXPECT_STREQ(lua_tostring(L_, 8), "unknown extraction error");
+  EXPECT_EQ(lua_tointeger(L_, 9), 0);
+
+  lua_pop(L_, 9);
+}
+
+TEST_F(ModuleExportsTest, RegisterInPackageLoadedEdgeCases) {
+  lua_newtable(L_);
+  int table_idx = lua_gettop(L_);
+
+  // 1. When global package is nil
+  lua_pushnil(L_);
+  lua_setglobal(L_, "package");
+  vector_otel::core::RegisterInPackageLoaded(L_, "test_mod_nopkg", table_idx);
+
+  // 2. When global package is a table but package.loaded is not a table
+  lua_newtable(L_);
+  lua_setglobal(L_, "package");
+  vector_otel::core::RegisterInPackageLoaded(L_, "test_mod_noloaded", table_idx);
+
+  lua_pop(L_, 1);
 }

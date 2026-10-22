@@ -2746,5 +2746,58 @@ TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
       << lua_tostring(L_, -1);
 }
 
+TEST_F(TableModeTest, SerializeLuaValueToJsonEdgeCasesCoverage) {
+  core::FastJsonWriter writer;
+
+  // 1. Max depth exceeded
+  luaL_dostring(L_, "return { a = 1 }");
+  writer.Reset();
+  core::SerializeLuaValueToJson(L_, -1, writer, 16);
+  EXPECT_EQ(writer.Str(), "\"[max_depth_exceeded]\"");
+  lua_pop(L_, 1);
+
+  // 2. Function type falls back to null
+  luaL_dostring(L_, "return function() end");
+  writer.Reset();
+  core::SerializeLuaValueToJson(L_, -1, writer, 0);
+  EXPECT_EQ(writer.Str(), "null");
+  lua_pop(L_, 1);
+
+  // 3. AnyValue stringValue with non-string type
+  luaL_dostring(L_, "return { stringValue = 123 }");
+  writer.Reset();
+  core::SerializeLuaValueToJson(L_, -1, writer, 0);
+  EXPECT_EQ(writer.Str(), "\"\"");
+  lua_pop(L_, 1);
+
+  // 4. AnyValue bytesValue with non-string type
+  luaL_dostring(L_, "return { bytesValue = true }");
+  writer.Reset();
+  core::SerializeLuaValueToJson(L_, -1, writer, 0);
+  EXPECT_EQ(writer.Str(), "\"\"");
+  lua_pop(L_, 1);
+
+  // 5. arrayValue without values table
+  luaL_dostring(L_, "return { arrayValue = 'not_a_table' }");
+  writer.Reset();
+  core::SerializeLuaValueToJson(L_, -1, writer, 0);
+  EXPECT_EQ(writer.Str(), "[]");
+  lua_pop(L_, 1);
+
+  // 6. kvlistValue without values table
+  luaL_dostring(L_, "return { kvlistValue = 42 }");
+  writer.Reset();
+  core::SerializeLuaValueToJson(L_, -1, writer, 0);
+  EXPECT_EQ(writer.Str(), "{}");
+  lua_pop(L_, 1);
+
+  // 7. kvlistValue with non-string key
+  luaL_dostring(L_, "return { kvlistValue = { values = { { key = 123, value = { stringValue = 'val' } } } } }");
+  writer.Reset();
+  core::SerializeLuaValueToJson(L_, -1, writer, 0);
+  EXPECT_NE(writer.Str().find("\"val\""), std::string::npos);
+  lua_pop(L_, 1);
+}
+
 }  // namespace
 }  // namespace vector_otel
