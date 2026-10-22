@@ -110,3 +110,25 @@ target_link_libraries(vector_otel_tests PRIVATE
   GTest::gtest
 )
 add_test(NAME vector_otel_tests COMMAND vector_otel_tests)
+
+# Fault-injection tests. This executable REPLACES the global operator new/delete (see
+# tests/support/fault_new.cpp) so it must never be combined with sanitizers' allocator
+# interception: run it unsanitised (see the plan's verification notes).
+add_executable(vector_otel_fault_tests
+  tests/cpp/test_main.cpp
+  tests/cpp/test_fault_harness.cpp
+  tests/cpp/test_lua_fault_harness.cpp
+  tests/cpp/test_contract_fixtures.cpp
+  src/module.cpp
+  src/native_module.cpp
+  tests/support/fault_new.cpp
+  tests/support/fault_allocator.cpp
+  tests/support/contract_fixtures.cpp
+)
+target_include_directories(vector_otel_fault_tests PRIVATE tests/support)
+target_link_libraries(vector_otel_fault_tests PRIVATE
+  vector_otel_core
+  ${LUA_LIBRARIES}
+  GTest::gtest
+)
+add_test(NAME vector_otel_fault_tests COMMAND vector_otel_fault_tests)
