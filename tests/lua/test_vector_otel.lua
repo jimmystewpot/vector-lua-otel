@@ -42,6 +42,17 @@ end
 local ISO_8601_NANO_PATTERN = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%d%d%d%d%d%d%dZ$"
 local ISO_8601_GENERAL_PATTERN = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d+Z$"
 
+local function assert_all_columns_primitive(rec, label)
+  assert(type(rec) == "table", tostring(label) .. ": record must be a table")
+  for k, v in pairs(rec) do
+    local vt = type(v)
+    assert(
+      vt == "string" or vt == "number" or vt == "boolean",
+      string.format("%s: column '%s' must be primitive (string|number|boolean), got '%s'", tostring(label), tostring(k), vt)
+    )
+  end
+end
+
 print("=== Running vector_otel Standalone Test Suite ===")
 
 --------------------------------------------------------------------------------
@@ -252,6 +263,7 @@ assert(#log_events == 2, "Expected 2 events in table, got: " .. #log_events)
 -- Verify Record 1
 local r1 = log_events[1].log
 assert(r1 ~= nil, "log_events[1].log must exist")
+assert_all_columns_primitive(r1, "logs.r1")
 assert(r1.Timestamp:match(ISO_8601_NANO_PATTERN), "Record 1 Timestamp must match ISO-8601 nanosecond pattern: " .. tostring(r1.Timestamp))
 assert(r1.Timestamp == "2011-01-01T00:00:00.123456789Z", "Timestamp exact value mismatch")
 assert(r1.TraceId == "5b8efff798038103d269b633813fc60c", "TraceId mismatch")
@@ -267,29 +279,29 @@ assert(r1.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.26.0", "Resou
 assert(r1.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope/1.0.0", "ScopeSchemaUrl mismatch")
 assert(type(r1.processed_at) == "string" and r1.processed_at:match(ISO_8601_GENERAL_PATTERN), "processed_at must be ISO-8601 UTC")
 
--- Attributes checks
-assert(type(r1.ResourceAttributes) == "table", "ResourceAttributes must be table")
-assert(r1.ResourceAttributes["service.name"] == "edge-svc", "ResourceAttributes.service.name mismatch")
-assert(r1.ResourceAttributes["env"] == "prod", "ResourceAttributes.env mismatch")
+-- Attributes checks (JSON strings)
+assert(type(r1.ResourceAttributes) == "string", "ResourceAttributes must be string")
+assert(r1.ResourceAttributes == '{"service.name":"edge-svc","env":"prod"}', "ResourceAttributes mismatch: " .. tostring(r1.ResourceAttributes))
 
-assert(type(r1.ScopeAttributes) == "table", "ScopeAttributes must be table")
-assert(r1.ScopeAttributes["scope_tag"] == "v1", "ScopeAttributes.scope_tag mismatch")
+assert(type(r1.ScopeAttributes) == "string", "ScopeAttributes must be string")
+assert(r1.ScopeAttributes == '{"scope_tag":"v1"}', "ScopeAttributes mismatch: " .. tostring(r1.ScopeAttributes))
 
-assert(type(r1.LogAttributes) == "table", "LogAttributes must be table")
-assert(r1.LogAttributes.str_attr == "val", "LogAttributes.str_attr mismatch")
-assert(r1.LogAttributes.int_max == 9223372036854775807, "int64 max not preserved")
-assert(r1.LogAttributes.int_min == -9223372036854775808, "int64 min not preserved")
-assert(math.abs(r1.LogAttributes.dbl_val - 3.14159) < 1e-5, "dbl_val mismatch")
-assert(r1.LogAttributes.bool_true == true, "bool_true mismatch")
-assert(r1.LogAttributes.bool_false == false, "bool_false mismatch")
-assert(type(r1.LogAttributes.arr_val) == "string" and r1.LogAttributes.arr_val:find("arrayValue"), "arr_val mismatch")
-assert(type(r1.LogAttributes.map_val) == "string" and r1.LogAttributes.map_val:find("kvlistValue"), "map_val mismatch")
-assert(type(r1.LogAttributes.bytes_val) == "string" and r1.LogAttributes.bytes_val:find("bytesValue"), "bytes_val mismatch")
-assert(type(r1.LogAttributes.unicode_val) == "string" and r1.LogAttributes.unicode_val:find("quotes"), "unicode_val mismatch")
+assert(type(r1.LogAttributes) == "string", "LogAttributes must be string")
+assert(r1.LogAttributes:find('"str_attr":"val"', 1, true) ~= nil, "LogAttributes.str_attr mismatch")
+assert(r1.LogAttributes:find('"int_max":9223372036854775807', 1, true) ~= nil, "int64 max not preserved")
+assert(r1.LogAttributes:find('"int_min":-9223372036854775808', 1, true) ~= nil, "int64 min not preserved")
+assert(r1.LogAttributes:find('"dbl_val":3.14159', 1, true) ~= nil, "dbl_val mismatch")
+assert(r1.LogAttributes:find('"bool_true":true', 1, true) ~= nil, "bool_true mismatch")
+assert(r1.LogAttributes:find('"bool_false":false', 1, true) ~= nil, "bool_false mismatch")
+assert(r1.LogAttributes:find('"arr_val":["item1",2]', 1, true) ~= nil, "arr_val mismatch")
+assert(r1.LogAttributes:find('"map_val":{"sub_k":1}', 1, true) ~= nil, "map_val mismatch")
+assert(r1.LogAttributes:find('"bytes_val":"AAEC"', 1, true) ~= nil, "bytes_val mismatch")
+assert(r1.LogAttributes:find('\\"quotes\\"', 1, true) ~= nil, "unicode_val mismatch")
 
 -- Verify Record 2 (Defaults & Fallbacks)
 local r2 = log_events[2].log
 assert(r2 ~= nil, "log_events[2].log must exist")
+assert_all_columns_primitive(r2, "logs.r2")
 assert(r2.ServiceName == "unknown_service", "Missing service.name must fallback to unknown_service")
 assert(r2.Timestamp == "2011-01-01T00:00:00.123456794Z", "Missing timeUnixNano must fallback to observedTimeUnixNano")
 assert(r2.TraceId == "", "Default TraceId must be empty string")
@@ -300,6 +312,9 @@ assert(r2.SeverityNumber == 0, "Default SeverityNumber must be 0")
 assert(r2.Body == "fallback-record", "Body mismatch")
 assert(r2.ScopeName == "", "Default ScopeName must be empty string")
 assert(r2.ScopeVersion == "", "Default ScopeVersion must be empty string")
+assert(r2.ResourceAttributes == "{}", "Default ResourceAttributes must be '{}'")
+assert(r2.ScopeAttributes == "{}", "Default ScopeAttributes must be '{}'")
+assert(r2.LogAttributes == "{}", "Default LogAttributes must be '{}'")
 
 print("   Logs ClickHouse schema validation passed.")
 
@@ -322,6 +337,7 @@ assert(#trace_events == 2, "Expected 2 trace events in table")
 -- Trace Span 1 (Parent Server Span)
 local s1 = trace_events[1].log
 assert(s1 ~= nil, "trace_events[1].log must exist")
+assert_all_columns_primitive(s1, "traces.s1")
 assert(s1.Timestamp:match(ISO_8601_NANO_PATTERN), "Timestamp must match ISO-8601 nano: " .. tostring(s1.Timestamp))
 assert(s1.Timestamp == "2024-03-09T16:00:00.000000000Z", "Timestamp value mismatch")
 assert(s1.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "TraceId mismatch")
@@ -336,10 +352,12 @@ assert(s1.ScopeVersion == "1.25.0", "ScopeVersion mismatch")
 assert(s1.StatusCode == "STATUS_CODE_OK", "StatusCode mismatch")
 assert(s1.StatusMessage == "OK", "StatusMessage mismatch")
 assert(s1.Duration == 500000000, "Duration mismatch: expected 500000000, got: " .. tostring(s1.Duration))
-assert(type(s1.ResourceAttributes) == "table" and s1.ResourceAttributes["service.name"] == "cart-service")
-assert(s1.ResourceAttributes["host.id"] == 12345, "ResourceAttributes host.id mismatch")
-assert(type(s1.SpanAttributes) == "table" and s1.SpanAttributes["http.method"] == "GET")
-assert(s1.SpanAttributes["http.status_code"] == 200)
+assert(type(s1.ResourceAttributes) == "string", "ResourceAttributes must be string")
+assert(s1.ResourceAttributes == '{"service.name":"cart-service","deployment.environment":"production","host.id":12345}',
+    "ResourceAttributes mismatch: " .. tostring(s1.ResourceAttributes))
+assert(type(s1.SpanAttributes) == "string", "SpanAttributes must be string")
+assert(s1.SpanAttributes == '{"http.method":"GET","http.status_code":200,"http.route":"/checkout"}',
+    "SpanAttributes mismatch: " .. tostring(s1.SpanAttributes))
 assert(type(s1.Events) == "string" and s1.Events:find("cart_loaded") ~= nil, "Events array string missing cart_loaded")
 assert(s1.Events:find("2024%-03%-09T16:00:00.100000000Z") ~= nil, "Events must contain formatted ISO-8601 timestamp")
 assert(type(s1.Links) == "string" and s1.Links:find("7bf92f3577b34da6a3ce929d0e0e4736") ~= nil, "Links array string missing traceId")
@@ -348,6 +366,7 @@ assert(type(s1.processed_at) == "string" and s1.processed_at:match(ISO_8601_GENE
 -- Trace Span 2 (Child Client Span)
 local s2 = trace_events[2].log
 assert(s2 ~= nil, "trace_events[2].log must exist")
+assert_all_columns_primitive(s2, "traces.s2")
 assert(s2.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "Child TraceId mismatch")
 assert(s2.SpanId == "5fb397be34d23b0f", "Child SpanId mismatch")
 assert(s2.ParentSpanId == "00f067aa0ba902b7", "Child ParentSpanId mismatch: " .. tostring(s2.ParentSpanId))
@@ -380,6 +399,7 @@ assert(#metric_events == 5, "Expected 5 metric events in table")
 -- Metric 1: Gauge (asDouble)
 local m1 = metric_events[1].log
 assert(m1 ~= nil, "metric_events[1].log must exist")
+assert_all_columns_primitive(m1, "metrics.m1")
 assert(m1.MetricName == "memory_usage", "MetricName mismatch")
 assert(m1.MetricDescription == "Process memory usage", "MetricDescription mismatch")
 assert(m1.MetricUnit == "By", "MetricUnit mismatch")
@@ -387,9 +407,9 @@ assert(m1.MetricType == "gauge", "MetricType mismatch")
 assert(m1.ServiceName == "payment-service", "ServiceName mismatch")
 assert(m1.ScopeName == "com.acme.metrics", "ScopeName mismatch")
 assert(m1.ScopeVersion == "1.2.3", "ScopeVersion mismatch")
-assert(type(m1.ResourceAttributes) == "table" and m1.ResourceAttributes["deployment.environment"] == "production")
-assert(type(m1.ScopeAttributes) == "table" and m1.ScopeAttributes["scope.key"] == "scope.val")
-assert(type(m1.Attributes) == "table" and m1.Attributes["host"] == "node1")
+assert(type(m1.ResourceAttributes) == "string" and m1.ResourceAttributes == '{"service.name":"payment-service","deployment.environment":"production"}')
+assert(type(m1.ScopeAttributes) == "string" and m1.ScopeAttributes == '{"scope.key":"scope.val"}')
+assert(type(m1.Attributes) == "string" and m1.Attributes == '{"host":"node1"}')
 assert(m1.StartTimeUnix:match(ISO_8601_NANO_PATTERN), "StartTimeUnix must be ISO-8601 nano")
 assert(m1.TimeUnix:match(ISO_8601_NANO_PATTERN), "TimeUnix must be ISO-8601 nano")
 assert(m1.StartTimeUnix == "2021-08-26T17:45:00.000000000Z")
@@ -397,59 +417,56 @@ assert(m1.TimeUnix == "2021-08-26T17:46:40.000000000Z")
 assert(math.abs(m1.Value - 1048576.5) < 0.001, "Value mismatch")
 assert(m1.Flags == 0, "Flags mismatch")
 assert(m1.Histogram == nil, "Gauge Histogram must be nil")
+assert(m1.ExponentialHistogram == nil, "Gauge ExponentialHistogram must be nil")
+assert(m1.Summary == nil, "Gauge Summary must be nil")
+assert(m1.Exemplars == "[]", "Gauge Exemplars must be '[]'")
 assert(type(m1.processed_at) == "string" and m1.processed_at:match(ISO_8601_GENERAL_PATTERN), "processed_at must be ISO-8601 UTC")
 
 -- Metric 2: Gauge (asInt)
 local m2 = metric_events[2].log
+assert_all_columns_primitive(m2, "metrics.m2")
 assert(m2.MetricName == "memory_usage")
-assert(m2.Attributes["host"] == "node2")
+assert(m2.Attributes == '{"host":"node2"}')
 assert(m2.Value == 2097152, "Gauge asInt Value mismatch: " .. tostring(m2.Value))
 assert(m2.Flags == 1, "Flags mismatch")
+assert(m2.Exemplars == "[]")
 
 -- Metric 3: Sum with Exemplar
 local m3 = metric_events[3].log
+assert_all_columns_primitive(m3, "metrics.m3")
 assert(m3.MetricName == "http_requests_total")
 assert(m3.MetricType == "sum")
 assert(m3.Value == 5000, "Sum Value mismatch: " .. tostring(m3.Value))
-assert(m3.Attributes["status"] == 200)
-assert(type(m3.Exemplars) == "table" and #m3.Exemplars == 1, "Exemplars mismatch")
-local ex3 = m3.Exemplars[1]
-assert(math.abs(ex3.Value - 1.25) < 0.001, "Exemplar Value mismatch")
-assert(ex3.TraceId == "0123456789abcdef0123456789abcdef", "Exemplar TraceId mismatch")
-assert(ex3.SpanId == "0123456789abcdef", "Exemplar SpanId mismatch")
-assert(ex3.FilteredAttributes["user_id"] == "usr_99", "Exemplar FilteredAttributes mismatch")
-assert(ex3.TimeUnix:match(ISO_8601_NANO_PATTERN), "Exemplar TimeUnix must be ISO-8601 nano")
+assert(m3.Attributes == '{"status":200}')
+assert(type(m3.Exemplars) == "string", "Exemplars must be JSON string")
+assert(m3.Exemplars == '[{"FilteredAttributes":{"user_id":"usr_99"},"TimeUnix":"2021-08-26T17:46:41.500000000Z","Value":1.25,"SpanId":"0123456789abcdef","TraceId":"0123456789abcdef0123456789abcdef"}]',
+    "Exemplars mismatch: " .. tostring(m3.Exemplars))
 
 -- Metric 4: Histogram
 local m4 = metric_events[4].log
+assert_all_columns_primitive(m4, "metrics.m4")
 assert(m4.MetricName == "request_duration_seconds")
 assert(m4.MetricType == "histogram")
 assert(m4.Value == nil, "Histogram Value must be nil")
-assert(type(m4.Histogram) == "table", "Histogram table missing")
-assert(m4.Histogram.count == 100, "Histogram count mismatch")
-assert(math.abs(m4.Histogram.sum - 25.5) < 0.001, "Histogram sum mismatch")
-assert(math.abs(m4.Histogram.min - 0.05) < 0.001, "Histogram min mismatch")
-assert(math.abs(m4.Histogram.max - 5.2) < 0.001, "Histogram max mismatch")
-assert(#m4.Histogram.bucketCounts == 5, "bucketCounts size mismatch")
-assert(#m4.Histogram.explicitBounds == 4, "explicitBounds size mismatch")
-assert(m4.Histogram.bucketCounts[1] == 10 and m4.Histogram.bucketCounts[5] == 5)
-assert(math.abs(m4.Histogram.explicitBounds[1] - 0.1) < 0.001)
-assert(type(m4.Exemplars) == "table" and #m4.Exemplars == 1)
+assert(m4.Attributes == '{"method":"POST"}')
+assert(type(m4.Histogram) == "string", "Histogram must be JSON string")
+assert(m4.Histogram == '{"aggregationTemporality":0,"count":100,"sum":25.5,"min":0.05,"max":5.2,"bucketCounts":[10,40,30,15,5],"explicitBounds":[0.1,0.5,1,2.5]}',
+    "Histogram mismatch: " .. tostring(m4.Histogram))
+assert(type(m4.Exemplars) == "string")
+assert(m4.Exemplars == '[{"FilteredAttributes":{"client_ip":"192.168.1.1"},"TimeUnix":"2021-08-26T17:46:42.800000000Z","Value":2.45,"SpanId":"fedcba9876543210","TraceId":"fedcba9876543210fedcba9876543210"}]',
+    "Histogram Exemplars mismatch: " .. tostring(m4.Exemplars))
 
 -- Metric 5: Summary
 local m5 = metric_events[5].log
+assert_all_columns_primitive(m5, "metrics.m5")
 assert(m5.MetricName == "rpc_latency")
 assert(m5.MetricType == "summary")
 assert(m5.Value == nil, "Summary Value must be nil")
-assert(m5.Attributes["service"] == "auth")
-assert(type(m5.Summary) == "table", "Summary table missing")
-assert(m5.Summary.count == 50, "Summary count mismatch")
-assert(m5.Summary.Count == 50, "Summary Count mismatch")
-assert(math.abs(m5.Summary.sum - 1234.5) < 0.001, "Summary sum mismatch")
-assert(math.abs(m5.Summary.Sum - 1234.5) < 0.001, "Summary Sum mismatch")
-assert(type(m5.Summary.quantileValues) == "table" and #m5.Summary.quantileValues == 2, "Summary quantileValues size mismatch")
-assert(math.abs(m5.Summary.quantileValues[1].quantile - 0.5) < 0.001 and math.abs(m5.Summary.quantileValues[1].value - 12.0) < 0.001)
-assert(math.abs(m5.Summary.quantileValues[2].quantile - 0.99) < 0.001 and math.abs(m5.Summary.quantileValues[2].value - 85.0) < 0.001)
+assert(m5.Attributes == '{"service":"auth"}')
+assert(type(m5.Summary) == "string", "Summary must be JSON string")
+assert(m5.Summary == '{"count":50,"sum":1234.5,"quantileValues":[{"quantile":0.5,"value":12},{"quantile":0.99,"value":85}]}',
+    "Summary mismatch: " .. tostring(m5.Summary))
+assert(m5.Exemplars == "[]")
 
 print("   Metrics ClickHouse schema validation passed.")
 
@@ -506,6 +523,7 @@ assert(n_tbl_logs == 1, "Expected 1 table log record, got: " .. tostring(n_tbl_l
 assert(tbl_l_err == nil, "Expected no error, got: " .. tostring(tbl_l_err))
 assert(#tbl_log_events == 1, "Expected 1 event in table")
 local tbl_r1 = tbl_log_events[1].log
+assert_all_columns_primitive(tbl_r1, "table_logs.tbl_r1")
 assert(tbl_r1.Timestamp == "2023-11-14T22:13:20.123456789Z", "Timestamp mismatch: " .. tostring(tbl_r1.Timestamp))
 assert(tbl_r1.ServiceName == "tbl-log-svc", "ServiceName mismatch")
 assert(tbl_r1.Body == "Table log message body", "Body mismatch")
@@ -514,12 +532,11 @@ assert(tbl_r1.SeverityNumber == 9, "SeverityNumber mismatch")
 assert(tbl_r1.TraceId == "0123456789abcdef0123456789abcdef", "TraceId mismatch")
 assert(tbl_r1.SpanId == "0123456789abcdef", "SpanId mismatch")
 assert(tbl_r1.TraceFlags == 1, "TraceFlags mismatch")
-assert(tbl_r1.ResourceAttributes["service.name"] == "tbl-log-svc", "Resource attribute mismatch")
-assert(tbl_r1.ResourceAttributes["deployment.env"] == "staging", "Resource attribute mismatch")
-assert(tbl_r1.LogAttributes["user.id"] == 1001, "Log attribute mismatch")
-assert(tbl_r1.LogAttributes["req.success"] == true, "Log attribute mismatch")
-assert(tbl_r1.LogAttributes["raw.bytes"]:find("c25ha2U=") ~= nil, "raw.bytes mismatch")
-assert(type(tbl_r1.LogAttributes["nested.kv"]) == "string" and tbl_r1.LogAttributes["nested.kv"]:find('"sub_k"') ~= nil, "nested.kv mismatch")
+assert(type(tbl_r1.ResourceAttributes) == "string")
+assert(tbl_r1.ResourceAttributes == '{"service.name":"tbl-log-svc","deployment.env":"staging"}', "Resource attribute mismatch: " .. tostring(tbl_r1.ResourceAttributes))
+assert(tbl_r1.ScopeAttributes == '{"scope_attr":42}', "Scope attribute mismatch: " .. tostring(tbl_r1.ScopeAttributes))
+assert(type(tbl_r1.LogAttributes) == "string")
+assert(tbl_r1.LogAttributes == '{"user.id":1001,"req.success":true,"req.lat":12.34,"raw.bytes":"c25ha2U=","nested.kv":{"sub_k":"nested_val"}}', "Log attribute mismatch: " .. tostring(tbl_r1.LogAttributes))
 
 -- 2. Table-mode Traces
 local table_traces_payload = {
@@ -560,6 +577,7 @@ assert(n_tbl_traces == 1, "Expected 1 table trace span, got: " .. tostring(n_tbl
 assert(tbl_t_err == nil, "Expected no error, got: " .. tostring(tbl_t_err))
 assert(#tbl_trace_events == 1, "Expected 1 trace event in table")
 local tbl_s1 = tbl_trace_events[1].log
+assert_all_columns_primitive(tbl_s1, "table_traces.tbl_s1")
 assert(tbl_s1.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "TraceId mismatch")
 assert(tbl_s1.SpanId == "00f067aa0ba902b7", "SpanId mismatch")
 assert(tbl_s1.ParentSpanId == "5fb397be34d23b0f", "ParentSpanId mismatch")
@@ -567,7 +585,8 @@ assert(tbl_s1.SpanName == "GET /api/v1/orders", "SpanName mismatch")
 assert(tbl_s1.SpanKind == "SPAN_KIND_SERVER", "SpanKind mismatch")
 assert(tbl_s1.StatusCode == "STATUS_CODE_OK", "StatusCode mismatch")
 assert(tbl_s1.Duration == 500000000, "Duration mismatch: " .. tostring(tbl_s1.Duration))
-assert(tbl_s1.SpanAttributes["http.status_code"] == 200, "Span attribute mismatch")
+assert(tbl_s1.ResourceAttributes == '{"service.name":"tbl-trace-svc"}', "Resource attribute mismatch")
+assert(tbl_s1.SpanAttributes == '{"http.status_code":200}', "Span attribute mismatch: " .. tostring(tbl_s1.SpanAttributes))
 
 -- 3. Table-mode Metrics
 local table_metrics_payload = {
@@ -611,10 +630,13 @@ assert(n_tbl_metrics == 1, "Expected 1 table metric, got: " .. tostring(n_tbl_me
 assert(tbl_m_err == nil, "Expected no error, got: " .. tostring(tbl_m_err))
 assert(#tbl_metric_events == 1, "Expected 1 metric event in table")
 local tbl_m1 = tbl_metric_events[1].log
+assert_all_columns_primitive(tbl_m1, "table_metrics.tbl_m1")
 assert(tbl_m1.MetricName == "system.cpu.load", "MetricName mismatch")
 assert(tbl_m1.MetricType == "gauge", "MetricType mismatch")
 assert(math.abs(tbl_m1.Value - 0.75) < 0.001, "Metric Value mismatch")
-assert(tbl_m1.Attributes["core"] == "0", "Metric attribute mismatch")
+assert(tbl_m1.ResourceAttributes == '{"service.name":"tbl-metric-svc"}', "Resource attribute mismatch")
+assert(tbl_m1.Attributes == '{"core":"0"}', "Metric attribute mismatch: " .. tostring(tbl_m1.Attributes))
+assert(tbl_m1.Exemplars == "[]", "Exemplars default mismatch")
 
 print("   Table-mode schema validation passed.")
 
@@ -702,11 +724,14 @@ assert(b_span.Links:find('"link.key":"link.val"', 1, true) ~= nil,
 assert(not b_span.Links:find("[\x00-\x1f]"), "Links JSON must not contain raw control bytes")
 
 -- Attribute preservation verification
-assert(b_span.ResourceAttributes["res.upper_hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
+assert_all_columns_primitive(b_span, "b_span")
+assert(type(b_span.ResourceAttributes) == "string", "ResourceAttributes must be a JSON string")
+assert(b_span.ResourceAttributes:find('"res.upper_hex":"4BF92F3577B34DA6A3CE929D0E0E4736"', 1, true) ~= nil,
     "ResourceAttributes uppercase hex string must not be altered")
-assert(b_span.SpanAttributes["span.raw_hex"] == "UPPERCASE_AND_HEX_4BF9",
+assert(type(b_span.SpanAttributes) == "string", "SpanAttributes must be a JSON string")
+assert(b_span.SpanAttributes:find('"span.raw_hex":"UPPERCASE_AND_HEX_4BF9"', 1, true) ~= nil,
     "SpanAttributes string must not be altered")
-assert(b_span.SpanAttributes["span.exact_16"] == "1234567812345678",
+assert(b_span.SpanAttributes:find('"span.exact_16":"1234567812345678"', 1, true) ~= nil,
     "SpanAttributes exact 16-byte string must not be altered")
 
 -- 2. Logs table with 16B/8B binary IDs, embedded NUL bytes, and attribute preservation
@@ -761,14 +786,17 @@ assert(bin_l_err == nil, "Expected no error, got: " .. tostring(bin_l_err))
 assert(#bin_log_events == 3, "Expected 3 log events in table")
 
 local b_log1 = bin_log_events[1].log
+assert_all_columns_primitive(b_log1, "b_log1")
 assert(b_log1.TraceId == string.rep("aa", 16), "Log TraceId mismatch: " .. tostring(b_log1.TraceId))
 assert(b_log1.SpanId == string.rep("bb", 8), "Log SpanId mismatch: " .. tostring(b_log1.SpanId))
 assert(b_log1.Body == "BODY_WITH_UPPER_HEX_4BF9", "Log Body must not be modified")
-assert(b_log1.ResourceAttributes["res.upper_hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
+assert(type(b_log1.ResourceAttributes) == "string", "ResourceAttributes must be a JSON string")
+assert(b_log1.ResourceAttributes:find('"res.upper_hex":"4BF92F3577B34DA6A3CE929D0E0E4736"', 1, true) ~= nil,
     "ResourceAttributes uppercase hex string must not be altered")
-assert(b_log1.LogAttributes["log.raw_hex"] == "UPPERCASE_AND_HEX_4BF9",
+assert(type(b_log1.LogAttributes) == "string", "LogAttributes must be a JSON string")
+assert(b_log1.LogAttributes:find('"log.raw_hex":"UPPERCASE_AND_HEX_4BF9"', 1, true) ~= nil,
     "LogAttributes raw string must not be altered")
-assert(b_log1.LogAttributes["log.exact_16"] == "1234567812345678",
+assert(b_log1.LogAttributes:find('"log.exact_16":"1234567812345678"', 1, true) ~= nil,
     "LogAttributes exact 16 string must not be altered")
 
 local b_log2 = bin_log_events[2].log
@@ -882,36 +910,31 @@ assert(#bin_metric_events == 3, "Expected 3 metric events in table")
 
 -- Gauge Exemplar
 local b_m1 = bin_metric_events[1].log
+assert_all_columns_primitive(b_m1, "b_m1")
 assert(b_m1.MetricName == "bin_gauge")
-assert(b_m1.ResourceAttributes["res.upper_hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736")
-assert(b_m1.Attributes["dp.raw_hex"] == "UPPERCASE_4BF9")
-assert(type(b_m1.Exemplars) == "table" and #b_m1.Exemplars == 1, "Exemplars table missing or wrong size")
-local b_ex1 = b_m1.Exemplars[1]
-assert(b_ex1.TraceId == string.rep("aa", 16), "Exemplar 1 TraceId mismatch: " .. tostring(b_ex1.TraceId))
-assert(b_ex1.SpanId == string.rep("bb", 8), "Exemplar 1 SpanId mismatch: " .. tostring(b_ex1.SpanId))
-assert(math.abs(b_ex1.Value - 12.5) < 0.001, "Exemplar 1 Value mismatch")
-assert(b_ex1.TimeUnix == "2023-11-14T22:13:20.123456789Z", "Exemplar 1 TimeUnix mismatch: " .. tostring(b_ex1.TimeUnix))
-assert(b_ex1.FilteredAttributes["user.id"] == "usr-1", "Exemplar 1 FilteredAttributes mismatch")
-assert(b_ex1.FilteredAttributes["filter.raw_hex"] == "UPPERCASE_4BF9", "FilteredAttributes string must not be altered")
+assert(type(b_m1.ResourceAttributes) == "string")
+assert(b_m1.ResourceAttributes:find('"res.upper_hex":"4BF92F3577B34DA6A3CE929D0E0E4736"', 1, true) ~= nil)
+assert(type(b_m1.Attributes) == "string")
+assert(b_m1.Attributes:find('"dp.raw_hex":"UPPERCASE_4BF9"', 1, true) ~= nil)
+assert(type(b_m1.Exemplars) == "string", "Exemplars must be a JSON string")
+assert(b_m1.Exemplars == '[{"FilteredAttributes":{"user.id":"usr-1","filter.raw_hex":"UPPERCASE_4BF9"},"TimeUnix":"2023-11-14T22:13:20.123456789Z","Value":12.5,"SpanId":"' .. string.rep("bb", 8) .. '","TraceId":"' .. string.rep("aa", 16) .. '"}]',
+    "Exemplar 1 JSON mismatch: " .. tostring(b_m1.Exemplars))
 
 -- Sum Exemplar
 local b_m2 = bin_metric_events[2].log
+assert_all_columns_primitive(b_m2, "b_m2")
 assert(b_m2.MetricName == "bin_sum")
-assert(type(b_m2.Exemplars) == "table" and #b_m2.Exemplars == 1)
-local b_ex2 = b_m2.Exemplars[1]
-assert(b_ex2.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "Exemplar 2 TraceId mismatch: " .. tostring(b_ex2.TraceId))
-assert(b_ex2.SpanId == "00f067aa0ba902b7", "Exemplar 2 SpanId mismatch: " .. tostring(b_ex2.SpanId))
-assert(b_ex2.Value == 42, "Exemplar 2 Value mismatch: " .. tostring(b_ex2.Value))
-assert(b_ex2.FilteredAttributes["tenant"] == "acme")
+assert(type(b_m2.Exemplars) == "string")
+assert(b_m2.Exemplars == '[{"FilteredAttributes":{"tenant":"acme"},"TimeUnix":"2023-11-14T22:13:20.987654321Z","Value":42,"SpanId":"00f067aa0ba902b7","TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"}]',
+    "Exemplar 2 JSON mismatch: " .. tostring(b_m2.Exemplars))
 
 -- Histogram Exemplar (NUL bytes)
 local b_m3 = bin_metric_events[3].log
+assert_all_columns_primitive(b_m3, "b_m3")
 assert(b_m3.MetricName == "bin_histogram")
-assert(type(b_m3.Exemplars) == "table" and #b_m3.Exemplars == 1)
-local b_ex3 = b_m3.Exemplars[1]
-assert(b_ex3.TraceId == string.rep("0", 32), "Exemplar 3 TraceId mismatch: " .. tostring(b_ex3.TraceId))
-assert(b_ex3.SpanId == string.rep("0", 16), "Exemplar 3 SpanId mismatch: " .. tostring(b_ex3.SpanId))
-assert(math.abs(b_ex3.Value - 0.5) < 0.001, "Exemplar 3 Value mismatch")
+assert(type(b_m3.Exemplars) == "string")
+assert(b_m3.Exemplars == '[{"FilteredAttributes":{},"TimeUnix":"2023-11-14T22:13:20.555555555Z","Value":0.5,"SpanId":"' .. string.rep("0", 16) .. '","TraceId":"' .. string.rep("0", 32) .. '"}]',
+    "Exemplar 3 JSON mismatch: " .. tostring(b_m3.Exemplars))
 
 -- 4. Uppercase Hex Normalization Across All Modes (JSON and Table)
 -- JSON Mode: Traces, Logs, Metrics Exemplars
@@ -939,10 +962,11 @@ local upper_trace_events = {}
 local n_u_traces, u_t_err = vo.traces.process(upper_json_traces, function(ev) table.insert(upper_trace_events, ev) end)
 assert(n_u_traces == 1 and u_t_err == nil)
 local u_s = upper_trace_events[1].log
+assert_all_columns_primitive(u_s, "u_s")
 assert(u_s.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736", "JSON TraceId must be lowercase hex")
 assert(u_s.SpanId == "00f067aa0ba902b7", "JSON SpanId must be lowercase hex")
 assert(u_s.ParentSpanId == "aabbccddeeff0011", "JSON ParentSpanId must be lowercase hex")
-assert(u_s.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736", "ResourceAttributes must remain untouched")
+assert(u_s.ResourceAttributes == '{"res.hex":"4BF92F3577B34DA6A3CE929D0E0E4736"}', "ResourceAttributes must remain untouched")
 assert(u_s.Links:find('"TraceId":"deadbeef0123456789abcdef00112233"', 1, true) ~= nil, "JSON Links TraceId must be lowercase hex")
 assert(u_s.Links:find('"SpanId":"cafedead00112233"', 1, true) ~= nil, "JSON Links SpanId must be lowercase hex")
 
@@ -993,8 +1017,10 @@ local upper_metric_events = {}
 local n_u_metrics, u_m_err = vo.metrics.process(upper_json_metrics, function(ev) table.insert(upper_metric_events, ev) end)
 assert(n_u_metrics == 1 and u_m_err == nil)
 local u_m = upper_metric_events[1].log
-assert(u_m.Exemplars[1].TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
-assert(u_m.Exemplars[1].SpanId == "00f067aa0ba902b7")
+assert_all_columns_primitive(u_m, "u_m")
+assert(type(u_m.Exemplars) == "string")
+assert(u_m.Exemplars:find('"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"', 1, true) ~= nil)
+assert(u_m.Exemplars:find('"SpanId":"00f067aa0ba902b7"', 1, true) ~= nil)
 
 -- Table Mode: Uppercase Hex in Logs, Traces, Metrics
 local upper_table_traces = {
@@ -1085,8 +1111,10 @@ local upper_table_metrics = {
 local u_tbl_metrics = {}
 local n_ut_m, ut_m_err = vo.metrics.process(upper_table_metrics, function(ev) table.insert(u_tbl_metrics, ev) end)
 assert(n_ut_m == 1 and ut_m_err == nil)
-assert(u_tbl_metrics[1].log.Exemplars[1].TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
-assert(u_tbl_metrics[1].log.Exemplars[1].SpanId == "00f067aa0ba902b7")
+assert_all_columns_primitive(u_tbl_metrics[1].log, "u_tbl_metrics[1].log")
+assert(type(u_tbl_metrics[1].log.Exemplars) == "string")
+assert(u_tbl_metrics[1].log.Exemplars:find('"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"', 1, true) ~= nil)
+assert(u_tbl_metrics[1].log.Exemplars:find('"SpanId":"00f067aa0ba902b7"', 1, true) ~= nil)
 
 print("   Issue #8 correlation ID normalization regression tests passed.")
 
@@ -1176,40 +1204,27 @@ assert(i9_tbl_err == nil, "Expected nil error for Issue #9 table mode, got: " ..
 assert(#issue9_tbl_events == 2, "Expected 2 emitted events for Issue #9 table mode")
 
 local i9_tbl_eh = issue9_tbl_events[1].log
+assert_all_columns_primitive(i9_tbl_eh, "i9_tbl_eh")
 assert(i9_tbl_eh.MetricName == "http.server.duration.exp")
 assert(i9_tbl_eh.MetricType == "exponential_histogram", "Expected exponential_histogram, got: " .. tostring(i9_tbl_eh.MetricType))
 assert(i9_tbl_eh.AggregationTemporality == 2, "Expected AggregationTemporality 2, got: " .. tostring(i9_tbl_eh.AggregationTemporality))
 assert(i9_tbl_eh.Value == nil, "ExponentialHistogram Value must be nil")
-assert(type(i9_tbl_eh.ExponentialHistogram) == "table", "ExponentialHistogram sub-table missing")
-assert(i9_tbl_eh.ExponentialHistogram.aggregationTemporality == 2)
-assert(i9_tbl_eh.ExponentialHistogram.count == 42 and i9_tbl_eh.ExponentialHistogram.Count == 42)
-assert(math.abs(i9_tbl_eh.ExponentialHistogram.sum - 105.5) < 0.001)
-assert(math.abs(i9_tbl_eh.ExponentialHistogram.min - 0.5) < 0.001)
-assert(math.abs(i9_tbl_eh.ExponentialHistogram.max - 12.0) < 0.001)
-assert(i9_tbl_eh.ExponentialHistogram.scale == 3 and i9_tbl_eh.ExponentialHistogram.Scale == 3)
-assert(i9_tbl_eh.ExponentialHistogram.zeroCount == 2 and i9_tbl_eh.ExponentialHistogram.ZeroCount == 2)
-assert(type(i9_tbl_eh.ExponentialHistogram.positive) == "table")
-assert(i9_tbl_eh.ExponentialHistogram.positive.offset == -1)
-assert(#i9_tbl_eh.ExponentialHistogram.positive.bucketCounts == 3)
-assert(i9_tbl_eh.ExponentialHistogram.positive.bucketCounts[1] == 5)
-assert(i9_tbl_eh.ExponentialHistogram.positive.bucketCounts[2] == 15)
-assert(i9_tbl_eh.ExponentialHistogram.positive.bucketCounts[3] == 20)
-assert(type(i9_tbl_eh.ExponentialHistogram.negative) == "table")
-assert(i9_tbl_eh.ExponentialHistogram.negative.offset == 0)
-assert(#i9_tbl_eh.ExponentialHistogram.negative.bucketCounts == 1)
+assert(type(i9_tbl_eh.ExponentialHistogram) == "string", "ExponentialHistogram must be a JSON string")
+assert(i9_tbl_eh.ExponentialHistogram == '{"aggregationTemporality":2,"count":42,"sum":105.5,"min":0.5,"max":12,"scale":3,"zeroCount":2,"zeroThreshold":0,"positive":{"offset":-1,"bucketCounts":[5,15,20]},"negative":{"offset":0,"bucketCounts":[0]}}',
+    "ExponentialHistogram table-mode JSON mismatch: " .. tostring(i9_tbl_eh.ExponentialHistogram))
+assert(i9_tbl_eh.Attributes == '{"http.route":"/api/v1/pay"}')
+assert(i9_tbl_eh.Exemplars == "[]")
 
 local i9_tbl_sum = issue9_tbl_events[2].log
+assert_all_columns_primitive(i9_tbl_sum, "i9_tbl_sum")
 assert(i9_tbl_sum.MetricName == "rpc.server.latency.summary")
 assert(i9_tbl_sum.MetricType == "summary")
 assert(i9_tbl_sum.Value == nil, "Summary Value must be nil")
-assert(type(i9_tbl_sum.Summary) == "table", "Summary sub-table missing")
-assert(i9_tbl_sum.Summary.count == 50 and i9_tbl_sum.Summary.Count == 50)
-assert(math.abs(i9_tbl_sum.Summary.sum - 1234.5) < 0.001)
-assert(type(i9_tbl_sum.Summary.quantileValues) == "table" and #i9_tbl_sum.Summary.quantileValues == 2)
-assert(math.abs(i9_tbl_sum.Summary.quantileValues[1].quantile - 0.5) < 0.001)
-assert(math.abs(i9_tbl_sum.Summary.quantileValues[1].value - 12.0) < 0.001)
-assert(math.abs(i9_tbl_sum.Summary.quantileValues[2].quantile - 0.99) < 0.001)
-assert(math.abs(i9_tbl_sum.Summary.quantileValues[2].value - 85.0) < 0.001)
+assert(type(i9_tbl_sum.Summary) == "string", "Summary must be a JSON string")
+assert(i9_tbl_sum.Summary == '{"count":50,"sum":1234.5,"quantileValues":[{"quantile":0.5,"value":12},{"quantile":0.99,"value":85}]}',
+    "Summary table-mode JSON mismatch: " .. tostring(i9_tbl_sum.Summary))
+assert(i9_tbl_sum.Attributes == '{"rpc.method":"Charge"}')
+assert(i9_tbl_sum.Exemplars == "[]")
 
 -- 2. Issue #9 JSON string mode reproduction (mixed_json)
 local mixed_json = [[{
@@ -1268,31 +1283,23 @@ assert(i9_json_err == nil, "Expected nil error for Issue #9 JSON mode, got: " ..
 assert(#issue9_json_events == 2, "Expected 2 emitted events for Issue #9 JSON mode")
 
 local i9_json_eh = issue9_json_events[1].log
+assert_all_columns_primitive(i9_json_eh, "i9_json_eh")
 assert(i9_json_eh.MetricType == "exponential_histogram")
 assert(i9_json_eh.AggregationTemporality == 1)
 assert(i9_json_eh.Value == nil)
-assert(type(i9_json_eh.ExponentialHistogram) == "table")
-assert(i9_json_eh.ExponentialHistogram.count == 42)
-assert(math.abs(i9_json_eh.ExponentialHistogram.sum - 105.5) < 0.001)
-assert(math.abs(i9_json_eh.ExponentialHistogram.min - 0.5) < 0.001)
-assert(math.abs(i9_json_eh.ExponentialHistogram.max - 12.0) < 0.001)
-assert(i9_json_eh.ExponentialHistogram.scale == -1)
-assert(i9_json_eh.ExponentialHistogram.zeroCount == 2)
-assert(i9_json_eh.ExponentialHistogram.positive.offset == 1)
-assert(#i9_json_eh.ExponentialHistogram.positive.bucketCounts == 3)
-assert(i9_json_eh.ExponentialHistogram.positive.bucketCounts[3] == 20)
-assert(i9_json_eh.ExponentialHistogram.negative.offset == -2)
-assert(#i9_json_eh.ExponentialHistogram.negative.bucketCounts == 1)
+assert(type(i9_json_eh.ExponentialHistogram) == "string")
+assert(i9_json_eh.ExponentialHistogram == '{"aggregationTemporality":1,"count":42,"sum":105.5,"min":0.5,"max":12,"scale":-1,"zeroCount":2,"zeroThreshold":0,"positive":{"offset":1,"bucketCounts":[5,15,20]},"negative":{"offset":-2,"bucketCounts":[0]}}',
+    "ExponentialHistogram JSON-mode mismatch: " .. tostring(i9_json_eh.ExponentialHistogram))
+assert(i9_json_eh.Exemplars == "[]")
 
 local i9_json_sum = issue9_json_events[2].log
+assert_all_columns_primitive(i9_json_sum, "i9_json_sum")
 assert(i9_json_sum.MetricType == "summary")
 assert(i9_json_sum.Value == nil)
-assert(type(i9_json_sum.Summary) == "table")
-assert(i9_json_sum.Summary.count == 50)
-assert(math.abs(i9_json_sum.Summary.sum - 1234.5) < 0.001)
-assert(#i9_json_sum.Summary.quantileValues == 2)
-assert(math.abs(i9_json_sum.Summary.quantileValues[1].quantile - 0.5) < 0.001)
-assert(math.abs(i9_json_sum.Summary.quantileValues[2].value - 85.0) < 0.001)
+assert(type(i9_json_sum.Summary) == "string")
+assert(i9_json_sum.Summary == '{"count":50,"sum":1234.5,"quantileValues":[{"quantile":0.5,"value":12},{"quantile":0.99,"value":85}]}',
+    "Summary JSON-mode mismatch: " .. tostring(i9_json_sum.Summary))
+assert(i9_json_sum.Exemplars == "[]")
 
 print("   Issue #9 ExponentialHistogram and Summary validation passed.")
 

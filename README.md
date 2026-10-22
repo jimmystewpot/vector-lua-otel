@@ -583,9 +583,9 @@ native_metrics.process(payload: string | table, emit: function) -> (integer, nil
 - **Empty / Sparse Payloads**: Payloads with empty records or missing scopes safely return `(0, nil)` without errors.
 - **FFI Safety**: C++ exceptions are caught at the FFI boundary and converted into error return values. No unhandled C++ exceptions or Lua panics escape.
 
-### Emitted Tables Are Shared
+### Structured Columns Are Emitted as Deterministic JSON Strings
 
-Within one resource, every emitted record's `ResourceAttributes` points at the **same** Lua table, and likewise `ScopeAttributes` within one scope. This avoids rebuilding the table for every record. Treat both as **read-only**: copy a table before mutating it, because a change made while handling one event is visible to every other event of the same resource/scope (including events your `emit` callback has already stored).
+Every emitted `event.log` record contains exclusively primitive Lua values (`string`, `number`, `boolean` — never nested Lua tables). Attribute maps (`ResourceAttributes`, `ScopeAttributes`, `LogAttributes`, `SpanAttributes`, `Attributes`, defaulting to `"{}"`) and structured array/metric payloads (`Events`, `Links`, `Histogram`, `ExponentialHistogram`, `Summary`, and `Exemplars`, with arrays defaulting to `"[]"`) are serialized directly in C++ via `FastJsonWriter` as compact, deterministic JSON strings for zero-conversion compatibility with Vector's Parquet `BINARY (STRING)` and ClickHouse JSON column sinks.
 
 ### Vector Native Event Behaviour & Metric Variant Exclusions
 
@@ -597,7 +597,7 @@ Within one resource, every emitted record's `ResourceAttributes` points at the *
   - In `vector_native.metrics`, tags prefixed with `resource.` populate `ResourceAttributes` (with `resource.service.name` setting `ServiceName`), tags prefixed with `scope.` populate `ScopeName`, `ScopeVersion`, or `ScopeAttributes`, and all remaining tags populate `Attributes`.
   - Both single-value string tags and Vector's `tag-values: full` array tags (selecting the last non-null element) are supported.
 - **Exclusion of Vector-Only Non-OTLP Metric Variants (`distribution`, `set`, `sketch`)**:
-  - `vector_native.metrics` supports the four OTLP-aligned Vector metric variants: `counter` (`MetricType = "sum"`), `gauge` (`MetricType = "gauge"`), `aggregated_histogram` (`MetricType = "histogram"`, stripping trailing `+Inf` / `"inf"` upper bounds and populating both PascalCase and camelCase histogram keys), and `aggregated_summary` (`MetricType = "summary"`).
+  - `vector_native.metrics` supports the five OTLP-aligned Vector metric variants: `counter` (`MetricType = "sum"`), `gauge` (`MetricType = "gauge"`), `aggregated_histogram` / `histogram` (`MetricType = "histogram"`, stripping trailing `+Inf` / `"inf"` upper bounds and serializing canonical camelCase JSON), `exponential_histogram` / `aggregated_exponential_histogram` (`MetricType = "exponential_histogram"`), and `aggregated_summary` / `summary` (`MetricType = "summary"`).
   - Vector-only non-OTLP metric variants (`distribution`, `set`, `sketch`) are intentionally excluded and return the standard error tuple `(nil, "Unsupported non-OTLP metric variant '<variant>': vector_native only supports OpenTelemetry metric types (counter, gauge, aggregated_histogram, aggregated_summary)", partial_count)`.
 
 ---
@@ -620,12 +620,12 @@ All extracted columns are aligned with canonical OpenTelemetry ClickHouse export
 | `ServiceName` | `string` | `resource.attributes["service.name"]` | Service name (defaults to `"unknown_service"`) |
 | `Body` | `string` | `body` | String body or stringified JSON if structured |
 | `ResourceSchemaUrl` | `string` | `resourceLogs.schemaUrl` | Resource schema URL |
-| `ResourceAttributes` | `table` | `resource.attributes` | Key-value table of resource attributes |
+| `ResourceAttributes` | `string` | `resource.attributes` | Compact JSON object string of resource attributes (defaults to `"{}"`) |
 | `ScopeSchemaUrl` | `string` | `scopeLogs.schemaUrl` | Scope schema URL |
 | `ScopeName` | `string` | `scope.name` | Instrumentation scope name |
 | `ScopeVersion` | `string` | `scope.version` | Instrumentation scope version |
-| `ScopeAttributes` | `table` | `scope.attributes` | Key-value table of scope attributes |
-| `LogAttributes` | `table` | `logRecord.attributes` | Key-value table of record attributes |
+| `ScopeAttributes` | `string` | `scope.attributes` | Compact JSON object string of scope attributes (defaults to `"{}"`) |
+| `LogAttributes` | `string` | `logRecord.attributes` | Compact JSON object string of record attributes (defaults to `"{}"`) |
 | `EventName` | `string` | `eventName` / attributes | Event name (empty if unset) |
 | `processed_at` | `string` | `std::chrono::system_clock` | Transform ISO-8601 UTC nanosecond timestamp |
 
@@ -642,15 +642,15 @@ All extracted columns are aligned with canonical OpenTelemetry ClickHouse export
 | `SpanName` | `string` | `name` | Operation / span name |
 | `SpanKind` | `string` | `kind` | Span kind (`"SPAN_KIND_SERVER"`, etc.) |
 | `ServiceName` | `string` | `resource.attributes["service.name"]` | Service name (defaults to `"unknown_service"`) |
-| `ResourceAttributes` | `table` | `resource.attributes` | Resource key-value attributes |
+| `ResourceAttributes` | `string` | `resource.attributes` | Compact JSON object string of resource attributes (defaults to `"{}"`) |
 | `ScopeName` | `string` | `scope.name` | Instrumentation scope name |
 | `ScopeVersion` | `string` | `scope.version` | Instrumentation scope version |
-| `SpanAttributes` | `table` | `attributes` | Span key-value attributes |
+| `SpanAttributes` | `string` | `attributes` | Compact JSON object string of span attributes (defaults to `"{}"`) |
 | `Duration` | `integer` | `endTimeUnixNano - startTimeUnixNano` | Span duration in nanoseconds (preserved 64-bit int) |
 | `StatusCode` | `string` | `status.code` | `"STATUS_CODE_UNSET"`, `"STATUS_CODE_OK"`, or `"STATUS_CODE_ERROR"` |
 | `StatusMessage` | `string` | `status.message` | Status description message |
-| `Events` | `string` (`vector_native`) / `table` (`vector_otel`) | `events` | JSON array (or table) of `{ Timestamp, Name, Attributes }` |
-| `Links` | `string` (`vector_native`) / `table` (`vector_otel`) | `links` | JSON array (or table) of `{ TraceId, SpanId, TraceState, Attributes }` |
+| `Events` | `string` | `events` | Compact JSON array string of `{ Timestamp, Name, Attributes }` (defaults to `"[]"`) |
+| `Links` | `string` | `links` | Compact JSON array string of `{ TraceId, SpanId, TraceState, Attributes }` (defaults to `"[]"`) |
 | `processed_at` | `string` | `std::chrono::system_clock` | Transform ISO-8601 UTC nanosecond timestamp |
 
 ### Metrics Schema
@@ -665,19 +665,19 @@ All extracted columns are aligned with canonical OpenTelemetry ClickHouse export
 | `ServiceName` | `string` | `resource.attributes["service.name"]` | Service name (defaults to `"unknown_service"`) |
 | `AggregationTemporality` | `integer` | `aggregationTemporality` | Aggregation temporality (`1` = DELTA, `2` = CUMULATIVE, `0` = UNSPECIFIED) for Sum / Histogram / ExponentialHistogram |
 | `IsMonotonic` | `boolean` | `sum.isMonotonic` | Monotonicity flag emitted for `"sum"` metrics when present |
-| `ResourceAttributes` | `table` | `resource.attributes` | Resource key-value attributes |
+| `ResourceAttributes` | `string` | `resource.attributes` | Compact JSON object string of resource attributes (defaults to `"{}"`) |
 | `ScopeName` | `string` | `scope.name` | Instrumentation scope name |
 | `ScopeVersion` | `string` | `scope.version` | Instrumentation scope version |
-| `ScopeAttributes` | `table` | `scope.attributes` | Scope key-value attributes |
-| `Attributes` | `table` | `dataPoint.attributes` | Data point label dimensions |
+| `ScopeAttributes` | `string` | `scope.attributes` | Compact JSON object string of scope attributes (defaults to `"{}"`) |
+| `Attributes` | `string` | `dataPoint.attributes` | Compact JSON object string of data point attributes (defaults to `"{}"`) |
 | `StartTimeUnix` | `string` | `dataPoint.startTimeUnixNano` | Metric start time (ISO-8601 UTC string) |
 | `TimeUnix` | `string` | `dataPoint.timeUnixNano` | Data point time (ISO-8601 UTC string) |
 | `Value` | `number` | `asDouble` / `asInt` / `value` | Metric value for Gauge / Sum (omitted / `nil` for Histogram, ExponentialHistogram, and Summary) |
-| `Histogram` | `table` | `dataPoint` (Histogram) | `{ aggregationTemporality, count, sum, min, max, bucketCounts, explicitBounds }` |
-| `ExponentialHistogram` | `table` | `dataPoint` (ExponentialHistogram) | `{ aggregationTemporality, count, sum, min, max, scale, zeroCount, zeroThreshold, positive = { offset, bucketCounts }, negative = { offset, bucketCounts } }` |
-| `Summary` | `table` | `dataPoint` (Summary) | `{ count, sum, quantileValues = [ { quantile, value }, ... ] }` |
+| `Histogram` | `string` | `dataPoint` (Histogram) | Compact JSON object string `{"aggregationTemporality","count","sum"[,"min"][,"max"],"bucketCounts","explicitBounds"}` |
+| `ExponentialHistogram` | `string` | `dataPoint` (ExponentialHistogram) | Compact JSON object string `{"aggregationTemporality","count"[,"sum"][,"min"][,"max"],"scale","zeroCount","zeroThreshold","positive":{"offset","bucketCounts"},"negative":{"offset","bucketCounts"}}` |
+| `Summary` | `string` | `dataPoint` (Summary) | Compact JSON object string `{"count","sum","quantileValues":[{"quantile","value"},...]}` |
 | `Flags` | `integer` | `flags` | Unsigned 32-bit flags |
-| `Exemplars` | `table` | `exemplars` | Array of `{ FilteredAttributes, TimeUnix, Value, SpanId, TraceId }` |
+| `Exemplars` | `string` | `exemplars` | Compact JSON array string of `{"FilteredAttributes","TimeUnix"[,"Value"],"SpanId","TraceId"}` (defaults to `"[]"`) |
 | `processed_at` | `string` | `std::chrono::system_clock` | Transform ISO-8601 UTC nanosecond timestamp |
 
 ---
