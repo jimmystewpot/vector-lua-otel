@@ -97,7 +97,7 @@ git -C "$REPO_ROOT" archive \
 
 # 6. Verify archive hygiene (.github and internal paths excluded, core + third_party included)
 TAR_LIST="$(tar -tzf "$TARBALL_PATH")"
-if echo "$TAR_LIST" | grep -qE '(^|/)(\.github|\.gitattributes|\.gitignore|\.clang-format|\.vscode|\.superpowers|docs/superpowers|sonar-project\.properties)(/|$)'; then
+if grep -qE '(^|/)(\.github|\.gitattributes|\.gitignore|\.clang-format|\.vscode|\.superpowers|docs/superpowers|sonar-project\.properties)(/|$)' <<< "$TAR_LIST"; then
   echo "ERROR: Release tarball '$TARBALL_NAME' contains forbidden internal/CI paths" >&2
   exit 1
 fi
@@ -107,7 +107,7 @@ for req_path in \
   "vector-lua-otel-${FULL_VERSION}/src/module.cpp" \
   "vector-lua-otel-${FULL_VERSION}/third_party/simdjson/src/simdjson.cpp" \
   "vector-lua-otel-${FULL_VERSION}/third_party/googletest/CMakeLists.txt"; do
-  if ! echo "$TAR_LIST" | grep -qx "$req_path"; then
+  if ! grep -Fxq "$req_path" <<< "$TAR_LIST"; then
     echo "ERROR: Release tarball '$TARBALL_NAME' is missing required path '$req_path'" >&2
     exit 1
   fi
