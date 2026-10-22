@@ -1551,6 +1551,224 @@ TEST_F(NativeExtractorsTest, NativeLogsBodyFormatsAndScopeJson) {
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(NativeExtractorsTest, TracesStatusCodesAndMessages) {
+  // Test numeric and string status codes, status message fields, and span kinds
+  std::string json = R"([
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "name": "span-ok",
+      "kind": 1,
+      "status": {"code": 1, "message": "everything ok"}
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b8",
+      "name": "span-err",
+      "kind": "PRODUCER",
+      "status_code": "STATUS_CODE_ERROR",
+      "status_message": "failed to connect"
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b9",
+      "name": "span-client",
+      "kind": "client",
+      "status_code": 0
+    },
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902ba",
+      "name": "span-consumer",
+      "kind": "consumer"
+    }
+  ])";
+  auto res = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 4);
+
+  // Also test table mode with status table and kind strings/numbers
+  const char* script = R"(
+    return {
+      {
+        trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+        span_id = "00f067aa0ba902bb",
+        name = "tbl-span-ok",
+        kind = "SPAN_KIND_INTERNAL",
+        status = { code = "STATUS_CODE_OK", message = "table ok" }
+      },
+      {
+        trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+        span_id = "00f067aa0ba902bc",
+        name = "tbl-span-err",
+        kind = 4,
+        status = { code = 2, message = "table err" }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeTracesTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 2);
+
+  const char* verify = R"(
+    assert(#emitted == 6, "Expected 6 emitted events, got " .. #emitted)
+    assert(emitted[1].log.StatusCode == "STATUS_CODE_OK", "s1 StatusCode mismatch")
+    assert(emitted[1].log.StatusMessage == "everything ok", "s1 StatusMessage mismatch")
+    assert(emitted[1].log.SpanKind == "SPAN_KIND_INTERNAL", "s1 SpanKind mismatch")
+
+    assert(emitted[2].log.StatusCode == "STATUS_CODE_ERROR", "s2 StatusCode mismatch")
+    assert(emitted[2].log.StatusMessage == "failed to connect", "s2 StatusMessage mismatch")
+    assert(emitted[2].log.SpanKind == "SPAN_KIND_PRODUCER", "s2 SpanKind mismatch")
+
+    assert(emitted[3].log.StatusCode == "STATUS_CODE_UNSET", "s3 StatusCode mismatch")
+    assert(emitted[3].log.SpanKind == "SPAN_KIND_CLIENT", "s3 SpanKind mismatch")
+
+    assert(emitted[4].log.SpanKind == "SPAN_KIND_CONSUMER", "s4 SpanKind mismatch")
+
+    assert(emitted[5].log.StatusCode == "STATUS_CODE_OK", "s5 StatusCode mismatch")
+    assert(emitted[5].log.StatusMessage == "table ok", "s5 StatusMessage mismatch")
+    assert(emitted[5].log.SpanKind == "SPAN_KIND_INTERNAL", "s5 SpanKind mismatch")
+
+    assert(emitted[6].log.StatusCode == "STATUS_CODE_ERROR", "s6 StatusCode mismatch")
+    assert(emitted[6].log.StatusMessage == "table err", "s6 StatusMessage mismatch")
+    assert(emitted[6].log.SpanKind == "SPAN_KIND_PRODUCER", "s6 SpanKind mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, TracesSpanEventsAndLinksAttributes) {
+  // Test spans containing events and links with various attribute types
+  std::string json = R"({
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "name": "span-events-links",
+    "events": [
+      {
+        "name": "cache_lookup",
+        "time_unix_nano": 1729598400000000000,
+        "attributes": {
+          "hit": {"boolValue": true},
+          "keys": {"intValue": 42},
+          "score": {"doubleValue": 99.5},
+          "msg": {"stringValue": "found"}
+        }
+      }
+    ],
+    "links": [
+      {
+        "trace_id": "5b8efff798038103d269b633813fc60c",
+        "span_id": "eee19b7ec3c1b174",
+        "attributes": {
+          "relation": "parent_context"
+        }
+      }
+    ]
+  })";
+  auto res = ProcessNativeTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 1, "Expected 1 emitted event")
+    local r = emitted[1].log
+    assert(type(r.Events) == "string", "Events must be a string")
+    assert(r.Events:find("cache_lookup") ~= nil, "Events must contain cache_lookup")
+    assert(r.Events:find('"hit":true') ~= nil, "Events must contain hit:true")
+    assert(r.Events:find('"keys":42') ~= nil, "Events must contain keys:42")
+    assert(r.Events:find('"msg":"found"') ~= nil, "Events must contain msg:found")
+
+    assert(type(r.Links) == "string", "Links must be a string")
+    assert(r.Links:find("5b8efff798038103d269b633813fc60c") ~= nil, "Links must contain trace_id")
+    assert(r.Links:find("eee19b7ec3c1b174") ~= nil, "Links must contain span_id")
+    assert(r.Links:find('"relation":"parent_context"') ~= nil, "Links must contain relation:parent_context")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+
+  // Also test table mode events and links serialization
+  const char* script = R"(
+    return {
+      trace_id = "4bf92f3577b34da6a3ce929d0e0e4736",
+      span_id = "00f067aa0ba902b7",
+      name = "table-events-links",
+      resources = {
+        attributes = {
+          ["service.name"] = "nested-svc"
+        }
+      },
+      events = {
+        {
+          name = "tbl_event",
+          timestamp = "2026-10-22T10:00:00.000000000Z",
+          attributes = {
+            num_k = 100,
+            str_k = "v",
+            [123] = "numeric_key_val"
+          }
+        }
+      },
+      links = {
+        {
+          trace_id = "5b8efff798038103d269b633813fc60c",
+          span_id = "eee19b7ec3c1b174",
+          trace_state = "congo=t61rcWkgMzE",
+          attributes = {
+            link_k = "link_v"
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeTracesTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  const char* verify_tbl = R"(
+    assert(#emitted == 2, "Expected 2 emitted events, got " .. #emitted)
+    local r2 = emitted[2].log
+    assert(r2.ServiceName == "nested-svc", "Nested service name mismatch: " .. tostring(r2.ServiceName))
+    assert(type(r2.Events) == "string", "r2.Events must be string")
+    assert(r2.Events:find("tbl_event") ~= nil, "r2.Events missing tbl_event")
+    assert(r2.Events:find("numeric_key_val") ~= nil, "r2.Events missing numeric key value")
+    assert(type(r2.Links) == "string", "r2.Links must be string")
+    assert(r2.Links:find("congo=t61rcWkgMzE") ~= nil, "r2.Links missing trace state")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_tbl), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, TracesArrayWrapperBatch) {
+  // Test JSON array wrapper {"trace": [ ... ]}
+  std::string json_wrapped = R"({
+    "trace": [
+      {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b1",
+        "name": "wrapped-span-1"
+      },
+      {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b2",
+        "name": "wrapped-span-2"
+      }
+    ]
+  })";
+  auto res = ProcessNativeTraces(L_, json_wrapped, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 2);
+
+  const char* verify = R"(
+    assert(#emitted == 2, "Expected 2 emitted events")
+    assert(emitted[1].log.SpanName == "wrapped-span-1", "s1 SpanName mismatch")
+    assert(emitted[2].log.SpanName == "wrapped-span-2", "s2 SpanName mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace native_extractors
 }  // namespace vector_otel
