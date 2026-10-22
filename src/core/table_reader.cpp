@@ -1113,43 +1113,36 @@ static bool TryExtractScalarServiceName(lua_State* L, int val_idx, std::string& 
 
 static void UpdateTableServiceNameCandidate(lua_State* L, int val_idx, std::string_view key_sv,
                                             std::string_view* out_service_name,
-                                            std::string& scratch, bool& has_dot_svc,
-                                            bool& has_snake_svc) {
+                                            std::string& dot_scratch, std::string& snake_scratch,
+                                            bool& has_dot_svc, bool& has_snake_svc) {
   if (out_service_name == nullptr) {
     return;
   }
   if (key_sv == "service.name") {
-    if (TryExtractScalarServiceName(L, val_idx, scratch)) {
-      *out_service_name = std::string_view(scratch);
-      has_dot_svc = true;
-    } else {
-      has_dot_svc = false;
-      if (!has_snake_svc) {
-        *out_service_name = "unknown_service";
-      }
-    }
+    has_dot_svc = TryExtractScalarServiceName(L, val_idx, dot_scratch);
   } else if (key_sv == "service_name") {
-    if (!has_dot_svc) {
-      if (TryExtractScalarServiceName(L, val_idx, scratch)) {
-        *out_service_name = std::string_view(scratch);
-        has_snake_svc = true;
-      } else {
-        has_snake_svc = false;
-        *out_service_name = "unknown_service";
-      }
-    } else {
-      std::string dummy;
-      has_snake_svc = TryExtractScalarServiceName(L, val_idx, dummy);
-    }
+    has_snake_svc = TryExtractScalarServiceName(L, val_idx, snake_scratch);
+  } else {
+    return;
+  }
+  if (has_dot_svc) {
+    *out_service_name = std::string_view(dot_scratch);
+  } else if (has_snake_svc) {
+    *out_service_name = std::string_view(snake_scratch);
+  } else {
+    *out_service_name = "unknown_service";
   }
 }
 
 void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer,
                                      std::string_view* out_service_name) {
   static thread_local std::string tls_attr_json_service_scratch;
+  static thread_local std::string tls_attr_json_snake_service_scratch;
   if (out_service_name != nullptr) {
     ResetScratchString(tls_attr_json_service_scratch);
     ReserveScratchString(tls_attr_json_service_scratch, 128);
+    ResetScratchString(tls_attr_json_snake_service_scratch);
+    ReserveScratchString(tls_attr_json_snake_service_scratch, 128);
   }
   if (!lua_checkstack(L, 10)) {
     throw std::runtime_error("Lua stack overflow in WriteTableAttributesEntriesJson");
@@ -1190,9 +1183,9 @@ void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter
             if (GetTableField(L, item_idx, "value")) {
               if (out_service_name != nullptr &&
                   (key_sv == "service.name" || key_sv == "service_name")) {
-                UpdateTableServiceNameCandidate(L, -1, key_sv, out_service_name,
-                                                tls_attr_json_service_scratch, has_dot_svc,
-                                                has_snake_svc);
+                UpdateTableServiceNameCandidate(
+                    L, -1, key_sv, out_service_name, tls_attr_json_service_scratch,
+                    tls_attr_json_snake_service_scratch, has_dot_svc, has_snake_svc);
               }
               writer.Key(key_sv);
               SerializeLuaValueToJson(L, -1, writer, 0);
@@ -1213,9 +1206,9 @@ void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter
         const char* ks = lua_tolstring(L, -2, &klen);
         std::string_view key_sv(ks, klen);
         if (out_service_name != nullptr && (key_sv == "service.name" || key_sv == "service_name")) {
-          UpdateTableServiceNameCandidate(L, -1, key_sv, out_service_name,
-                                          tls_attr_json_service_scratch, has_dot_svc,
-                                          has_snake_svc);
+          UpdateTableServiceNameCandidate(
+              L, -1, key_sv, out_service_name, tls_attr_json_service_scratch,
+              tls_attr_json_snake_service_scratch, has_dot_svc, has_snake_svc);
         }
         writer.Key(key_sv);
         SerializeLuaValueToJson(L, -1, writer, 0);

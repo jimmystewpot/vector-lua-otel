@@ -3068,5 +3068,39 @@ TEST_F(TableModeTest, OtlpTableWrappersLogAndTraceAndMetric) {
   EXPECT_EQ(res_m2.emitted_count, 1);
 }
 
+TEST_F(TableModeTest,
+       WriteTableAttributesJson_RetainsSnakeCaseFallbackWhenDotServiceInvalidatedLater) {
+  core::FastJsonWriter writer;
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { stringValue = "first-dot-svc" } },
+      { key = "service_name", value = { stringValue = "fallback-snake-svc-longer-than-sso-buffer" } },
+      { key = "service.name", value = { stringValue = "" } }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc1 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc1);
+  EXPECT_EQ(svc1, "fallback-snake-svc-longer-than-sso-buffer");
+  lua_pop(L_, 1);
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      { key = "service.name", value = { stringValue = "first-dot-svc" } },
+      { key = "service_name", value = { stringValue = "fallback-snake-svc" } },
+      { key = "service_name", value = { intValue = 1 } },
+      { key = "service.name", value = { intValue = 2 } }
+    }
+  )"),
+            LUA_OK);
+  std::string_view svc2 = "unknown_service";
+  writer.Reset();
+  core::WriteTableAttributesJson(L_, -1, writer, &svc2);
+  EXPECT_EQ(svc2, "unknown_service");
+  lua_pop(L_, 1);
+}
+
 }  // namespace
 }  // namespace vector_otel

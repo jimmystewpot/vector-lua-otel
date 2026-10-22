@@ -14,9 +14,10 @@
 namespace vector_otel::core {
 
 namespace {
-// Thread-local scratch buffer for service.name to prevent use-after-free
-// when Lua GC removes the attribute from ResourceAttributes.
+// Thread-local scratch buffers for service.name / service_name to prevent use-after-free
+// when Lua GC removes the attribute from ResourceAttributes or when fallback is needed.
 thread_local std::string tls_service_name_scratch;
+thread_local std::string tls_snake_service_name_scratch;
 
 // Helper to capture and safely copy service.name from Lua stack into scratch.
 // Returns string_view into tls_service_name_scratch if scalar string found,
@@ -1096,32 +1097,108 @@ void UpdateServiceNameCandidate(std::string_view* out_service_name, std::string_
   }
   const bool valid = (is_scalar_str && !scalar_str.empty());
   if (k == "service.name") {
+    has_dot_svc = valid;
     if (valid) {
       ReserveScratchString(tls_service_name_scratch, 128);
       tls_service_name_scratch.assign(scalar_str.data(), scalar_str.size());
-      *out_service_name = std::string_view(tls_service_name_scratch);
-      has_dot_svc = true;
-    } else {
-      has_dot_svc = false;
-      if (!has_snake_svc) {
-        *out_service_name = "unknown_service";
-      }
     }
   } else if (k == "service_name") {
+    has_snake_svc = valid;
     if (valid) {
-      has_snake_svc = true;
-      if (!has_dot_svc) {
-        ReserveScratchString(tls_service_name_scratch, 128);
-        tls_service_name_scratch.assign(scalar_str.data(), scalar_str.size());
-        *out_service_name = std::string_view(tls_service_name_scratch);
+      ReserveScratchString(tls_snake_service_name_scratch, 128);
+      tls_snake_service_name_scratch.assign(scalar_str.data(), scalar_str.size());
+    }
+  } else {
+    return;
+  }
+  if (has_dot_svc) {
+    *out_service_name = std::string_view(tls_service_name_scratch);
+  } else if (has_snake_svc) {
+    *out_service_name = std::string_view(tls_snake_service_name_scratch);
+  } else {
+    *out_service_name = "unknown_service";
+  }
+}
+
+bool TryParseExemplarGenericValue(simdjson::ondemand::value& val, int64_t& out_int,
+                                  double& out_double, bool& out_is_int) {
+  auto type_res = val.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    throw std::runtime_error(simdjson::error_message(type_res.error()));
+  }
+  const auto type = type_res.value();
+  if (type == simdjson::ondemand::json_type::number) {
+    auto num_res = val.get_number();
+    if (num_res.error() != simdjson::SUCCESS) {
+      if (num_res.error() != simdjson::NUMBER_OUT_OF_RANGE &&
+          num_res.error() != simdjson::BIGINT_ERROR) {
+        throw std::runtime_error(simdjson::error_message(num_res.error()));
       }
-    } else {
-      has_snake_svc = false;
-      if (!has_dot_svc) {
-        *out_service_name = "unknown_service";
+      return false;
+    }
+    const auto num = num_res.value();
+    if (num.is_int64()) {
+      out_int = num.get_int64();
+      out_is_int = true;
+      return true;
+    }
+    if (num.is_uint64()) {
+      const uint64_t u = num.get_uint64();
+      out_int = (u > static_cast<uint64_t>(INT64_MAX)) ? INT64_MAX : static_cast<int64_t>(u);
+      out_is_int = true;
+      return true;
+    }
+    if (num.is_double()) {
+      const double d = num.get_double();
+      if (std::isfinite(d)) {
+        out_double = d;
+        out_is_int = false;
+        return true;
       }
     }
+    return false;
   }
+  if (type == simdjson::ondemand::json_type::string) {
+    auto str_res = val.get_string();
+    if (str_res.error() != simdjson::SUCCESS) {
+      throw std::runtime_error(simdjson::error_message(str_res.error()));
+    }
+    std::string_view sv = TrimJsonWhitespace(str_res.value());
+    if (!sv.empty() && sv.front() == '+') {
+      sv.remove_prefix(1);
+      if (!sv.empty() && sv.front() == '-') {
+        return false;
+      }
+    }
+    if (sv.empty()) {
+      return false;
+    }
+    int64_t iv = 0;
+    auto [iptr, iec] = std::from_chars(sv.data(), sv.data() + sv.size(), iv);
+    if (iec == std::errc() && iptr == sv.data() + sv.size()) {
+      out_int = iv;
+      out_is_int = true;
+      return true;
+    }
+    double d = 0.0;
+    auto [dptr, dec] = std::from_chars(sv.data(), sv.data() + sv.size(), d);
+    if (dec == std::errc() && dptr == sv.data() + sv.size() && std::isfinite(d)) {
+      out_double = d;
+      out_is_int = false;
+      return true;
+    }
+    return false;
+  }
+  if (type == simdjson::ondemand::json_type::boolean) {
+    if (auto err = val.get_bool().error(); err != simdjson::SUCCESS) {
+      throw std::runtime_error(simdjson::error_message(err));
+    }
+  } else if (type == simdjson::ondemand::json_type::null) {
+    if (auto err = val.is_null().error(); err != simdjson::SUCCESS) {
+      throw std::runtime_error(simdjson::error_message(err));
+    }
+  }
+  return false;
 }
 
 void WriteUint64Array(FastJsonWriter& w, const std::vector<uint64_t>& vec) {
@@ -1317,13 +1394,18 @@ void SerializeExemplarsJson(simdjson::ondemand::value& val, FastJsonWriter& writ
           if (s_res.error() == simdjson::SUCCESS) {
             trace_id = s_res.value();
           }
-        } else if (k == "asDouble" || k == "as_double" || k == "value") {
+        } else if (k == "asDouble" || k == "as_double") {
           if (TryParseDouble(fv, ex_double_val)) {
             ex_val_kind = ExValKind::kDouble;
           }
         } else if (k == "asInt" || k == "as_int") {
           if (TryParseInt64(fv, ex_int_val)) {
             ex_val_kind = ExValKind::kInt64;
+          }
+        } else if (k == "value") {
+          bool is_int = false;
+          if (TryParseExemplarGenericValue(fv, ex_int_val, ex_double_val, is_int)) {
+            ex_val_kind = is_int ? ExValKind::kInt64 : ExValKind::kDouble;
           }
         } else if (k == "filteredAttributes" || k == "filtered_attributes") {
           tls_exemplar_attrs_writer.Reset();
@@ -1440,7 +1522,10 @@ void SerializeSummaryJson(FastJsonWriter& w, uint64_t count, bool has_sum, doubl
   w.EndObject();
 }
 
-void ResetServiceNameScratch() noexcept { ResetScratchString(tls_service_name_scratch); }
+void ResetServiceNameScratch() noexcept {
+  ResetScratchString(tls_service_name_scratch);
+  ResetScratchString(tls_snake_service_name_scratch);
+}
 
 std::string_view TrimJsonWhitespace(std::string_view sv) noexcept {
   while (!sv.empty() &&
