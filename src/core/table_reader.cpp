@@ -232,8 +232,7 @@ namespace {
 
 std::string_view ReadTableNormalizedId(lua_State* L, int table_idx, const char* name1,
                                        const char* name2, const char* name3,
-                                       size_t expected_binary_len,
-                                       IdHexBuffer& id_buf) noexcept {
+                                       size_t expected_binary_len, IdHexBuffer& id_buf) noexcept {
   if (GetTableField(L, table_idx, name1, name2, name3)) {
     if (lua_type(L, -1) == LUA_TSTRING) {
       size_t len = 0;
@@ -254,8 +253,8 @@ std::string_view ReadTableNormalizedId(lua_State* L, int table_idx, const char* 
 }
 
 void CopyTableIdFieldToTable(lua_State* L, int src_idx, const char* name1, const char* name2,
-                             const char* name3, size_t expected_binary_len,
-                             int dst_idx, const char* dst_field) {
+                             const char* name3, size_t expected_binary_len, int dst_idx,
+                             const char* dst_field) {
   IdHexBuffer id_buf{};
   std::string_view norm =
       ReadTableNormalizedId(L, src_idx, name1, name2, name3, expected_binary_len, id_buf);
@@ -924,8 +923,7 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
 }
 
 static void CopyTableFieldToTable(lua_State* L, int src_idx, const char* name1, const char* name2,
-                                  int dst_idx, const char* dst_field,
-                                  const char* name3 = nullptr) {
+                                  int dst_idx, const char* dst_field, const char* name3 = nullptr) {
   if (GetTableField(L, src_idx, name1, name2, name3)) {
     if (lua_type(L, -1) == LUA_TSTRING) {
       lua_setfield(L, dst_idx, dst_field);
@@ -1083,14 +1081,14 @@ void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& 
 
       // TraceId
       IdHexBuffer id_buf{};
-      std::string_view trace_id = ReadTableNormalizedId(
-          L, item_idx, "traceId", "trace_id", "TraceId", kTraceIdBinaryLen, id_buf);
+      std::string_view trace_id = ReadTableNormalizedId(L, item_idx, "traceId", "trace_id",
+                                                        "TraceId", kTraceIdBinaryLen, id_buf);
       writer.Key("TraceId");
       writer.String(trace_id);
 
       // SpanId
-      std::string_view span_id = ReadTableNormalizedId(
-          L, item_idx, "spanId", "span_id", "SpanId", kSpanIdBinaryLen, id_buf);
+      std::string_view span_id = ReadTableNormalizedId(L, item_idx, "spanId", "span_id", "SpanId",
+                                                       kSpanIdBinaryLen, id_buf);
       writer.Key("SpanId");
       writer.String(span_id);
 
