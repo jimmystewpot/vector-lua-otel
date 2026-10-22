@@ -278,7 +278,6 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
   }
   auto type = type_res.value();
   if (type == simdjson::ondemand::json_type::object) {
-    auto raw_obj_res = val.raw_json();
     auto obj_res = val.get_object();
     if (obj_res.error() != simdjson::SUCCESS) {
       writer.Null();
@@ -286,6 +285,7 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
     }
     auto obj = obj_res.value();
     bool matched = false;
+    bool has_plain_fields = false;
     for (auto field_res : obj) {
       if (field_res.error() != simdjson::SUCCESS) continue;
       auto k_res = field_res.unescaped_key();
@@ -295,48 +295,56 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
       if (v_res.error() != simdjson::SUCCESS) continue;
       auto fv = v_res.value();
 
-      if (k == "stringValue" || k == "string_value") {
-        auto s_res = fv.get_string();
-        if (s_res.error() == simdjson::SUCCESS) {
-          writer.String(s_res.value());
+      if (!has_plain_fields) {
+        if (k == "stringValue" || k == "string_value") {
+          auto s_res = fv.get_string();
+          if (s_res.error() == simdjson::SUCCESS) {
+            writer.String(s_res.value());
+            matched = true;
+            break;
+          }
+        } else if (k == "intValue" || k == "int_value") {
+          writer.Int64(core::ParseInt64(fv));
+          matched = true;
+          break;
+        } else if (k == "uintValue" || k == "uint_value") {
+          writer.Uint64(core::ParseUint64(fv));
+          matched = true;
+          break;
+        } else if (k == "doubleValue" || k == "double_value") {
+          writer.Double(core::ParseDouble(fv));
+          matched = true;
+          break;
+        } else if (k == "boolValue" || k == "bool_value") {
+          auto b_res = fv.get_bool();
+          writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
+          matched = true;
+          break;
+        } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
+                   k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
+          auto raw_res = fv.raw_json();
+          if (raw_res.error() == simdjson::SUCCESS) {
+            writer.RawJson(TrimJsonWhitespace(raw_res.value()));
+          } else {
+            writer.Null();
+          }
           matched = true;
           break;
         }
-      } else if (k == "intValue" || k == "int_value") {
-        writer.Int64(core::ParseInt64(fv));
-        matched = true;
-        break;
-      } else if (k == "uintValue" || k == "uint_value") {
-        writer.Uint64(core::ParseUint64(fv));
-        matched = true;
-        break;
-      } else if (k == "doubleValue" || k == "double_value") {
-        writer.Double(core::ParseDouble(fv));
-        matched = true;
-        break;
-      } else if (k == "boolValue" || k == "bool_value") {
-        auto b_res = fv.get_bool();
-        writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
-        matched = true;
-        break;
-      } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
-                 k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
-        auto raw_res = fv.raw_json();
-        if (raw_res.error() == simdjson::SUCCESS) {
-          writer.RawJson(TrimJsonWhitespace(raw_res.value()));
-        } else {
-          writer.Null();
-        }
-        matched = true;
-        break;
       }
+
+      if (!has_plain_fields) {
+        writer.StartObject();
+        has_plain_fields = true;
+      }
+      writer.Key(k);
+      WriteAnyValueJson(writer, fv);
     }
     if (!matched) {
-      if (raw_obj_res.error() == simdjson::SUCCESS) {
-        writer.RawJson(TrimJsonWhitespace(raw_obj_res.value()));
-      } else {
-        writer.Null();
+      if (!has_plain_fields) {
+        writer.StartObject();
       }
+      writer.EndObject();
     }
   } else if (type == simdjson::ondemand::json_type::array) {
     auto raw_res = val.raw_json();

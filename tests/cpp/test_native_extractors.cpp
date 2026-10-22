@@ -646,7 +646,11 @@ TEST_F(NativeExtractorsTest, NativeTracesJson_FullAndDurationClamp) {
         {
           "name": "exception",
           "time_unix_nano": "2026-10-22T10:00:01.010000000Z",
-          "attributes": { "exception.type": "RuntimeError" }
+          "attributes": {
+            "exception.type": "RuntimeError",
+            "otlp_str": { "stringValue": "otlp_val" },
+            "nested_obj": { "code": 500, "retry": false }
+          }
         }
       ],
       "links": [
@@ -654,7 +658,10 @@ TEST_F(NativeExtractorsTest, NativeTracesJson_FullAndDurationClamp) {
           "trace_id": "lt1",
           "span_id": "ls1",
           "trace_state": "lts1",
-          "attributes": { "link.k": "v" }
+          "attributes": [
+            { "key": "link.k", "value": { "stringValue": "v" } },
+            { "key": "link.nested", "value": { "inner": 42 } }
+          ]
         }
       ]
     },
@@ -664,11 +671,13 @@ TEST_F(NativeExtractorsTest, NativeTracesJson_FullAndDurationClamp) {
   EXPECT_TRUE(res1.success) << res1.error;
   EXPECT_EQ(res1.emitted_count, 1);
 
-  // Duration clamping when (end_ns - start_ns) > INT64_MAX
+  // Duration clamping when (end_ns - start_ns) > INT64_MAX, plus resource service_name reset
   std::string json_clamp = R"({
     "name": "clamp-span",
     "start_time_unix_nano": 1,
-    "end_time_unix_nano": 18446744073709551615
+    "end_time_unix_nano": 18446744073709551615,
+    "resource": { "service.name": "old-svc" },
+    "resources": { "host": "h1" }
   })";
   auto res2 = ProcessNativeTraces(L_, json_clamp, emit_idx_);
   EXPECT_TRUE(res2.success) << res2.error;
@@ -703,10 +712,16 @@ TEST_F(NativeExtractorsTest, NativeTracesJson_FullAndDurationClamp) {
     assert(string.find(r1.Events, '"Timestamp":"2026-10-22T10:00:01.010000000Z"', 1, true) ~= nil, "r1.Events Timestamp mismatch: " .. tostring(r1.Events))
     assert(string.find(r1.Events, '"Name":"exception"', 1, true) ~= nil, "r1.Events Name mismatch: " .. tostring(r1.Events))
     assert(string.find(r1.Events, '"exception.type":"RuntimeError"', 1, true) ~= nil, "r1.Events Attributes mismatch: " .. tostring(r1.Events))
+    assert(string.find(r1.Events, '"otlp_str":"otlp_val"', 1, true) ~= nil, "r1.Events OTLP AnyValue mismatch: " .. tostring(r1.Events))
+    assert(string.find(r1.Events, '"nested_obj":{"code":500,"retry":false}', 1, true) ~= nil, "r1.Events nested object mismatch: " .. tostring(r1.Events))
     assert(string.find(r1.Links, '"TraceId":"lt1"', 1, true) ~= nil, "r1.Links TraceId mismatch: " .. tostring(r1.Links))
+    assert(string.find(r1.Links, '"link.k":"v"', 1, true) ~= nil, "r1.Links OTLP KV mismatch: " .. tostring(r1.Links))
+    assert(string.find(r1.Links, '"link.nested":{"inner":42}', 1, true) ~= nil, "r1.Links nested object mismatch: " .. tostring(r1.Links))
 
     local r2 = emitted[2].log
     assert(r2.Duration == 9223372036854775807, "r2.Duration should clamp to INT64_MAX, got " .. tostring(r2.Duration))
+    assert(r2.ServiceName == "unknown_service", "r2.ServiceName should reset to unknown_service, got " .. tostring(r2.ServiceName))
+    assert(r2.ResourceAttributes.host == "h1", "r2.ResourceAttributes.host mismatch")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
