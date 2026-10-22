@@ -1318,6 +1318,61 @@ TEST_F(OtlpCommonTest, PushAttributesTableLongServiceNameSurvivesGc) {
   lua_pop(L_, 1);
 }
 
+TEST_F(OtlpCommonTest, ParseUint64RejectsNegativeAndAcceptsPlusSign) {
+  auto json = R"({
+    "neg_num": -7,
+    "neg_str": "-5",
+    "plus_str": "+42",
+    "plus_minus": "+-42",
+    "overflow_u64": "99999999999999999999",
+    "overflow_garbage": "99999999999999999999abc",
+    "plus_int": "+42",
+    "plus_minus_int": "+-42"
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  auto v1 = obj["neg_num"].value();
+  EXPECT_EQ(ParseUint64(v1), 0ULL);
+  auto v2 = obj["neg_str"].value();
+  EXPECT_EQ(ParseUint64(v2), 0ULL);
+  auto v3 = obj["plus_str"].value();
+  EXPECT_EQ(ParseUint64(v3), 42ULL);
+  auto v4 = obj["plus_minus"].value();
+  EXPECT_EQ(ParseUint64(v4), 0ULL);
+  auto v5 = obj["overflow_u64"].value();
+  EXPECT_EQ(ParseUint64(v5), 0ULL);
+  auto v6 = obj["overflow_garbage"].value();
+  EXPECT_EQ(ParseUint64(v6), 0ULL);
+  auto v7 = obj["plus_int"].value();
+  EXPECT_EQ(ParseInt64(v7), 42);
+  auto v8 = obj["plus_minus_int"].value();
+  EXPECT_EQ(ParseInt64(v8), 0);
+}
+
+TEST_F(OtlpCommonTest, TryParseDoubleRejectsNanAndInfStrings) {
+  auto json = R"({
+    "nan_str": "nan",
+    "inf_str": "inf",
+    "neg_inf_str": "-inf",
+    "infinity_str": "infinity",
+    "plus_dbl": "+3.25"
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+  double out = -1.0;
+  auto v_nan = obj["nan_str"].value();
+  EXPECT_FALSE(TryParseDouble(v_nan, out));
+  auto v_inf = obj["inf_str"].value();
+  EXPECT_FALSE(TryParseDouble(v_inf, out));
+  auto v_ninf = obj["neg_inf_str"].value();
+  EXPECT_FALSE(TryParseDouble(v_ninf, out));
+  auto v_infinity = obj["infinity_str"].value();
+  EXPECT_FALSE(TryParseDouble(v_infinity, out));
+  auto v_plus = obj["plus_dbl"].value();
+  EXPECT_TRUE(TryParseDouble(v_plus, out));
+  EXPECT_DOUBLE_EQ(out, 3.25);
+}
+
 TEST_F(OtlpCommonTest, NormalizeOtelIdExactBinary16Bytes) {
   IdHexBuffer buf{};
   std::string raw(16, '\xaa');

@@ -48,6 +48,21 @@ void CopyIdField(lua_State* L, int table_idx, const char* name1, const char* nam
                  size_t expected_binary_len, LuaEmitter& emitter, std::string_view dst_key,
                  const char* name3 = nullptr);
 
+// Parses int64/uint64/double value at Lua stack index val_idx (handles
+// integers, finite floats, and numeric strings).
+bool TryParseTableInt64At(lua_State* L, int val_idx, int64_t& out);
+bool TryParseTableUint64At(lua_State* L, int val_idx, uint64_t& out);
+bool TryParseTableDoubleAt(lua_State* L, int val_idx, double& out);
+
+// Reads int64/uint64/double field from table at table_idx into `out`, returning
+// true on valid parse and false if missing or invalid.
+bool TryReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2,
+                       int64_t& out);
+bool TryReadTableUint64(lua_State* L, int table_idx, const char* name1, const char* name2,
+                        uint64_t& out);
+bool TryReadTableDouble(lua_State* L, int table_idx, const char* name1, const char* name2,
+                        double& out);
+
 // Reads int64 field from table at table_idx (handles integers and numeric
 // strings).
 int64_t ReadTableInt64(lua_State* L, int table_idx, const char* name1, const char* name2 = nullptr,

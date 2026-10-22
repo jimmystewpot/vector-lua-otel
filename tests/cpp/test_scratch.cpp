@@ -83,5 +83,44 @@ TEST(ScratchTest, ResetScratchStringReleasesOversizedCapacity) {
   EXPECT_LT(s.capacity(), kMaxScratchStringCapacity);
 }
 
+TEST(ScratchTest, ReserveScratchVectorPreAllocatesInitialCapacity) {
+  std::vector<int64_t> v;
+  EXPECT_EQ(v.capacity(), 0u);
+
+  ReserveScratchVector(v);
+
+  EXPECT_TRUE(v.empty());
+  EXPECT_GE(v.capacity(), kInitialScratchVectorCapacity);
+
+  // Calling ReserveScratchVector again after pushing elements clears without shrinking
+  v.push_back(10);
+  v.push_back(20);
+  const size_t cap_before = v.capacity();
+  ReserveScratchVector(v);
+  EXPECT_TRUE(v.empty());
+  EXPECT_EQ(v.capacity(), cap_before);
+
+  // After ResetScratchVector trims an oversized vector, ReserveScratchVector restores pre-reserved
+  // capacity before the next extraction batch
+  v.reserve(kMaxScratchVectorCapacity + 1);
+  ResetScratchVector(v);
+  EXPECT_EQ(v.capacity(), 0u);
+  ReserveScratchVector(v);
+  EXPECT_GE(v.capacity(), kInitialScratchVectorCapacity);
+}
+
+TEST(ScratchTest, ReserveScratchStringPreAllocatesInitialCapacity) {
+  std::string s;
+  ReserveScratchString(s);
+  EXPECT_TRUE(s.empty());
+  EXPECT_GE(s.capacity(), kInitialScratchStringCapacity);
+
+  s.assign("service-a");
+  const size_t cap_before = s.capacity();
+  ReserveScratchString(s);
+  EXPECT_TRUE(s.empty());
+  EXPECT_EQ(s.capacity(), cap_before);
+}
+
 }  // namespace
 }  // namespace vector_otel::core
