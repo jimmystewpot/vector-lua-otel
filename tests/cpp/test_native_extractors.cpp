@@ -1362,6 +1362,41 @@ TEST_F(NativeExtractorsTest, Resilience_NonWrapperSubObjectAndDeepJsonArrays) {
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(NativeExtractorsTest, JsonWrapperRecognizedOuterFieldBeforeInnerAndNonZeroTzOffset) {
+  auto log_res = ProcessNativeLogs(
+      L_,
+      R"({"timestamp":"2026-10-16T00:00:00Z","log":{"message":"inner-log-body","timestamp":"2026-10-16T14:00:00.123456789+02:00"}})",
+      emit_idx_);
+  EXPECT_TRUE(log_res.success) << log_res.error;
+  EXPECT_EQ(log_res.emitted_count, 1);
+
+  auto trace_res = ProcessNativeTraces(
+      L_,
+      R"({"timestamp":"2026-10-16T00:00:00Z","trace":{"name":"inner-span","start_time_unix_nano":"2026-10-16T07:30:00.5-0430"}})",
+      emit_idx_);
+  EXPECT_TRUE(trace_res.success) << trace_res.error;
+  EXPECT_EQ(trace_res.emitted_count, 1);
+
+  auto metric_res = ProcessNativeMetrics(
+      L_,
+      R"({"timestamp":"2026-10-16T00:00:00Z","metric":{"namespace":"http","name":"requests","timestamp":"2026-10-16T14:00:00+02:00","gauge":{"value":42.0}}})",
+      emit_idx_);
+  EXPECT_TRUE(metric_res.success) << metric_res.error;
+  EXPECT_EQ(metric_res.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 3, "Expected 3 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Body == "inner-log-body", "Log Body mismatch: " .. tostring(emitted[1].log.Body))
+    assert(emitted[1].log.Timestamp == "2026-10-16T12:00:00.123456789Z", "Log Timestamp mismatch: " .. tostring(emitted[1].log.Timestamp))
+    assert(emitted[2].log.SpanName == "inner-span", "Trace SpanName mismatch: " .. tostring(emitted[2].log.SpanName))
+    assert(emitted[2].log.Timestamp == "2026-10-16T12:00:00.500000000Z", "Trace Timestamp mismatch: " .. tostring(emitted[2].log.Timestamp))
+    assert(emitted[3].log.MetricName == "http.requests", "MetricName mismatch: " .. tostring(emitted[3].log.MetricName))
+    assert(emitted[3].log.TimeUnix == "2026-10-16T12:00:00.000000000Z", "Metric TimeUnix mismatch: " .. tostring(emitted[3].log.TimeUnix))
+    assert(math.abs(emitted[3].log.Value - 42.0) < 1e-6, "Metric Value mismatch: " .. tostring(emitted[3].log.Value))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace native_extractors
 }  // namespace vector_otel

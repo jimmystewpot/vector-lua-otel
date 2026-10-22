@@ -164,7 +164,7 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
     }
     auto fv = fv_res.value();
 
-    if (k == "log" && depth == 0 && !has_recognized_field) {
+    if (k == "log" && depth == 0) {
       auto t_res = fv.type();
       if (t_res.error() != simdjson::SUCCESS) {
         err_out = std::string(simdjson::error_message(t_res.error()));
@@ -862,6 +862,11 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
   static thread_local std::string tls_scope_name_scratch;
   static thread_local std::string tls_scope_ver_scratch;
   writer.Reset();
+  core::ReserveScratchString(tls_res_schema_scratch);
+  core::ReserveScratchString(tls_service_scratch);
+  core::ReserveScratchString(tls_scope_schema_scratch);
+  core::ReserveScratchString(tls_scope_name_scratch);
+  core::ReserveScratchString(tls_scope_ver_scratch);
   struct TableScopeGuard {
     TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
     TableScopeGuard(const TableScopeGuard&) = delete;

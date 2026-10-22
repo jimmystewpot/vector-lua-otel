@@ -91,6 +91,23 @@ TEST(TimestampTest, ParseIso8601ToUnixNanoVariants) {
   ASSERT_TRUE(ParseIso8601ToUnixNano("2026-10-16T12:00:00.25+00:00", ns));
   EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.250000000Z");
 
+  // Non-zero timezone offsets (±HH:MM and ±HHMM)
+  ASSERT_TRUE(ParseIso8601ToUnixNano("2026-10-16T14:00:00.123456789+02:00", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.123456789Z");
+
+  ASSERT_TRUE(ParseIso8601ToUnixNano("2026-10-16T07:30:00.5-0430", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "2026-10-16T12:00:00.500000000Z");
+
+  // Date rollover across midnight and 1969 local -> 1970 UTC epoch boundary
+  ASSERT_TRUE(ParseIso8601ToUnixNano("1969-12-31T23:00:00-02:00", ns));
+  EXPECT_EQ(FormatIso8601Nano(ns), "1970-01-01T01:00:00.000000000Z");
+  EXPECT_FALSE(ParseIso8601ToUnixNano("1970-01-01T01:00:00+02:00", ns));
+
+  // Invalid timezone offsets
+  EXPECT_FALSE(ParseIso8601ToUnixNano("2026-10-16T12:00:00+24:00", ns));
+  EXPECT_FALSE(ParseIso8601ToUnixNano("2026-10-16T12:00:00+00:60", ns));
+  EXPECT_FALSE(ParseIso8601ToUnixNano("2026-10-16T12:00:00+02", ns));
+
   ASSERT_TRUE(ParseIso8601ToUnixNano("1293840000123456789", ns));
   EXPECT_EQ(ns, 1293840000123456789ULL);
 
