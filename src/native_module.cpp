@@ -4,6 +4,7 @@ extern "C" {
 }
 
 #include "vector_otel/core/module_runner.hpp"
+#include "vector_otel/core/module_state.hpp"
 #include "vector_otel/native_extractors/native_logs_extractor.hpp"
 #include "vector_otel/native_extractors/native_metrics_extractor.hpp"
 #include "vector_otel/native_extractors/native_traces_extractor.hpp"
@@ -48,22 +49,19 @@ const luaL_Reg kMetricsFuncs[] = {
 extern "C" {
 
 int luaopen_vector_native_logs(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kLogsFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Native, kLogsFuncs);
   core::RegisterInPackageLoaded(L, "vector_native.logs", -1);
   return 1;
 }
 
 int luaopen_vector_native_traces(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kTracesFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Native, kTracesFuncs);
   core::RegisterInPackageLoaded(L, "vector_native.traces", -1);
   return 1;
 }
 
 int luaopen_vector_native_metrics(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kMetricsFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Native, kMetricsFuncs);
   core::RegisterInPackageLoaded(L, "vector_native.metrics", -1);
   return 1;
 }

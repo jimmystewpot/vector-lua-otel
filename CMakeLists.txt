@@ -53,6 +53,8 @@ add_library(vector_otel_core STATIC
   src/core/lua_bridge.cpp
   src/core/otlp_common.cpp
   src/core/table_reader.cpp
+  src/core/module_state.cpp
+  src/core/protected_lua.cpp
   src/extractors/logs_extractor.cpp
   src/extractors/traces_extractor.cpp
   src/extractors/metrics_extractor.cpp
@@ -143,6 +145,7 @@ add_executable(vector_otel_fault_tests
   tests/cpp/test_lua_fault_harness.cpp
   tests/cpp/test_contract_fixtures.cpp
   tests/cpp/test_parser_workspace.cpp
+  tests/cpp/test_operation_context.cpp
   src/module.cpp
   src/native_module.cpp
   tests/support/fault_new.cpp
