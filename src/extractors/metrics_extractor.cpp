@@ -1176,16 +1176,14 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
     if (core::GetTableField(L, abs_idx, "resourceMetrics", "resource_metrics")) {
       rm_arr_idx = lua_absindex(L, -1);
     } else if (core::GetTableField(L, abs_idx, "metric")) {
-      if (lua_istable(L, -1) &&
-          core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
+      if (lua_istable(L, -1) && core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
         lua_remove(L, -2);
         rm_arr_idx = lua_absindex(L, -1);
       } else {
         lua_pop(L, 1);
       }
     } else if (core::GetTableField(L, abs_idx, "log")) {
-      if (lua_istable(L, -1) &&
-          core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
+      if (lua_istable(L, -1) && core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
         lua_remove(L, -2);
         rm_arr_idx = lua_absindex(L, -1);
       } else {
@@ -1576,9 +1574,9 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
                   emitter.SetTableFromStack("Summary");
                 }
 
-                emitter.SetInt64("Flags", static_cast<int64_t>(static_cast<uint32_t>(
-                                              core::ReadTableUint64(L, dp_obj_idx, "flags",
-                                                                    "Flags"))));
+                emitter.SetInt64("Flags",
+                                 static_cast<int64_t>(static_cast<uint32_t>(
+                                     core::ReadTableUint64(L, dp_obj_idx, "flags", "Flags"))));
 
                 if (core::GetTableField(L, dp_obj_idx, "exemplars", "Exemplars")) {
                   core::PushTableExemplars(L, -1, json_writer);
