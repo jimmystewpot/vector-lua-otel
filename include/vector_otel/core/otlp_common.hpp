@@ -27,13 +27,11 @@ using IdHexBuffer = std::array<char, kMaxIdHexBufSize>;
 std::string_view NormalizeOtelId(std::string_view raw, size_t expected_binary_len,
                                  IdHexBuffer& stack_buf) noexcept;
 
-inline std::string_view NormalizeTraceId(std::string_view raw,
-                                         IdHexBuffer& stack_buf) noexcept {
+inline std::string_view NormalizeTraceId(std::string_view raw, IdHexBuffer& stack_buf) noexcept {
   return NormalizeOtelId(raw, kTraceIdBinaryLen, stack_buf);
 }
 
-inline std::string_view NormalizeSpanId(std::string_view raw,
-                                        IdHexBuffer& stack_buf) noexcept {
+inline std::string_view NormalizeSpanId(std::string_view raw, IdHexBuffer& stack_buf) noexcept {
   return NormalizeOtelId(raw, kSpanIdBinaryLen, stack_buf);
 }
 

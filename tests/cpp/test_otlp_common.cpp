@@ -1350,8 +1350,8 @@ TEST_F(OtlpCommonTest, NormalizeOtelIdBinaryWithEmbeddedNul) {
   EXPECT_EQ(res_span, "00f067aa0ba902b7");
 
   // 16-byte binary with leading and trailing \0 bytes
-  std::string_view raw_trace(
-      "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x00", 16);
+  std::string_view raw_trace("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x00",
+                             16);
   auto res_trace = NormalizeTraceId(raw_trace, buf);
   EXPECT_EQ(res_trace, "000102030405060708090a0b0c0d0e00");
 }
