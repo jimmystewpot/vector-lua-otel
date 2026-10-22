@@ -110,18 +110,17 @@ TEST_F(NativeExtractorsTest, NativeLogsTable_FullOtlpDecodedEvent) {
     assert(r.ServiceName == "checkout-svc", "ServiceName mismatch: " .. tostring(r.ServiceName))
     assert(r.Body == "hello world", "Body mismatch: " .. tostring(r.Body))
     assert(r.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.21.0", "ResourceSchemaUrl mismatch: " .. tostring(r.ResourceSchemaUrl))
-    assert(type(r.ResourceAttributes) == "table", "ResourceAttributes must be table")
-    assert(r.ResourceAttributes["service.name"] == "checkout-svc", "ResourceAttributes service.name mismatch")
-    assert(r.ResourceAttributes["host.name"] == "node-1", "ResourceAttributes host.name mismatch")
+    assert(type(r.ResourceAttributes) == "string", "ResourceAttributes must be string")
+    assert(string.find(r.ResourceAttributes, '"service.name":"checkout-svc"', 1, true) ~= nil, "ResourceAttributes service.name mismatch")
+    assert(string.find(r.ResourceAttributes, '"host.name":"node-1"', 1, true) ~= nil, "ResourceAttributes host.name mismatch")
     assert(r.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope/1.0", "ScopeSchemaUrl mismatch: " .. tostring(r.ScopeSchemaUrl))
     assert(r.ScopeName == "my.logger", "ScopeName mismatch: " .. tostring(r.ScopeName))
     assert(r.ScopeVersion == "1.2.0", "ScopeVersion mismatch: " .. tostring(r.ScopeVersion))
-    assert(type(r.ScopeAttributes) == "table", "ScopeAttributes must be table")
-    assert(r.ScopeAttributes.sc_k == "sc_v", "ScopeAttributes.sc_k mismatch")
-    assert(type(r.LogAttributes) == "table", "LogAttributes must be table")
-    assert(r.LogAttributes["http.status_code"] == 200, "LogAttributes http.status_code mismatch")
-    assert(r.LogAttributes.max_i == 9223372036854775807, "LogAttributes.max_i mismatch")
-    assert(r.LogAttributes.nested == '{"k":"v"}', "LogAttributes.nested mismatch: " .. tostring(r.LogAttributes.nested))
+    assert(r.ScopeAttributes == '{"sc_k":"sc_v"}', "ScopeAttributes mismatch: " .. tostring(r.ScopeAttributes))
+    assert(type(r.LogAttributes) == "string", "LogAttributes must be string")
+    assert(string.find(r.LogAttributes, '"http.status_code":200', 1, true) ~= nil, "LogAttributes http.status_code mismatch")
+    assert(string.find(r.LogAttributes, '"max_i":9223372036854775807', 1, true) ~= nil, "LogAttributes.max_i mismatch")
+    assert(string.find(r.LogAttributes, '"nested":{"k":"v"}', 1, true) ~= nil, "LogAttributes.nested mismatch: " .. tostring(r.LogAttributes))
     assert(r.EventName == "checkout.completed", "EventName mismatch: " .. tostring(r.EventName))
     assert(type(r.processed_at) == "string" and #r.processed_at == 30, "processed_at invalid: " .. tostring(r.processed_at))
   )";
@@ -335,8 +334,9 @@ TEST_F(NativeExtractorsTest, NativeLogsJson_FullAndFallback) {
     assert(r1.Body == "json body", "r1.Body mismatch: " .. tostring(r1.Body))
     assert(r1.Timestamp == "2026-10-22T10:00:01.123456789Z", "r1.Timestamp mismatch: " .. tostring(r1.Timestamp))
     assert(r1.ServiceName == "json-svc", "r1.ServiceName mismatch: " .. tostring(r1.ServiceName))
-    assert(r1.ResourceAttributes["service.name"] == "json-svc", "r1.ResourceAttributes mismatch")
-    assert(r1.LogAttributes.k == 42, "r1.LogAttributes.k mismatch")
+    assert(r1.ResourceAttributes == '{"service.name":"json-svc"}', "r1.ResourceAttributes mismatch: " .. tostring(r1.ResourceAttributes))
+    assert(r1.ScopeAttributes == "{}", "r1.ScopeAttributes mismatch")
+    assert(r1.LogAttributes == '{"k":42}', "r1.LogAttributes mismatch: " .. tostring(r1.LogAttributes))
     assert(r1.ScopeName == "s", "r1.ScopeName mismatch")
     assert(r1.ScopeVersion == "1", "r1.ScopeVersion mismatch")
 
@@ -344,6 +344,9 @@ TEST_F(NativeExtractorsTest, NativeLogsJson_FullAndFallback) {
     assert(r2.Body == "no ts json", "r2.Body mismatch: " .. tostring(r2.Body))
     assert(r2.Timestamp == r2.processed_at, "r2.Timestamp should equal processed_at")
     assert(r2.ServiceName == "unknown_service", "r2.ServiceName mismatch")
+    assert(r2.ResourceAttributes == "{}")
+    assert(r2.ScopeAttributes == "{}")
+    assert(r2.LogAttributes == "{}")
 
     local r3 = emitted[3].log
     assert(r3.Body == "arr1", "r3.Body mismatch")
@@ -356,7 +359,7 @@ TEST_F(NativeExtractorsTest, NativeLogsJson_FullAndFallback) {
     local r5 = emitted[5].log
     assert(r5.Body == "wrapped_json", "r5.Body mismatch: " .. tostring(r5.Body))
     assert(r5.ServiceName == "unknown_service", "r5.ServiceName mismatch: " .. tostring(r5.ServiceName))
-    assert(r5.ResourceAttributes.host == "h1", "r5.ResourceAttributes.host mismatch")
+    assert(r5.ResourceAttributes == '{"host":"h1"}', "r5.ResourceAttributes mismatch: " .. tostring(r5.ResourceAttributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -444,14 +447,14 @@ TEST_F(NativeExtractorsTest, NativeTracesTable_FullSpanFromTraceToLog) {
     assert(r.SpanName == "HTTP POST", "SpanName mismatch: " .. tostring(r.SpanName))
     assert(r.SpanKind == "SPAN_KIND_SERVER", "SpanKind mismatch: " .. tostring(r.SpanKind))
     assert(r.ServiceName == "trace-svc", "ServiceName mismatch: " .. tostring(r.ServiceName))
-    assert(type(r.ResourceAttributes) == "table", "ResourceAttributes must be table")
-    assert(r.ResourceAttributes["service.name"] == "trace-svc", "ResourceAttributes service.name mismatch")
-    assert(r.ResourceAttributes["deployment.environment"] == "prod", "ResourceAttributes deployment.environment mismatch")
+    assert(type(r.ResourceAttributes) == "string", "ResourceAttributes must be string")
+    assert(string.find(r.ResourceAttributes, '"service.name":"trace-svc"', 1, true) ~= nil, "ResourceAttributes service.name mismatch")
+    assert(string.find(r.ResourceAttributes, '"deployment.environment":"prod"', 1, true) ~= nil, "ResourceAttributes deployment.environment mismatch")
     assert(r.ScopeName == "otel.tracer", "ScopeName mismatch: " .. tostring(r.ScopeName))
     assert(r.ScopeVersion == "2.1.0", "ScopeVersion mismatch: " .. tostring(r.ScopeVersion))
-    assert(type(r.SpanAttributes) == "table", "SpanAttributes must be table")
-    assert(r.SpanAttributes["http.method"] == "POST", "SpanAttributes http.method mismatch")
-    assert(r.SpanAttributes["http.status_code"] == 201, "SpanAttributes http.status_code mismatch")
+    assert(type(r.SpanAttributes) == "string", "SpanAttributes must be string")
+    assert(string.find(r.SpanAttributes, '"http.method":"POST"', 1, true) ~= nil, "SpanAttributes http.method mismatch")
+    assert(string.find(r.SpanAttributes, '"http.status_code":201', 1, true) ~= nil, "SpanAttributes http.status_code mismatch")
     assert(r.Duration == 50000000, "Duration mismatch: " .. tostring(r.Duration))
     assert(r.StatusCode == "STATUS_CODE_OK", "StatusCode mismatch: " .. tostring(r.StatusCode))
     assert(r.StatusMessage == "ok", "StatusMessage mismatch: " .. tostring(r.StatusMessage))
@@ -712,10 +715,10 @@ TEST_F(NativeExtractorsTest, NativeTracesJson_FullAndDurationClamp) {
     assert(r1.SpanName == "GET /items", "r1.SpanName mismatch")
     assert(r1.SpanKind == "SPAN_KIND_SERVER", "r1.SpanKind mismatch: " .. tostring(r1.SpanKind))
     assert(r1.ServiceName == "json-trace-svc", "r1.ServiceName mismatch: " .. tostring(r1.ServiceName))
-    assert(r1.ResourceAttributes["service.name"] == "json-trace-svc", "r1.ResourceAttributes mismatch")
+    assert(r1.ResourceAttributes == '{"service.name":"json-trace-svc"}', "r1.ResourceAttributes mismatch: " .. tostring(r1.ResourceAttributes))
     assert(r1.ScopeName == "json.scope", "r1.ScopeName mismatch")
     assert(r1.ScopeVersion == "1.0.0", "r1.ScopeVersion mismatch")
-    assert(r1.SpanAttributes["rpc.system"] == "grpc", "r1.SpanAttributes mismatch")
+    assert(r1.SpanAttributes == '{"rpc.system":"grpc"}', "r1.SpanAttributes mismatch: " .. tostring(r1.SpanAttributes))
     assert(r1.Duration == 25000000, "r1.Duration mismatch: " .. tostring(r1.Duration))
     assert(r1.StatusCode == "STATUS_CODE_ERROR", "r1.StatusCode mismatch: " .. tostring(r1.StatusCode))
     assert(r1.StatusMessage == "failed", "r1.StatusMessage mismatch: " .. tostring(r1.StatusMessage))
@@ -731,7 +734,8 @@ TEST_F(NativeExtractorsTest, NativeTracesJson_FullAndDurationClamp) {
     local r2 = emitted[2].log
     assert(r2.Duration == 9223372036854775807, "r2.Duration should clamp to INT64_MAX, got " .. tostring(r2.Duration))
     assert(r2.ServiceName == "unknown_service", "r2.ServiceName should reset to unknown_service, got " .. tostring(r2.ServiceName))
-    assert(r2.ResourceAttributes.host == "h1", "r2.ResourceAttributes.host mismatch")
+    assert(r2.ResourceAttributes == '{"host":"h1"}', "r2.ResourceAttributes mismatch: " .. tostring(r2.ResourceAttributes))
+    assert(r2.SpanAttributes == "{}", "r2.SpanAttributes mismatch: " .. tostring(r2.SpanAttributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1259,13 +1263,13 @@ TEST_F(NativeExtractorsTest, Resilience_EmptyJsonMalformedBatchAndDeepNesting) {
   EXPECT_FALSE(bad_metric_batch.success);
   EXPECT_EQ(bad_metric_batch.emitted_count, 1);
 
-  // 3. Deeply nested JSON object (> 16 levels) in span event attributes clamps safely
+  // 3. Deeply nested JSON object (> 32 levels) in span event attributes clamps safely
   std::string deep_json = R"({"name":"deep-span","events":[{"name":"ev","attributes":{"root":)";
-  for (int i = 0; i < 20; ++i) {
+  for (int i = 0; i < 35; ++i) {
     deep_json += R"({"n":)";
   }
   deep_json += R"("leaf")";
-  for (int i = 0; i < 20; ++i) {
+  for (int i = 0; i < 35; ++i) {
     deep_json += "}";
   }
   deep_json += "}}]}";
@@ -1310,15 +1314,15 @@ TEST_F(NativeExtractorsTest, Resilience_NonWrapperSubObjectAndDeepJsonArrays) {
     EXPECT_EQ(res.emitted_count, 1);
   }
 
-  // 3. Deeply nested JSON array (> 16 levels) in span event attributes clamps safely
+  // 3. Deeply nested JSON array (> 32 levels) in span event attributes clamps safely
   {
     std::string deep_arr_json =
         R"({"name":"deep-arr-span","events":[{"name":"ev","attributes":{"arr":)";
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 35; ++i) {
       deep_arr_json += "[";
     }
     deep_arr_json += R"({"stringValue":"unwrapped"})";
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 35; ++i) {
       deep_arr_json += "]";
     }
     deep_arr_json += "}}]}";

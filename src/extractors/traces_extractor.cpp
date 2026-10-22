@@ -19,145 +19,6 @@
 namespace vector_otel::extractors {
 namespace {
 
-void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& val) {
-  auto type_res = val.type();
-  if (type_res.error() != simdjson::SUCCESS) {
-    writer.Null();
-    return;
-  }
-  auto type = type_res.value();
-  if (type == simdjson::ondemand::json_type::object) {
-    auto obj_res = val.get_object();
-    if (obj_res.error() != simdjson::SUCCESS) {
-      writer.Null();
-      return;
-    }
-    auto obj = obj_res.value();
-    bool matched = false;
-    for (auto field_res : obj) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
-      auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
-      std::string_view k = k_res.value();
-      auto v_res = field_res.value();
-      if (v_res.error() != simdjson::SUCCESS) continue;
-      auto fv = v_res.value();
-
-      if (k == "stringValue" || k == "string_value") {
-        auto s_res = fv.get_string();
-        if (s_res.error() == simdjson::SUCCESS) {
-          writer.String(s_res.value());
-          matched = true;
-          break;
-        }
-      } else if (k == "intValue" || k == "int_value") {
-        writer.Int64(core::ParseInt64(fv));
-        matched = true;
-        break;
-      } else if (k == "uintValue" || k == "uint_value") {
-        writer.Uint64(core::ParseUint64(fv));
-        matched = true;
-        break;
-      } else if (k == "doubleValue" || k == "double_value") {
-        writer.Double(core::ParseDouble(fv));
-        matched = true;
-        break;
-      } else if (k == "boolValue" || k == "bool_value") {
-        auto b_res = fv.get_bool();
-        writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
-        matched = true;
-        break;
-      } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
-                 k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
-        auto raw_res = fv.raw_json();
-        if (raw_res.error() == simdjson::SUCCESS) {
-          writer.RawJson(raw_res.value());
-        } else {
-          writer.Null();
-        }
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::string) {
-    auto s_res = val.get_string();
-    if (s_res.error() == simdjson::SUCCESS) {
-      writer.String(s_res.value());
-    } else {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::number) {
-    auto num_res = val.get_number();
-    if (num_res.error() == simdjson::SUCCESS) {
-      auto num = num_res.value();
-      if (num.is_int64()) {
-        writer.Int64(num.get_int64());
-      } else if (num.is_uint64()) {
-        writer.Uint64(num.get_uint64());
-      } else {
-        writer.Double(num.get_double());
-      }
-    } else {
-      writer.Null();
-    }
-  } else if (type == simdjson::ondemand::json_type::boolean) {
-    auto b_res = val.get_bool();
-    writer.Bool(b_res.error() == simdjson::SUCCESS && b_res.value());
-  } else {
-    writer.Null();
-  }
-}
-
-void WriteAttributesJson(core::FastJsonWriter& writer, simdjson::ondemand::value& attrs_val) {
-  writer.StartObject();
-  auto type_res = attrs_val.type();
-  if (type_res.error() == simdjson::SUCCESS) {
-    if (type_res.value() == simdjson::ondemand::json_type::array) {
-      auto arr_res = attrs_val.get_array();
-      if (arr_res.error() == simdjson::SUCCESS) {
-        for (auto elem_res : arr_res.value()) {
-          if (elem_res.error() != simdjson::SUCCESS) continue;
-          auto item_val = elem_res.value();
-          auto obj_res = item_val.get_object();
-          if (obj_res.error() != simdjson::SUCCESS) continue;
-          auto kv = obj_res.value();
-          auto k_res = kv.find_field_unordered("key");
-          if (k_res.error() != simdjson::SUCCESS) continue;
-          auto k_str_res = k_res.value().get_string();
-          if (k_str_res.error() != simdjson::SUCCESS) continue;
-          std::string_view k = k_str_res.value();
-
-          auto v_res = kv.find_field_unordered("value");
-          if (v_res.error() != simdjson::SUCCESS) continue;
-          auto v = v_res.value();
-
-          writer.Key(k);
-          WriteAnyValueJson(writer, v);
-        }
-      }
-    } else if (type_res.value() == simdjson::ondemand::json_type::object) {
-      auto obj_res = attrs_val.get_object();
-      if (obj_res.error() == simdjson::SUCCESS) {
-        for (auto field_res : obj_res.value()) {
-          if (field_res.error() != simdjson::SUCCESS) continue;
-          auto k_res = field_res.unescaped_key();
-          if (k_res.error() != simdjson::SUCCESS) continue;
-          auto v_res = field_res.value();
-          if (v_res.error() != simdjson::SUCCESS) continue;
-          auto fv = v_res.value();
-
-          writer.Key(k_res.value());
-          WriteAnyValueJson(writer, fv);
-        }
-      }
-    }
-  }
-  writer.EndObject();
-}
-
 void SerializeSpanEventsValue(simdjson::ondemand::value& events_val, core::FastJsonWriter& writer) {
   writer.StartArray();
   auto type_res = events_val.type();
@@ -199,7 +60,7 @@ void SerializeSpanEventsValue(simdjson::ondemand::value& events_val, core::FastJ
         auto attrs_res = ev_obj.find_field_unordered("attributes");
         if (attrs_res.error() == simdjson::SUCCESS) {
           auto aval = attrs_res.value();
-          WriteAttributesJson(writer, aval);
+          core::WriteAttributesJson(writer, aval);
         } else {
           writer.StartObject();
           writer.EndObject();
@@ -250,7 +111,7 @@ void SerializeSpanLinksValue(simdjson::ondemand::value& links_val, core::FastJso
         auto attrs_res = link_obj.find_field_unordered("attributes");
         if (attrs_res.error() == simdjson::SUCCESS) {
           auto aval = attrs_res.value();
-          WriteAttributesJson(writer, aval);
+          core::WriteAttributesJson(writer, aval);
         } else {
           writer.StartObject();
           writer.EndObject();
@@ -345,28 +206,32 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
     auto& parser = core::OtelParser::Instance();
     static thread_local core::FastJsonWriter events_writer;
     static thread_local core::FastJsonWriter links_writer;
-    static thread_local core::FastJsonWriter attr_writer;
+    static thread_local core::FastJsonWriter res_attrs_writer;
+    static thread_local core::FastJsonWriter span_attrs_writer;
 
     struct WriterTrimGuard {
-      explicit WriterTrimGuard(core::FastJsonWriter& events_in, core::FastJsonWriter& links_in,
-                               core::FastJsonWriter& attr_in)
-          : events(events_in), links(links_in), attr(attr_in) {}
+      WriterTrimGuard(core::FastJsonWriter& events_in, core::FastJsonWriter& links_in,
+                      core::FastJsonWriter& res_in, core::FastJsonWriter& span_in)
+          : events(events_in), links(links_in), res_attr(res_in), span_attr(span_in) {}
       WriterTrimGuard(const WriterTrimGuard&) = delete;
       WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
       ~WriterTrimGuard() noexcept {
         events.Trim();
         links.Trim();
-        attr.Trim();
+        res_attr.Trim();
+        span_attr.Trim();
         core::ResetServiceNameScratch();
       }
       core::FastJsonWriter& events;
       core::FastJsonWriter& links;
-      core::FastJsonWriter& attr;
-    } trim_guard{events_writer, links_writer, attr_writer};
+      core::FastJsonWriter& res_attr;
+      core::FastJsonWriter& span_attr;
+    } trim_guard{events_writer, links_writer, res_attrs_writer, span_attrs_writer};
 
     events_writer.Reset();
     links_writer.Reset();
-    attr_writer.Reset();
+    res_attrs_writer.Reset();
+    span_attrs_writer.Reset();
 
     auto doc_res = parser.Iterate(raw_json);
     if (doc_res.error() != simdjson::SUCCESS) {
@@ -413,7 +278,8 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
       auto res_span_obj = res_span_obj_res.value();
 
       std::string_view service_name = "unknown_service";
-      core::ScopedLuaRef res_attr_ref(L, LUA_NOREF);
+      res_attrs_writer.Reset();
+      bool has_res_attrs = false;
 
       auto res_field = res_span_obj.find_field_unordered("resource");
       if (res_field.error() == simdjson::SUCCESS) {
@@ -421,30 +287,22 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
         auto res_obj_res = res_val.get_object();
         if (res_obj_res.error() == simdjson::SUCCESS) {
           auto res_obj = res_obj_res.value();
-          if (L != nullptr) {
-            auto attrs_field = res_obj.find_field_unordered("attributes");
-            if (attrs_field.error() == simdjson::SUCCESS) {
-              auto attrs_val = attrs_field.value();
-              core::PushAttributesTable(L, attrs_val, attr_writer, &service_name);
-              res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-            } else if (attrs_field.error() != simdjson::NO_SUCH_FIELD) {
-              return ExtractionResult{false,
-                                      std::string(simdjson::error_message(attrs_field.error())),
-                                      emitter.EmittedCount()};
-            }
-          } else {
-            service_name = core::ExtractServiceName(res_obj);
+          auto attrs_field = res_obj.find_field_unordered("attributes");
+          if (attrs_field.error() == simdjson::SUCCESS) {
+            auto attrs_val = attrs_field.value();
+            core::WriteAttributesJson(res_attrs_writer, attrs_val, &service_name);
+            has_res_attrs = true;
+          } else if (attrs_field.error() != simdjson::NO_SUCH_FIELD) {
+            return ExtractionResult{false,
+                                    std::string(simdjson::error_message(attrs_field.error())),
+                                    emitter.EmittedCount()};
           }
         }
       } else if (res_field.error() != simdjson::NO_SUCH_FIELD) {
         return ExtractionResult{false, std::string(simdjson::error_message(res_field.error())),
                                 emitter.EmittedCount()};
       }
-
-      if (L != nullptr && !res_attr_ref.valid()) {
-        lua_newtable(L);
-        res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-      }
+      const std::string_view res_attrs_json = has_res_attrs ? res_attrs_writer.Str() : "{}";
 
       auto scope_spans_field = res_span_obj.find_field_unordered("scopeSpans");
       if (scope_spans_field.error() == simdjson::NO_SUCH_FIELD) {
@@ -534,7 +392,6 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           bool has_events = false;
           bool has_links = false;
           bool has_span_attrs = false;
-          core::ScopedLuaRef span_attrs_scoped(L, LUA_NOREF);
 
           core::IdHexBuffer trace_id_buf;
           core::IdHexBuffer span_id_buf;
@@ -542,6 +399,7 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
 
           events_writer.Reset();
           links_writer.Reset();
+          span_attrs_writer.Reset();
 
           for (auto field_res : span_obj) {
             if (field_res.error() != simdjson::SUCCESS) {
@@ -622,11 +480,9 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
               SerializeSpanLinksValue(fv, links_writer);
               has_links = true;
             } else if (k == "attributes") {
-              if (L != nullptr) {
-                core::PushAttributesTable(L, fv, attr_writer);
-                span_attrs_scoped = core::ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-                has_span_attrs = true;
-              }
+              span_attrs_writer.Reset();
+              core::WriteAttributesJson(span_attrs_writer, fv);
+              has_span_attrs = true;
             }
           }
 
@@ -646,6 +502,7 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
                                                      : std::numeric_limits<int64_t>::max();
           std::array<char, 32> ts_buf;
           core::FormatIso8601Nano(start_time, ts_buf.data());
+          const std::string_view span_attrs_json = has_span_attrs ? span_attrs_writer.Str() : "{}";
 
           emitter.StartRecord();
           emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
@@ -656,25 +513,10 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
           emitter.SetString("SpanName", span_name);
           emitter.SetString("SpanKind", span_kind);
           emitter.SetString("ServiceName", service_name);
-
-          if (L != nullptr) {
-            lua_rawgeti(L, LUA_REGISTRYINDEX, res_attr_ref.get());
-            emitter.SetTableFromStack("ResourceAttributes");
-          }
-
+          emitter.SetString("ResourceAttributes", res_attrs_json);
           emitter.SetString("ScopeName", scope_name);
           emitter.SetString("ScopeVersion", scope_version);
-
-          if (L != nullptr) {
-            if (has_span_attrs && span_attrs_scoped.get() != LUA_NOREF) {
-              lua_rawgeti(L, LUA_REGISTRYINDEX, span_attrs_scoped.get());
-              span_attrs_scoped.reset();
-            } else {
-              lua_newtable(L);
-            }
-            emitter.SetTableFromStack("SpanAttributes");
-          }
-
+          emitter.SetString("SpanAttributes", span_attrs_json);
           emitter.SetInt64("Duration", duration);
           emitter.SetString("StatusCode", status_code);
           emitter.SetString("StatusMessage", status_msg);
@@ -706,12 +548,11 @@ ExtractionResult ProcessTraces(lua_State* L, std::string_view raw_json, int emit
 
 namespace {
 
-ExtractionResult ProcessTracesTableImpl(lua_State* L, int abs_idx, core::LuaEmitter& emitter,
-                                        core::FastJsonWriter& writer,
-                                        std::string& tls_scope_name_scratch,
-                                        std::string& tls_scope_ver_scratch,
-                                        std::string& tls_status_msg_scratch,
-                                        std::string& span_kind_buf, std::string& status_code_buf) {
+ExtractionResult ProcessTracesTableImpl(
+    lua_State* L, int abs_idx, core::LuaEmitter& emitter, core::FastJsonWriter& res_attrs_writer,
+    core::FastJsonWriter& span_attrs_writer, core::FastJsonWriter& writer,
+    std::string& tls_scope_name_scratch, std::string& tls_scope_ver_scratch,
+    std::string& tls_status_msg_scratch, std::string& span_kind_buf, std::string& status_code_buf) {
   int rs_arr_idx = 0;
 
   if (core::GetTableField(L, abs_idx, "resourceSpans", "resource_spans")) {
@@ -756,21 +597,19 @@ ExtractionResult ProcessTracesTableImpl(lua_State* L, int abs_idx, core::LuaEmit
     int rs_obj_idx = lua_absindex(L, -1);
 
     std::string_view service_name = "unknown_service";
-    core::ScopedLuaRef res_attr_ref(L, LUA_NOREF);
+    res_attrs_writer.Reset();
+    bool has_res_attrs = false;
 
     if (core::GetTableField(L, rs_obj_idx, "resource")) {
       int res_idx = lua_absindex(L, -1);
       if (core::GetTableField(L, res_idx, "attributes")) {
-        core::PushTableAttributes(L, -1, writer, &service_name);
-        res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+        core::WriteTableAttributesJson(L, -1, res_attrs_writer, &service_name);
+        has_res_attrs = true;
         lua_pop(L, 1);
       }
       lua_pop(L, 1);
     }
-    if (!res_attr_ref.valid()) {
-      lua_newtable(L);
-      res_attr_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-    }
+    const std::string_view res_attrs_json = has_res_attrs ? res_attrs_writer.Str() : "{}";
 
     if (!core::GetTableField(L, rs_obj_idx, "scopeSpans", "scope_spans")) {
       lua_pop(L, 1);
@@ -923,21 +762,18 @@ ExtractionResult ProcessTracesTableImpl(lua_State* L, int abs_idx, core::LuaEmit
             core::CopyStringField(L, span_obj_idx, "name", nullptr, emitter, "SpanName");
             emitter.SetString("SpanKind", span_kind);
             emitter.SetString("ServiceName", service_name);
-
-            lua_rawgeti(L, LUA_REGISTRYINDEX, res_attr_ref.get());
-            emitter.SetTableFromStack("ResourceAttributes");
-
+            emitter.SetString("ResourceAttributes", res_attrs_json);
             emitter.SetString("ScopeName", scope_name);
             emitter.SetString("ScopeVersion", scope_version);
 
+            span_attrs_writer.Reset();
+            bool has_span_attrs = false;
             if (core::GetTableField(L, span_obj_idx, "attributes")) {
-              core::PushTableAttributes(L, -1, writer);
-              emitter.SetTableFromStack("SpanAttributes");
+              core::WriteTableAttributesJson(L, -1, span_attrs_writer);
+              has_span_attrs = true;
               lua_pop(L, 1);
-            } else {
-              lua_newtable(L);
-              emitter.SetTableFromStack("SpanAttributes");
             }
+            emitter.SetString("SpanAttributes", has_span_attrs ? span_attrs_writer.Str() : "{}");
 
             emitter.SetInt64("Duration", duration);
             emitter.SetString("StatusCode", status_code);
@@ -997,6 +833,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
     return ExtractionResult{false, "Lua stack overflow in ProcessTracesTable", 0};
   }
   const int entry_top = lua_gettop(L);
+  static thread_local core::FastJsonWriter res_attrs_writer;
+  static thread_local core::FastJsonWriter span_attrs_writer;
   static thread_local core::FastJsonWriter writer;
   static thread_local std::string tls_service_scratch;
   static thread_local std::string tls_scope_name_scratch;
@@ -1004,6 +842,8 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   static thread_local std::string tls_status_msg_scratch;
   static thread_local std::string span_kind_buf;
   static thread_local std::string status_code_buf;
+  res_attrs_writer.Reset();
+  span_attrs_writer.Reset();
   writer.Reset();
   core::ReserveScratchString(tls_service_scratch, 128);
   core::ReserveScratchString(tls_scope_name_scratch, 128);
@@ -1012,14 +852,18 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   core::ReserveScratchString(span_kind_buf, 64);
   core::ReserveScratchString(status_code_buf, 64);
   struct TableScopeGuard {
-    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
+    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w1, core::FastJsonWriter& w2,
+                    core::FastJsonWriter& w3)
+        : L(l), top(t), writer1(w1), writer2(w2), writer3(w3) {}
     TableScopeGuard(const TableScopeGuard&) = delete;
     TableScopeGuard& operator=(const TableScopeGuard&) = delete;
     ~TableScopeGuard() noexcept {
       if (L != nullptr) {
         lua_settop(L, top);
       }
-      writer.Trim();
+      writer1.Trim();
+      writer2.Trim();
+      writer3.Trim();
       core::ResetScratchString(tls_service_scratch);
       core::ResetScratchString(tls_scope_name_scratch);
       core::ResetScratchString(tls_scope_ver_scratch);
@@ -1029,8 +873,10 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
     }
     lua_State* L;
     int top;
-    core::FastJsonWriter& writer;
-  } scope_guard{L, entry_top, writer};
+    core::FastJsonWriter& writer1;
+    core::FastJsonWriter& writer2;
+    core::FastJsonWriter& writer3;
+  } scope_guard{L, entry_top, res_attrs_writer, span_attrs_writer, writer};
 
   int abs_idx = lua_absindex(L, table_idx);
   int abs_emit_idx = lua_absindex(L, emit_idx);
@@ -1041,9 +887,9 @@ ExtractionResult ProcessTracesTable(lua_State* L, int table_idx, int emit_idx) {
   core::LuaEmitter emitter(L, abs_emit_idx);
 
   try {
-    return ProcessTracesTableImpl(L, abs_idx, emitter, writer, tls_scope_name_scratch,
-                                  tls_scope_ver_scratch, tls_status_msg_scratch, span_kind_buf,
-                                  status_code_buf);
+    return ProcessTracesTableImpl(L, abs_idx, emitter, res_attrs_writer, span_attrs_writer, writer,
+                                  tls_scope_name_scratch, tls_scope_ver_scratch,
+                                  tls_status_msg_scratch, span_kind_buf, status_code_buf);
   } catch (const std::exception& e) {
     return ExtractionResult{false, std::string("C++ exception: ") + e.what(),
                             emitter.EmittedCount()};

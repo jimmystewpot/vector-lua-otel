@@ -114,22 +114,23 @@ TEST_F(LogsExtractorTest, GoldenEdgeFixturesAllRecords) {
     assert(r1.ScopeVersion == "1", "r1.ScopeVersion mismatch")
     assert(type(r1.processed_at) == "string" and #r1.processed_at > 20, "r1.processed_at invalid")
 
-    -- Attributes checks
-    assert(type(r1.ResourceAttributes) == "table", "ResourceAttributes must be table")
-    assert(r1.ResourceAttributes["service.name"] == "edge-svc", "ResourceAttributes.service.name mismatch")
-    assert(type(r1.ScopeAttributes) == "table", "ScopeAttributes must be table")
-    assert(type(r1.LogAttributes) == "table", "LogAttributes must be table")
+    -- Attributes checks (JSON strings)
+    assert(type(r1.ResourceAttributes) == "string", "ResourceAttributes must be string, got " .. type(r1.ResourceAttributes))
+    assert(r1.ResourceAttributes == '{"service.name":"edge-svc"}', "ResourceAttributes mismatch: " .. tostring(r1.ResourceAttributes))
+    assert(type(r1.ScopeAttributes) == "string", "ScopeAttributes must be string, got " .. type(r1.ScopeAttributes))
+    assert(r1.ScopeAttributes == "{}", "ScopeAttributes must be '{}', got " .. tostring(r1.ScopeAttributes))
+    assert(type(r1.LogAttributes) == "string", "LogAttributes must be string, got " .. type(r1.LogAttributes))
 
-    -- Record 1 LogAttributes AnyValue variants
-    assert(r1.LogAttributes.s == "str", "LogAttributes.s mismatch")
-    assert(r1.LogAttributes.i == 9223372036854775807, "LogAttributes.i int64 max mismatch")
-    assert(r1.LogAttributes.neg == -9223372036854775808, "LogAttributes.neg int64 min mismatch")
-    assert(math.abs(r1.LogAttributes.d - 3.14159) < 1e-5, "LogAttributes.d mismatch")
-    assert(r1.LogAttributes.b_true == true, "LogAttributes.b_true mismatch")
-    assert(r1.LogAttributes.b_false == false, "LogAttributes.b_false mismatch")
-    assert(type(r1.LogAttributes.arr) == "string" and string.find(r1.LogAttributes.arr, "arrayValue") ~= nil, "LogAttributes.arr mismatch")
-    assert(type(r1.LogAttributes.map) == "string" and string.find(r1.LogAttributes.map, "kvlistValue") ~= nil, "LogAttributes.map mismatch")
-    assert(type(r1.LogAttributes.bytes) == "string" and string.find(r1.LogAttributes.bytes, "bytesValue") ~= nil, "LogAttributes.bytes mismatch")
+    -- Record 1 LogAttributes AnyValue variants serialized as flattened JSON object string
+    assert(string.find(r1.LogAttributes, '"s":"str"', 1, true) ~= nil, "LogAttributes.s mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"i":9223372036854775807', 1, true) ~= nil, "LogAttributes.i int64 max mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"neg":-9223372036854775808', 1, true) ~= nil, "LogAttributes.neg int64 min mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"d":3.14159', 1, true) ~= nil, "LogAttributes.d mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"b_true":true', 1, true) ~= nil, "LogAttributes.b_true mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"b_false":false', 1, true) ~= nil, "LogAttributes.b_false mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"arr":["a",2]', 1, true) ~= nil, "LogAttributes.arr mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"map":{"n":1}', 1, true) ~= nil, "LogAttributes.map mismatch: " .. tostring(r1.LogAttributes))
+    assert(string.find(r1.LogAttributes, '"bytes":"AAEC"', 1, true) ~= nil, "LogAttributes.bytes mismatch: " .. tostring(r1.LogAttributes))
 
     -- Check Record 2 (from Batch 2): missing service.name, fallback timestamp, empty ids
     local r2 = emitted[2].log
@@ -144,6 +145,9 @@ TEST_F(LogsExtractorTest, GoldenEdgeFixturesAllRecords) {
     assert(r2.Body == "", "r2.Body must be empty string")
     assert(r2.ScopeName == "", "r2.ScopeName must be empty string")
     assert(r2.ScopeVersion == "", "r2.ScopeVersion must be empty string")
+    assert(r2.ResourceAttributes == "{}", "r2.ResourceAttributes must be '{}'")
+    assert(r2.ScopeAttributes == "{}", "r2.ScopeAttributes must be '{}'")
+    assert(r2.LogAttributes == "{}", "r2.LogAttributes must be '{}'")
 
     -- Check Record 3 & 4 (from Batch 3): timeUnixNano "0" fallback and numeric timestamp
     local r3 = emitted[3].log
@@ -191,8 +195,9 @@ TEST_F(LogsExtractorTest, Int64Preservation) {
 
   const char* verify_script = R"(
     local r = emitted[#emitted].log
-    assert(r.LogAttributes.max_val == 9223372036854775807, "max_val mismatch")
-    assert(r.LogAttributes.min_val == -9223372036854775808, "min_val mismatch")
+    assert(type(r.LogAttributes) == "string", "LogAttributes must be string")
+    assert(string.find(r.LogAttributes, '"max_val":9223372036854775807', 1, true) ~= nil, "max_val mismatch: " .. tostring(r.LogAttributes))
+    assert(string.find(r.LogAttributes, '"min_val":-9223372036854775808', 1, true) ~= nil, "min_val mismatch: " .. tostring(r.LogAttributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -335,8 +340,9 @@ TEST_F(LogsExtractorTest, UnorderedKeysHandledCleanly) {
     assert(r.ScopeVersion == "v1.2.3", "ScopeVersion mismatch: " .. tostring(r.ScopeVersion))
     assert(r.Body == "unordered_body", "Body mismatch: " .. tostring(r.Body))
     assert(r.TraceFlags == 4, "TraceFlags mismatch: " .. tostring(r.TraceFlags))
-    assert(r.ResourceAttributes.res_k == "res_v", "ResourceAttributes mismatch")
-    assert(r.ScopeAttributes.scope_k == "scope_v", "ScopeAttributes mismatch")
+    assert(type(r.ResourceAttributes) == "string" and string.find(r.ResourceAttributes, '"res_k":"res_v"', 1, true) ~= nil, "ResourceAttributes mismatch: " .. tostring(r.ResourceAttributes))
+    assert(r.ScopeAttributes == '{"scope_k":"scope_v"}', "ScopeAttributes mismatch: " .. tostring(r.ScopeAttributes))
+    assert(r.LogAttributes == "{}", "LogAttributes mismatch: " .. tostring(r.LogAttributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -353,7 +359,9 @@ TEST_F(LogsExtractorTest, OutOfOrderFieldsExtractedCorrectly) {
     assert(r ~= nil)
     assert(r.Timestamp == "2023-11-14T22:13:20.000000000Z", "Timestamp mismatch: " .. tostring(r.Timestamp))
     assert(r.Body == "hello", "Body mismatch: " .. tostring(r.Body))
-    assert(r.LogAttributes.app == "demo", "LogAttributes.app mismatch")
+    assert(r.ResourceAttributes == "{}", "ResourceAttributes mismatch: " .. tostring(r.ResourceAttributes))
+    assert(r.ScopeAttributes == "{}", "ScopeAttributes mismatch: " .. tostring(r.ScopeAttributes))
+    assert(r.LogAttributes == '{"app":"demo"}', "LogAttributes.app mismatch: " .. tostring(r.LogAttributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -513,11 +521,9 @@ TEST_F(LogsExtractorTest, ProcessLogsTablePreservesLuaStackDepthOnNestedWrapperA
       local r_before = emitted[#emitted - 1].log
       local r_after = emitted[#emitted].log
       assert(r_before.ServiceName == "svc-before", "svc-before mismatch: " .. tostring(r_before.ServiceName))
-      assert(r_before.ResourceAttributes["service.name"] == "svc-before")
-      assert(r_before.ResourceAttributes["env"] == "prod")
+      assert(r_before.ResourceAttributes == '{"service.name":"svc-before","env":"prod"}', "r_before.ResourceAttributes mismatch: " .. tostring(r_before.ResourceAttributes))
       assert(r_after.ServiceName == "svc-after", "svc-after mismatch: " .. tostring(r_after.ServiceName))
-      assert(r_after.ResourceAttributes["service.name"] == "svc-after")
-      assert(r_after.ResourceAttributes["region"] == "us-east")
+      assert(r_after.ResourceAttributes == '{"region":"us-east","service.name":"svc-after"}', "r_after.ResourceAttributes mismatch: " .. tostring(r_after.ResourceAttributes))
     )";
     EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
   }
@@ -669,9 +675,10 @@ TEST_F(LogsExtractorTest, JsonModeDuplicateServiceNameSurvivesGcInEmit) {
       local r = gc_emitted[i].log
       assert(r.ServiceName == "unknown_service",
              "Event " .. i .. " ServiceName mismatch: " .. tostring(r.ServiceName))
-      assert(r.ResourceAttributes["service.name"] == 42,
+      assert(type(r.ResourceAttributes) == "string" and
+             string.find(r.ResourceAttributes, '"service.name":42', 1, true) ~= nil,
              "Event " .. i .. " ResourceAttributes['service.name'] mismatch: " ..
-             tostring(r.ResourceAttributes["service.name"]))
+             tostring(r.ResourceAttributes))
     end
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
@@ -709,8 +716,8 @@ TEST_F(LogsExtractorTest, DuplicateNonStringServiceNameDoesNotUseAfterFreeUnderG
     assert(#uaf_emitted == 2)
     assert(uaf_emitted[1].log.ServiceName == "unknown_service")
     assert(uaf_emitted[2].log.ServiceName == "unknown_service")
-    assert(uaf_emitted[1].log.ResourceAttributes["service.name"] == 42)
-    assert(uaf_emitted[2].log.ResourceAttributes["service.name"] == 42)
+    assert(type(uaf_emitted[1].log.ResourceAttributes) == "string" and string.find(uaf_emitted[1].log.ResourceAttributes, '"service.name":42', 1, true) ~= nil)
+    assert(type(uaf_emitted[2].log.ResourceAttributes) == "string" and string.find(uaf_emitted[2].log.ResourceAttributes, '"service.name":42', 1, true) ~= nil)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -720,7 +727,7 @@ TEST_F(LogsExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResourceAtt
     uaf_emitted = {}
     function uaf_cb(event)
       table.insert(uaf_emitted, event)
-      event.log.ResourceAttributes["service.name"] = nil
+      event.log.ResourceAttributes = nil
       collectgarbage("collect")
       collectgarbage("collect")
       for i = 1, 200 do
@@ -838,8 +845,10 @@ TEST_F(LogsExtractorTest, ResourceAttributesTableIsSharedAcrossRecordsOfOneResou
   ASSERT_EQ(luaL_dostring(L_, R"(
     assert(#shared_events == 3, "expected 3 events")
     local r1, r2, r3 = shared_events[1].log, shared_events[2].log, shared_events[3].log
-    assert(rawequal(r1.ResourceAttributes, r2.ResourceAttributes), "same resource must share table")
-    assert(not rawequal(r1.ResourceAttributes, r3.ResourceAttributes), "different resources must not share")
+    assert(type(r1.ResourceAttributes) == "string", "ResourceAttributes must be JSON string")
+    assert(r1.ResourceAttributes == '{"service.name":"a"}')
+    assert(r1.ResourceAttributes == r2.ResourceAttributes, "same resource must have identical JSON")
+    assert(r1.ResourceAttributes ~= r3.ResourceAttributes, "different resources must differ")
   )"),
             LUA_OK)
       << lua_tostring(L_, -1);
@@ -1157,12 +1166,14 @@ TEST_F(LogsExtractorTest, BodyAndLogAttributesNotAlteredByNormalization) {
     assert(r.TraceId == "0123456789abcdef0123456789abcdef")
     assert(r.SpanId == "0123456789abcdef")
     assert(r.Body == "BODY_WITH_UPPER_HEX_4BF9", "Body string must not be altered")
-    assert(r.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
-           "ResourceAttributes string must not be altered")
-    assert(r.LogAttributes["log.raw_id"] == "UPPERCASE_AND_HEX_4BF9",
-           "LogAttributes string must not be altered")
-    assert(r.LogAttributes["log.exact_16"] == "1234567812345678",
-           "LogAttributes string must not be altered")
+    assert(type(r.ResourceAttributes) == "string" and
+           string.find(r.ResourceAttributes, '"res.hex":"4BF92F3577B34DA6A3CE929D0E0E4736"', 1, true) ~= nil,
+           "ResourceAttributes string must not be altered: " .. tostring(r.ResourceAttributes))
+    assert(type(r.LogAttributes) == "string" and
+           string.find(r.LogAttributes, '"log.raw_id":"UPPERCASE_AND_HEX_4BF9"', 1, true) ~= nil,
+           "LogAttributes string must not be altered: " .. tostring(r.LogAttributes))
+    assert(string.find(r.LogAttributes, '"log.exact_16":"1234567812345678"', 1, true) ~= nil,
+           "LogAttributes string must not be altered: " .. tostring(r.LogAttributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }

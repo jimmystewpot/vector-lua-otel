@@ -23,7 +23,6 @@ namespace vector_otel::native_extractors {
 
 namespace {
 
-using core::ScopedLuaRef;
 using extractors::ExtractionResult;
 
 std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
@@ -120,7 +119,10 @@ int64_t ParseJsonSeverityNumber(simdjson::ondemand::value& fv) {
 }
 
 bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_obj,
-                                std::string_view processed_at, core::FastJsonWriter& writer,
+                                std::string_view processed_at,
+                                core::FastJsonWriter& res_attrs_writer,
+                                core::FastJsonWriter& scope_attrs_writer,
+                                core::FastJsonWriter& log_attrs_writer,
                                 core::FastJsonWriter& body_writer, core::LuaEmitter& emitter,
                                 std::string& err_out, int depth = 0, bool* out_matched = nullptr) {
   uint64_t t_ns = 0;
@@ -141,9 +143,9 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
   std::string_view scope_name;
   std::string_view scope_version;
   std::string_view event_name;
-  ScopedLuaRef res_attrs_scoped(L, LUA_NOREF);
-  ScopedLuaRef scope_attrs_scoped(L, LUA_NOREF);
-  ScopedLuaRef log_attrs_scoped(L, LUA_NOREF);
+  bool has_res_attrs = false;
+  bool has_scope_attrs = false;
+  bool has_log_attrs = false;
   bool has_recognized_field = false;
 
   for (auto field_res : rec_obj) {
@@ -178,7 +180,8 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
         }
         auto inner_obj = inner_obj_res.value();
         bool inner_matched = false;
-        if (!ExtractNativeLogObjectJson(L, inner_obj, processed_at, writer, body_writer, emitter,
+        if (!ExtractNativeLogObjectJson(L, inner_obj, processed_at, res_attrs_writer,
+                                        scope_attrs_writer, log_attrs_writer, body_writer, emitter,
                                         err_out, depth + 1, &inner_matched)) {
           return false;
         }
@@ -206,8 +209,9 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
           }
           auto elem_obj = elem_obj_res.value();
           bool elem_matched = false;
-          if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, writer, body_writer, emitter,
-                                          err_out, depth + 1, &elem_matched)) {
+          if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, res_attrs_writer,
+                                          scope_attrs_writer, log_attrs_writer, body_writer,
+                                          emitter, err_out, depth + 1, &elem_matched)) {
             return false;
           }
           any_matched = any_matched || elem_matched;
@@ -272,11 +276,10 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
     } else if (k == "resources" || k == "resource_attributes" || k == "resourceAttributes" ||
                k == "resource") {
       has_recognized_field = true;
-      if (L != nullptr) {
-        res_service_name = "unknown_service";
-        core::PushAttributesTable(L, fv, writer, &res_service_name);
-        res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-      }
+      res_service_name = "unknown_service";
+      res_attrs_writer.Reset();
+      core::WriteAttributesJson(res_attrs_writer, fv, &res_service_name);
+      has_res_attrs = true;
     } else if (k == "resource_schema_url" || k == "resourceSchemaUrl" || k == "schema_url" ||
                k == "schemaUrl") {
       has_recognized_field = true;
@@ -312,9 +315,10 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
             if (s_res.error() == simdjson::SUCCESS) {
               scope_schema_url = s_res.value();
             }
-          } else if (sk == "attributes" && L != nullptr) {
-            core::PushAttributesTable(L, sfv, writer);
-            scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+          } else if (sk == "attributes") {
+            scope_attrs_writer.Reset();
+            core::WriteAttributesJson(scope_attrs_writer, sfv);
+            has_scope_attrs = true;
           }
         }
       }
@@ -338,16 +342,16 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
       }
     } else if (k == "scope_attributes" || k == "scopeAttributes") {
       has_recognized_field = true;
-      if (L != nullptr && scope_attrs_scoped.get() == LUA_NOREF) {
-        core::PushAttributesTable(L, fv, writer);
-        scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+      if (!has_scope_attrs) {
+        scope_attrs_writer.Reset();
+        core::WriteAttributesJson(scope_attrs_writer, fv);
+        has_scope_attrs = true;
       }
     } else if (k == "attributes" || k == "log_attributes" || k == "logAttributes") {
       has_recognized_field = true;
-      if (L != nullptr) {
-        core::PushAttributesTable(L, fv, writer);
-        log_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-      }
+      log_attrs_writer.Reset();
+      core::WriteAttributesJson(log_attrs_writer, fv);
+      has_log_attrs = true;
     } else if (k == "event_name" || k == "eventName") {
       has_recognized_field = true;
       auto s_res = fv.get_string();
@@ -402,41 +406,12 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
   emitter.SetString("ServiceName", service_name);
   emitter.SetString("Body", body_sv);
   emitter.SetString("ResourceSchemaUrl", resource_schema_url);
-
-  if (L != nullptr) {
-    if (res_attrs_scoped.get() != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_scoped.get());
-      res_attrs_scoped.reset();
-    } else {
-      lua_newtable(L);
-    }
-    emitter.SetTableFromStack("ResourceAttributes");
-  }
-
+  emitter.SetString("ResourceAttributes", has_res_attrs ? res_attrs_writer.Str() : "{}");
   emitter.SetString("ScopeSchemaUrl", scope_schema_url);
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
-
-  if (L != nullptr) {
-    if (scope_attrs_scoped.get() != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, scope_attrs_scoped.get());
-      scope_attrs_scoped.reset();
-    } else {
-      lua_newtable(L);
-    }
-    emitter.SetTableFromStack("ScopeAttributes");
-  }
-
-  if (L != nullptr) {
-    if (log_attrs_scoped.get() != LUA_NOREF) {
-      lua_rawgeti(L, LUA_REGISTRYINDEX, log_attrs_scoped.get());
-      log_attrs_scoped.reset();
-    } else {
-      lua_newtable(L);
-    }
-    emitter.SetTableFromStack("LogAttributes");
-  }
-
+  emitter.SetString("ScopeAttributes", has_scope_attrs ? scope_attrs_writer.Str() : "{}");
+  emitter.SetString("LogAttributes", has_log_attrs ? log_attrs_writer.Str() : "{}");
   emitter.SetString("EventName", event_name);
   emitter.SetString("processed_at", processed_at);
 
@@ -550,13 +525,13 @@ void CopyNativeTableBody(lua_State* L, int rec_idx, core::FastJsonWriter& writer
   emitter.SetString("Body", "");
 }
 
-bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view processed_at,
-                                 core::FastJsonWriter& writer, std::string& tls_res_schema_scratch,
-                                 std::string& tls_service_scratch,
-                                 std::string& tls_scope_schema_scratch,
-                                 std::string& tls_scope_name_scratch,
-                                 std::string& tls_scope_ver_scratch, core::LuaEmitter& emitter,
-                                 std::string& err_out) {
+bool ExtractSingleNativeLogTable(
+    lua_State* L, int rec_idx, std::string_view processed_at,
+    core::FastJsonWriter& res_attrs_writer, core::FastJsonWriter& scope_attrs_writer,
+    core::FastJsonWriter& log_attrs_writer, core::FastJsonWriter& body_writer,
+    std::string& tls_res_schema_scratch, std::string& tls_service_scratch,
+    std::string& tls_scope_schema_scratch, std::string& tls_scope_name_scratch,
+    std::string& tls_scope_ver_scratch, core::LuaEmitter& emitter, std::string& err_out) {
   if (!lua_checkstack(L, 16)) {
     err_out = "Lua stack overflow during native log extraction";
     return false;
@@ -599,7 +574,8 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
   }
 
   std::string_view service_name;
-  ScopedLuaRef res_attrs_scoped(L, LUA_NOREF);
+  res_attrs_writer.Reset();
+  bool has_res_attrs = false;
 
   bool has_res = core::GetTableFieldRaw(L, abs_rec_idx, "resources", "resource_attributes");
   if (!has_res) {
@@ -622,8 +598,8 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
           lua_pop(L, 1);
         }
       }
-      core::PushTableAttributes(L, attrs_src_idx, writer, &service_name);
-      res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+      core::WriteTableAttributesJson(L, attrs_src_idx, res_attrs_writer, &service_name);
+      has_res_attrs = true;
       if (has_nested_attrs) {
         lua_pop(L, 1);
       }
@@ -647,7 +623,8 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
       core::ReadTableStringView(L, abs_rec_idx, "scope_name", "scopeName", tls_scope_name_scratch);
   std::string_view scope_version = core::ReadTableStringView(L, abs_rec_idx, "scope_version",
                                                              "scopeVersion", tls_scope_ver_scratch);
-  ScopedLuaRef scope_attrs_scoped(L, LUA_NOREF);
+  scope_attrs_writer.Reset();
+  bool has_scope_attrs = false;
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "scope")) {
     int s_idx = lua_absindex(L, -1);
@@ -664,17 +641,17 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
                                                      tls_scope_schema_scratch);
       }
       if (core::GetTableFieldRaw(L, s_idx, "attributes")) {
-        core::PushTableAttributes(L, -1, writer);
-        scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+        core::WriteTableAttributesJson(L, -1, scope_attrs_writer);
+        has_scope_attrs = true;
         lua_pop(L, 1);
       }
     }
     lua_pop(L, 1);
   }
-  if (scope_attrs_scoped.get() == LUA_NOREF &&
+  if (!has_scope_attrs &&
       core::GetTableFieldRaw(L, abs_rec_idx, "scope_attributes", "scopeAttributes")) {
-    core::PushTableAttributes(L, -1, writer);
-    scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
+    core::WriteTableAttributesJson(L, -1, scope_attrs_writer);
+    has_scope_attrs = true;
     lua_pop(L, 1);
   }
 
@@ -701,41 +678,24 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
   emitter.SetInt64("SeverityNumber", sev_num);
 
   emitter.SetString("ServiceName", service_name);
-  CopyNativeTableBody(L, abs_rec_idx, writer, emitter);
+  CopyNativeTableBody(L, abs_rec_idx, body_writer, emitter);
   emitter.SetString("ResourceSchemaUrl", resource_schema_url);
-
-  if (res_attrs_scoped.get() != LUA_NOREF) {
-    lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_scoped.get());
-    res_attrs_scoped.reset();
-  } else {
-    lua_newtable(L);
-  }
-  emitter.SetTableFromStack("ResourceAttributes");
-
+  emitter.SetString("ResourceAttributes", has_res_attrs ? res_attrs_writer.Str() : "{}");
   emitter.SetString("ScopeSchemaUrl", scope_schema_url);
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
+  emitter.SetString("ScopeAttributes", has_scope_attrs ? scope_attrs_writer.Str() : "{}");
 
-  if (scope_attrs_scoped.get() != LUA_NOREF) {
-    lua_rawgeti(L, LUA_REGISTRYINDEX, scope_attrs_scoped.get());
-    scope_attrs_scoped.reset();
-  } else {
-    lua_newtable(L);
-  }
-  emitter.SetTableFromStack("ScopeAttributes");
-
+  log_attrs_writer.Reset();
   bool has_log_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "attributes", "log_attributes");
   if (!has_log_attrs) {
     has_log_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "logAttributes");
   }
   if (has_log_attrs) {
-    core::PushTableAttributes(L, -1, writer);
-    emitter.SetTableFromStack("LogAttributes");
+    core::WriteTableAttributesJson(L, -1, log_attrs_writer);
     lua_pop(L, 1);
-  } else {
-    lua_newtable(L);
-    emitter.SetTableFromStack("LogAttributes");
   }
+  emitter.SetString("LogAttributes", has_log_attrs ? log_attrs_writer.Str() : "{}");
 
   core::CopyStringFieldAlways(L, abs_rec_idx, "event_name", "eventName", emitter, "EventName");
   emitter.SetString("processed_at", processed_at);
@@ -758,24 +718,33 @@ extractors::ExtractionResult ProcessNativeLogs(lua_State* L, std::string_view ra
   core::LuaEmitter emitter(L, emit_idx);
   try {
     auto& parser = core::OtelParser::Instance();
-    static thread_local core::FastJsonWriter writer;
+    static thread_local core::FastJsonWriter res_attrs_writer;
+    static thread_local core::FastJsonWriter scope_attrs_writer;
+    static thread_local core::FastJsonWriter log_attrs_writer;
     static thread_local core::FastJsonWriter body_writer;
 
-    writer.Reset();
+    res_attrs_writer.Reset();
+    scope_attrs_writer.Reset();
+    log_attrs_writer.Reset();
     body_writer.Reset();
     struct WriterTrimGuard {
-      explicit WriterTrimGuard(core::FastJsonWriter& writer1, core::FastJsonWriter& writer2)
-          : w1(writer1), w2(writer2) {}
+      WriterTrimGuard(core::FastJsonWriter& writer1, core::FastJsonWriter& writer2,
+                      core::FastJsonWriter& writer3, core::FastJsonWriter& writer4)
+          : w1(writer1), w2(writer2), w3(writer3), w4(writer4) {}
       WriterTrimGuard(const WriterTrimGuard&) = delete;
       WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
       ~WriterTrimGuard() noexcept {
         w1.Trim();
         w2.Trim();
+        w3.Trim();
+        w4.Trim();
         core::ResetServiceNameScratch();
       }
       core::FastJsonWriter& w1;
       core::FastJsonWriter& w2;
-    } trim_guard{writer, body_writer};
+      core::FastJsonWriter& w3;
+      core::FastJsonWriter& w4;
+    } trim_guard{res_attrs_writer, scope_attrs_writer, log_attrs_writer, body_writer};
 
     auto doc_res = parser.Iterate(raw_json);
     if (doc_res.error() != simdjson::SUCCESS) {
@@ -801,7 +770,8 @@ extractors::ExtractionResult ProcessNativeLogs(lua_State* L, std::string_view ra
                                 0};
       }
       auto doc_obj = doc_obj_res.value();
-      if (!ExtractNativeLogObjectJson(L, doc_obj, processed_at, writer, body_writer, emitter,
+      if (!ExtractNativeLogObjectJson(L, doc_obj, processed_at, res_attrs_writer,
+                                      scope_attrs_writer, log_attrs_writer, body_writer, emitter,
                                       err_out)) {
         return ExtractionResult{false, err_out, emitter.EmittedCount()};
       }
@@ -822,7 +792,8 @@ extractors::ExtractionResult ProcessNativeLogs(lua_State* L, std::string_view ra
                                   emitter.EmittedCount()};
         }
         auto elem_obj = elem_obj_res.value();
-        if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, writer, body_writer, emitter,
+        if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, res_attrs_writer,
+                                        scope_attrs_writer, log_attrs_writer, body_writer, emitter,
                                         err_out)) {
           return ExtractionResult{false, err_out, emitter.EmittedCount()};
         }
@@ -855,27 +826,38 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
     return ExtractionResult{false, "payload must be a table", 0};
   }
 
-  static thread_local core::FastJsonWriter writer;
+  static thread_local core::FastJsonWriter res_attrs_writer;
+  static thread_local core::FastJsonWriter scope_attrs_writer;
+  static thread_local core::FastJsonWriter log_attrs_writer;
+  static thread_local core::FastJsonWriter body_writer;
   static thread_local std::string tls_res_schema_scratch;
   static thread_local std::string tls_service_scratch;
   static thread_local std::string tls_scope_schema_scratch;
   static thread_local std::string tls_scope_name_scratch;
   static thread_local std::string tls_scope_ver_scratch;
-  writer.Reset();
+  res_attrs_writer.Reset();
+  scope_attrs_writer.Reset();
+  log_attrs_writer.Reset();
+  body_writer.Reset();
   core::ReserveScratchString(tls_res_schema_scratch);
   core::ReserveScratchString(tls_service_scratch);
   core::ReserveScratchString(tls_scope_schema_scratch);
   core::ReserveScratchString(tls_scope_name_scratch);
   core::ReserveScratchString(tls_scope_ver_scratch);
   struct TableScopeGuard {
-    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w) : L(l), top(t), writer(w) {}
+    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w1, core::FastJsonWriter& w2,
+                    core::FastJsonWriter& w3, core::FastJsonWriter& w4)
+        : L(l), top(t), writer1(w1), writer2(w2), writer3(w3), writer4(w4) {}
     TableScopeGuard(const TableScopeGuard&) = delete;
     TableScopeGuard& operator=(const TableScopeGuard&) = delete;
     ~TableScopeGuard() noexcept {
       if (L != nullptr) {
         lua_settop(L, top);
       }
-      writer.Trim();
+      writer1.Trim();
+      writer2.Trim();
+      writer3.Trim();
+      writer4.Trim();
       core::TrimScratchString(tls_res_schema_scratch);
       core::TrimScratchString(tls_service_scratch);
       core::TrimScratchString(tls_scope_schema_scratch);
@@ -884,8 +866,11 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
     }
     lua_State* L;
     int top;
-    core::FastJsonWriter& writer;
-  } scope_guard{L, entry_top, writer};
+    core::FastJsonWriter& writer1;
+    core::FastJsonWriter& writer2;
+    core::FastJsonWriter& writer3;
+    core::FastJsonWriter& writer4;
+  } scope_guard{L, entry_top, res_attrs_writer, scope_attrs_writer, log_attrs_writer, body_writer};
 
   core::LuaEmitter emitter(L, abs_emit_idx);
   try {
@@ -900,7 +885,8 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
         if (lua_istable(L, -1)) {
           int item_idx = lua_absindex(L, -1);
           if (HasNativeLogFields(L, item_idx)) {
-            if (!ExtractSingleNativeLogTable(L, item_idx, processed_at, writer,
+            if (!ExtractSingleNativeLogTable(L, item_idx, processed_at, res_attrs_writer,
+                                             scope_attrs_writer, log_attrs_writer, body_writer,
                                              tls_res_schema_scratch, tls_service_scratch,
                                              tls_scope_schema_scratch, tls_scope_name_scratch,
                                              tls_scope_ver_scratch, emitter, err_out)) {
@@ -933,7 +919,8 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
             }
           } else if (HasNativeLogFields(L, log_idx)) {
             handled_log_wrapper = true;
-            if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, writer,
+            if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, res_attrs_writer,
+                                             scope_attrs_writer, log_attrs_writer, body_writer,
                                              tls_res_schema_scratch, tls_service_scratch,
                                              tls_scope_schema_scratch, tls_scope_name_scratch,
                                              tls_scope_ver_scratch, emitter, err_out)) {
@@ -945,10 +932,10 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
         lua_pop(L, 1);
       }
       if (!handled_log_wrapper && HasNativeLogFields(L, abs_idx)) {
-        if (!ExtractSingleNativeLogTable(L, abs_idx, processed_at, writer, tls_res_schema_scratch,
-                                         tls_service_scratch, tls_scope_schema_scratch,
-                                         tls_scope_name_scratch, tls_scope_ver_scratch, emitter,
-                                         err_out)) {
+        if (!ExtractSingleNativeLogTable(
+                L, abs_idx, processed_at, res_attrs_writer, scope_attrs_writer, log_attrs_writer,
+                body_writer, tls_res_schema_scratch, tls_service_scratch, tls_scope_schema_scratch,
+                tls_scope_name_scratch, tls_scope_ver_scratch, emitter, err_out)) {
           return ExtractionResult{false, err_out, emitter.EmittedCount()};
         }
       }

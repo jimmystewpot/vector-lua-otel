@@ -1796,32 +1796,8 @@ TEST_F(TableModeTest, AttributeIntAndDoubleValueStrictness) {
   lua_rawgeti(L_, -1, 1);
   lua_getfield(L_, -1, "log");
   lua_getfield(L_, -1, "LogAttributes");
-  ASSERT_TRUE(lua_istable(L_, -1));
-  int attrs_idx = lua_gettop(L_);
-
-  lua_getfield(L_, attrs_idx, "a");
-  EXPECT_EQ(lua_tointeger(L_, -1), 0);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "b");
-  EXPECT_EQ(lua_tointeger(L_, -1), 7);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "c");
-  EXPECT_EQ(lua_tointeger(L_, -1), 0);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "d");
-  EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 0.0);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "e");
-  EXPECT_DOUBLE_EQ(lua_tonumber(L_, -1), 2.5);
-  lua_pop(L_, 1);
-
-  lua_getfield(L_, attrs_idx, "arr");
-  EXPECT_STREQ(lua_tostring(L_, -1), "[0,7,0,0,2.5]");
-  lua_pop(L_, 1);
+  ASSERT_EQ(lua_type(L_, -1), LUA_TSTRING);
+  EXPECT_STREQ(lua_tostring(L_, -1), R"({"a":0,"b":7,"c":0,"d":0,"e":2.5,"arr":[0,7,0,0,2.5]})");
 
   lua_pop(L_, 4);  // pop LogAttributes, log, emitted[1], emitted
 }
@@ -2013,6 +1989,9 @@ TEST_F(TableModeTest, TableModeLogsStringsSurviveInputMutationInEmit) {
       assert(r.ServiceName == string.rep("S", 80), "ServiceName " .. i .. ": " .. tostring(r.ServiceName))
       assert(r.ScopeName == string.rep("N", 80), "ScopeName " .. i .. ": " .. tostring(r.ScopeName))
       assert(r.ScopeVersion == string.rep("V", 80), "ScopeVersion " .. i .. ": " .. tostring(r.ScopeVersion))
+      assert(type(r.ResourceAttributes) == "string", "ResourceAttributes must be string")
+      assert(type(r.ScopeAttributes) == "string", "ScopeAttributes must be string")
+      assert(type(r.LogAttributes) == "string", "LogAttributes must be string")
     end
   )"),
             LUA_OK)
@@ -2060,6 +2039,8 @@ TEST_F(TableModeTest, TableModeTracesStringsSurviveInputMutationInEmit) {
       assert(r.ServiceName == string.rep("S", 80), "ServiceName " .. i .. ": " .. tostring(r.ServiceName))
       assert(r.ScopeName == string.rep("N", 80), "ScopeName " .. i .. ": " .. tostring(r.ScopeName))
       assert(r.ScopeVersion == string.rep("V", 80), "ScopeVersion " .. i .. ": " .. tostring(r.ScopeVersion))
+      assert(type(r.ResourceAttributes) == "string", "ResourceAttributes must be string")
+      assert(type(r.SpanAttributes) == "string", "SpanAttributes must be string")
     end
   )"),
             LUA_OK)
@@ -2721,9 +2702,11 @@ TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
     local t1 = collected_events[1].log
     assert(t1.SpanKind == "SPAN_KIND_SERVER", "SpanKind mismatch: " .. tostring(t1.SpanKind))
     assert(t1.StatusCode == "STATUS_CODE_OK", "StatusCode mismatch: " .. tostring(t1.StatusCode))
-    assert(t1.ResourceAttributes.u1 == 42)
-    assert(t1.ResourceAttributes.u2 == 9223372036854775807)
-    assert(string.find(t1.ResourceAttributes.nested, '"inner_u":77', 1, true) ~= nil)
+    assert(type(t1.ResourceAttributes) == "string", "ResourceAttributes must be string")
+    assert(string.find(t1.ResourceAttributes, '"u1":42', 1, true) ~= nil)
+    assert(string.find(t1.ResourceAttributes, '"u2":18446744073709551615', 1, true) ~= nil)
+    assert(string.find(t1.ResourceAttributes, '"nested":{"inner_u":77}', 1, true) ~= nil)
+    assert(t1.SpanAttributes == "{}")
     assert(string.find(t1.Events, '"ev_u":123', 1, true) ~= nil)
     assert(string.find(t1.Events, '"map_u":456', 1, true) ~= nil)
     assert(string.find(t1.Links, '"lk_u":789', 1, true) ~= nil)
