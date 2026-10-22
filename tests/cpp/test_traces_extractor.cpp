@@ -1650,6 +1650,382 @@ TEST_F(TracesExtractorTest, BatchModeParseErrorDiscardsQueuedRows) {
   lua_pop(L_, 1);
 }
 
+TEST_F(TracesExtractorTest, TableModeBinaryIdsNormalizedToHex) {
+  // Binary 16B trace ID: \x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36
+  // Binary 8B span ID (with embedded \0): \x00\xf0\x67\xaa\x0b\xa9\x02\xb7
+  // Binary 8B parent span ID: \x11\x22\x33\x44\x55\x66\x77\x88
+  const char* script = R"(
+    local tbl = {
+      resourceSpans = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "tbl-id-svc" } }
+            }
+          },
+          scopeSpans = {
+            {
+              scope = { name = "test-scope", version = "1.0" },
+              spans = {
+                {
+                  traceId = "\x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36",
+                  spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+                  parentSpanId = "\x11\x22\x33\x44\x55\x66\x77\x88",
+                  name = "binary-ids-span",
+                  startTimeUnixNano = 1000,
+                  endTimeUnixNano = 2000,
+                  links = {
+                    {
+                      traceId = "\x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36",
+                      spanId = "\x00\xf0\x67\xaa\x0b\xa9\x02\xb7",
+                      traceState = "vendor=binary",
+                      attributes = {
+                        { key = "link.rel", value = { stringValue = "child" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return tbl
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record, got " .. #emitted)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "TraceId must be 32 lowercase hex chars, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "00f067aa0ba902b7",
+           "SpanId must be 16 lowercase hex chars, got: " .. tostring(r.SpanId))
+    assert(r.ParentSpanId == "1122334455667788",
+           "ParentSpanId must be 16 lowercase hex chars, got: " .. tostring(r.ParentSpanId))
+
+    -- Verify Links contains normalized hex IDs and valid JSON
+    assert(type(r.Links) == "string", "Links must be a string")
+    assert(not string.find(r.Links, "[\0-\x1f]"), "Links must not contain control characters")
+    assert(not string.find(r.Links, "\xef\xbf\xbd"), "Links must not contain U+FFFD replacement characters")
+    assert(string.find(r.Links, '"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"'),
+           "Links must contain normalized 32-hex TraceId: " .. r.Links)
+    assert(string.find(r.Links, '"SpanId":"00f067aa0ba902b7"'),
+           "Links must contain normalized 16-hex SpanId: " .. r.Links)
+    assert(string.find(r.Links, '"TraceState":"vendor=binary"'),
+           "Links must contain TraceState: " .. r.Links)
+    assert(string.find(r.Links, '"link.rel":"child"'),
+           "Links must contain flattened Attributes: " .. r.Links)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, JsonModeUppercaseIdsNormalizedToLowercaseHex) {
+  const std::string json = R"({
+    "resourceSpans": [{
+      "resource": {
+        "attributes": [{"key": "service.name", "value": {"stringValue": "json-norm-svc"}}]
+      },
+      "scopeSpans": [{
+        "scope": {"name": "test-scope", "version": "1.0"},
+        "spans": [{
+          "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+          "spanId": "00F067AA0BA902B7",
+          "parentSpanId": "1122334455667788",
+          "name": "uppercase-span",
+          "startTimeUnixNano": "1000",
+          "endTimeUnixNano": "2000",
+          "links": [{
+            "traceId": "4BF92F3577B34DA6A3CE929D0E0E4736",
+            "spanId": "00F067AA0BA902B7",
+            "traceState": "vendor=upper"
+          }]
+        }]
+      }]
+    }]
+  })";
+
+  auto res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1, "Expected 1 emitted record, got " .. #emitted)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736",
+           "TraceId must be normalized to lowercase hex, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "00f067aa0ba902b7",
+           "SpanId must be normalized to lowercase hex, got: " .. tostring(r.SpanId))
+    assert(r.ParentSpanId == "1122334455667788",
+           "ParentSpanId must be lowercase hex, got: " .. tostring(r.ParentSpanId))
+
+    -- Verify links normalized
+    assert(string.find(r.Links, '"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"'),
+           "Links TraceId must be normalized to lowercase hex: " .. r.Links)
+    assert(string.find(r.Links, '"SpanId":"00f067aa0ba902b7"'),
+           "Links SpanId must be normalized to lowercase hex: " .. r.Links)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, MissingCorrelationIdsEmitEmptyStringInJsonAndTableMode) {
+  // 1. JSON mode with missing traceId, spanId, parentSpanId
+  const std::string json = R"({
+    "resourceSpans": [{
+      "scopeSpans": [{
+        "spans": [{
+          "name": "no-ids-span",
+          "startTimeUnixNano": "1000",
+          "endTimeUnixNano": "2000"
+        }]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  const char* verify_json = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "", "Missing TraceId in JSON mode must emit empty string, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "", "Missing SpanId in JSON mode must emit empty string, got: " .. tostring(r.SpanId))
+    assert(r.ParentSpanId == "", "Missing ParentSpanId in JSON mode must emit empty string, got: " .. tostring(r.ParentSpanId))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_json), LUA_OK) << lua_tostring(L_, -1);
+
+  // 2. Table mode with missing traceId, spanId, parentSpanId
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* table_script = R"(
+    return {
+      resourceSpans = {
+        {
+          scopeSpans = {
+            {
+              spans = {
+                {
+                  name = "no-ids-table-span",
+                  startTimeUnixNano = 1000,
+                  endTimeUnixNano = 2000
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(table_res.success) << table_res.error;
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_table = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "", "Missing TraceId in table mode must emit empty string, got: " .. tostring(r.TraceId))
+    assert(r.SpanId == "", "Missing SpanId in table mode must emit empty string, got: " .. tostring(r.SpanId))
+    assert(r.ParentSpanId == "", "Missing ParentSpanId in table mode must emit empty string, got: " .. tostring(r.ParentSpanId))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, MixedSnakeCaseAndCamelCaseLinksAndEventsParity) {
+  // Test both JSON mode and Table mode with snake_case keys in links and events:
+  // trace_id, span_id, trace_state in links; time_unix_nano in events.
+  const std::string json = R"({
+    "resourceSpans": [{
+      "scopeSpans": [{
+        "spans": [{
+          "trace_id": "4BF92F3577B34DA6A3CE929D0E0E4736",
+          "span_id": "00F067AA0BA902B7",
+          "parent_span_id": "1122334455667788",
+          "name": "mixed-span",
+          "start_time_unix_nano": "1000",
+          "end_time_unix_nano": "2000",
+          "events": [{
+            "time_unix_nano": "1500",
+            "name": "ev1",
+            "attributes": [{"key": "ev.key", "value": {"stringValue": "ev.val"}}]
+          }],
+          "links": [{
+            "trace_id": "4BF92F3577B34DA6A3CE929D0E0E4736",
+            "span_id": "00F067AA0BA902B7",
+            "trace_state": "state=snake",
+            "attributes": [{"key": "link.key", "value": {"stringValue": "link.val"}}]
+          }]
+        }]
+      }]
+    }]
+  })";
+
+  auto json_res = ProcessTraces(L_, json, emit_idx_);
+  EXPECT_TRUE(json_res.success) << json_res.error;
+  EXPECT_EQ(json_res.emitted_count, 1);
+
+  const char* verify_json = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert(r.SpanId == "00f067aa0ba902b7")
+    assert(r.ParentSpanId == "1122334455667788")
+
+    -- Events check
+    assert(string.find(r.Events, '"Timestamp":"1970-01-01T00:00:00.000001500Z"', 1, true),
+           "Events must parse time_unix_nano: " .. r.Events)
+    assert(string.find(r.Events, '"Name":"ev1"', 1, true), "Events Name: " .. r.Events)
+    assert(string.find(r.Events, '"ev.key":"ev.val"', 1, true), "Events Attributes: " .. r.Events)
+
+    -- Links check
+    assert(string.find(r.Links, '"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"', 1, true),
+           "Links TraceId: " .. r.Links)
+    assert(string.find(r.Links, '"SpanId":"00f067aa0ba902b7"', 1, true),
+           "Links SpanId: " .. r.Links)
+    assert(string.find(r.Links, '"TraceState":"state=snake"', 1, true),
+           "Links TraceState: " .. r.Links)
+    assert(string.find(r.Links, '"link.key":"link.val"', 1, true),
+           "Links Attributes: " .. r.Links)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_json), LUA_OK) << lua_tostring(L_, -1);
+
+  // Table mode parity
+  ASSERT_EQ(luaL_dostring(L_, "emitted = {}"), LUA_OK);
+  const char* table_script = R"(
+    return {
+      resourceSpans = {
+        {
+          scopeSpans = {
+            {
+              spans = {
+                {
+                  trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+                  span_id = "00F067AA0BA902B7",
+                  parent_span_id = "1122334455667788",
+                  name = "mixed-table-span",
+                  start_time_unix_nano = 1000,
+                  end_time_unix_nano = 2000,
+                  events = {
+                    {
+                      time_unix_nano = 1500,
+                      name = "ev1",
+                      attributes = { { key = "ev.key", value = { stringValue = "ev.val" } } }
+                    }
+                  },
+                  links = {
+                    {
+                      trace_id = "4BF92F3577B34DA6A3CE929D0E0E4736",
+                      span_id = "00F067AA0BA902B7",
+                      trace_state = "state=snake",
+                      attributes = { { key = "link.key", value = { stringValue = "link.val" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, table_script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(table_res.success) << table_res.error;
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_table = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.TraceId == "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert(r.SpanId == "00f067aa0ba902b7")
+    assert(r.ParentSpanId == "1122334455667788")
+
+    -- Events check
+    assert(string.find(r.Events, '"Timestamp":"1970-01-01T00:00:00.000001500Z"', 1, true),
+           "Table Events must parse time_unix_nano: " .. r.Events)
+    assert(string.find(r.Events, '"Name":"ev1"', 1, true), "Table Events Name: " .. r.Events)
+    assert(string.find(r.Events, '"ev.key":"ev.val"', 1, true), "Table Events Attributes: " .. r.Events)
+
+    -- Links check
+    assert(string.find(r.Links, '"TraceId":"4bf92f3577b34da6a3ce929d0e0e4736"', 1, true),
+           "Table Links TraceId: " .. r.Links)
+    assert(string.find(r.Links, '"SpanId":"00f067aa0ba902b7"', 1, true),
+           "Table Links SpanId: " .. r.Links)
+    assert(string.find(r.Links, '"TraceState":"state=snake"', 1, true),
+           "Table Links TraceState: " .. r.Links)
+    assert(string.find(r.Links, '"link.key":"link.val"', 1, true),
+           "Table Links Attributes: " .. r.Links)
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_table), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(TracesExtractorTest, AttributesStringsAreNotAlteredByNormalization) {
+  // Verify that arbitrary attributes (including uppercase hex or 16-byte strings)
+  // in SpanAttributes and ResourceAttributes are NOT modified by ID normalizers.
+  const char* script = R"(
+    return {
+      resourceSpans = {
+        {
+          resource = {
+            attributes = {
+              { key = "service.name", value = { stringValue = "attr-svc" } },
+              { key = "res.hex", value = { stringValue = "4BF92F3577B34DA6A3CE929D0E0E4736" } }
+            }
+          },
+          scopeSpans = {
+            {
+              spans = {
+                {
+                  traceId = "0123456789abcdef0123456789abcdef",
+                  spanId = "0123456789abcdef",
+                  startTimeUnixNano = 1000,
+                  endTimeUnixNano = 2000,
+                  attributes = {
+                    { key = "span.raw_id", value = { stringValue = "UPPERCASE_AND_HEX_4BF9" } },
+                    { key = "span.exact_16", value = { stringValue = "1234567812345678" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+
+  auto table_res = ProcessTracesTable(L_, table_idx, emit_idx_);
+  EXPECT_TRUE(table_res.success) << table_res.error;
+  EXPECT_EQ(table_res.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const char* verify_script = R"(
+    assert(#emitted == 1)
+    local r = emitted[1].log
+    assert(r.ResourceAttributes["res.hex"] == "4BF92F3577B34DA6A3CE929D0E0E4736",
+           "ResourceAttributes string must not be altered")
+    assert(r.SpanAttributes["span.raw_id"] == "UPPERCASE_AND_HEX_4BF9",
+           "SpanAttributes string must not be altered")
+    assert(r.SpanAttributes["span.exact_16"] == "1234567812345678",
+           "SpanAttributes string must not be altered")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace extractors
 }  // namespace vector_otel
