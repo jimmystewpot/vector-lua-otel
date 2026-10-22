@@ -88,7 +88,7 @@ grep -q '^IS_PRERELEASE=false$' "$META_STABLE" || fail "Expected IS_PRERELEASE=f
 
 # Check archive exclusions (.github, .superpowers, docs/superpowers, etc.)
 TAR_LIST="$(tar -tzf "$TARBALL_STABLE")"
-if echo "$TAR_LIST" | grep -qE '(^|/)(\.github|\.gitattributes|\.gitignore|\.clang-format|\.vscode|\.superpowers|docs/superpowers|sonar-project\.properties)(/|$)'; then
+if grep -qE '(^|/)(\.github|\.gitattributes|\.gitignore|\.clang-format|\.vscode|\.superpowers|docs/superpowers|sonar-project\.properties)(/|$)' <<< "$TAR_LIST"; then
   fail "Archive contains excluded development/CI paths"
 fi
 
@@ -98,7 +98,7 @@ for req in \
   "vector-lua-otel-0.1.0/src/module.cpp" \
   "vector-lua-otel-0.1.0/third_party/simdjson/src/simdjson.cpp" \
   "vector-lua-otel-0.1.0/third_party/googletest/CMakeLists.txt"; do
-  echo "$TAR_LIST" | grep -qx "$req" || fail "Archive missing required file: $req"
+  grep -Fxq "$req" <<< "$TAR_LIST" || fail "Archive missing required file: $req"
 done
 
 # Verify SHA256SUMS
@@ -179,6 +179,7 @@ grep -q "cosign sign-blob" "$RELEASE_WORKFLOW" || fail "release.yml missing cosi
 grep -q "cosign verify-blob" "$RELEASE_WORKFLOW" || fail "release.yml missing cosign verify-blob self-check step"
 grep -q "actions/attest-build-provenance" "$RELEASE_WORKFLOW" || fail "release.yml missing SLSA build provenance step"
 grep -q "gh release create" "$RELEASE_WORKFLOW" || fail "release.yml missing gh release create step"
+grep -q -- '--exclude "third_party/\.\*"' "$REPO_ROOT/.github/workflows/sonarcloud.yml" || fail "sonarcloud.yml missing third_party/.* gcovr exclusion"
 echo "   .github/workflows/release.yml structure passed."
 
 echo "ALL RELEASE PACKAGING TESTS PASSED"
