@@ -116,6 +116,7 @@ Every modification to this repository **must** strictly adhere to the following 
 ├── scripts/
 │   ├── vendor_deps.sh                  # Fetch and vendor a dependency; verify checksums
 │   ├── verify_offline_build.sh         # Test offline build in Docker container
+│   ├── test_limit_builds.sh            # Payload-limit (VECTOR_OTEL_MAX_PAYLOAD_BYTES) build matrix
 │   └── offline/Dockerfile              # Ubuntu 22.04 verification environment
 ├── .gitattributes                      # Binary/text attributes for vendored trees
 ├── include/vector_otel/
@@ -160,6 +161,7 @@ Every modification to this repository **must** strictly adhere to the following 
 │       ├── vector_test.yaml            # Vector OTLP-decoded pipeline config
 │       └── vector_native_test.yaml     # Vector native event + trace_to_log pipeline config
 ├── bench/                              # Benchmark harness & comparative scripts
+│   ├── extraction_latency.cpp          # Opt-in per-call latency driver (BUILD_EXTRACTION_BENCHMARKS)
 │   ├── compare.sh                      # Automated VRL vs Lua comparison runner
 │   ├── gen_fixtures.py                 # OTLP test fixture generator
 │   └── run.sh                          # Single-configuration benchmark harness
@@ -198,6 +200,14 @@ vector validate --no-environment tests/vector/vector_test.yaml tests/vector/vect
 *(If `vector` is installed or available in `/tmp/vector-bench/`)*
 **Expected**: `Validated` (exit code 0).
 
+### Step 3b: Worker Isolation, Limits and Thread Safety
+```bash
+./build/vector_otel_worker_tests                 # 8 concurrent states; also run at VECTOR_OTEL_EMIT_BATCH_SIZE=3
+bash scripts/test_limit_builds.sh                # payload-limit matrix (default/8 MiB/32 MiB + configure-only)
+cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON && cmake --build build-tsan --target vector_otel_worker_tests && ./build-tsan/vector_otel_worker_tests
+```
+**Expected**: all pass; TSan reports nothing. Also run `./build/vector_otel_fault_tests` (allocator fault injection, un-sanitised builds only) at the default batch size 1 and again from a `-DVECTOR_OTEL_EMIT_BATCH_SIZE=3` build, plus `./build-n3/vector_otel_tests --gtest_filter='*BatchMode*'`.
+
 ### Step 4: Formatting Verification
 ```bash
 find include src tests/cpp -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
@@ -218,7 +228,7 @@ cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
 cmake --build build-asan -j$(nproc)
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir build-asan --output-on-failure
 ```
-**Expected**: 100% tests passing (`vector_otel_tests`) with 0 ASAN/UBSAN errors.
+**Expected**: 100% tests passing (`vector_otel_tests`, `vector_otel_worker_tests`) with 0 ASAN/UBSAN errors. `vector_otel_fault_tests` is not built when `ENABLE_SANITIZERS`/`ENABLE_TSAN` is on (it replaces global `operator new`).
 *(Note: `tests/lua/run_tests.sh` is not run under ASAN because loading an ASAN-instrumented `vector_otel.so` or `vector_native.so` into an uninstrumented system `lua5.4` binary requires `LD_PRELOAD` of the ASAN runtime.)*
 
 ---

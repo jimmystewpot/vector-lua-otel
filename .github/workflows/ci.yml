@@ -65,6 +65,16 @@ jobs:
       - name: Run Lua integration test suite
         run: bash tests/lua/run_tests.sh
 
+      - name: Verify the shared modules do not link liblua
+        # Lua symbols must resolve from the host (Vector) executable at runtime.
+        run: |
+          for module in build/vector_otel.so build/vector_native.so; do
+            if readelf -d "$module" | grep -Ei 'NEEDED.*lua'; then
+              echo "::error::$module links liblua"
+              exit 1
+            fi
+          done
+
       - name: Validate rockspec
         run: luarocks lint vector-otel-scm-1.rockspec
 
@@ -103,8 +113,71 @@ jobs:
           cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON -GNinja
           cmake --build build-asan
 
-      - name: Run C++ test suite under ASAN/UBSAN
+      - name: Run C++ test suites under ASAN/UBSAN
+        # vector_otel_fault_tests (global operator new replacement) is not built when sanitizers
+        # are enabled; vector_otel_worker_tests is.
         run: UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir build-asan --output-on-failure
+
+  tsan:
+    name: ThreadSanitizer (worker isolation)
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            liblua5.4-dev \
+            lua5.4 \
+            cmake \
+            ninja-build \
+            gcc \
+            g++
+
+      - name: Configure and build the worker tests with TSAN
+        run: |
+          cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON -GNinja
+          cmake --build build-tsan --target vector_otel_worker_tests
+
+      - name: Run worker-isolation tests under TSAN
+        run: TSAN_OPTIONS=halt_on_error=1 ./build-tsan/vector_otel_worker_tests
+
+  limit-matrix:
+    name: Payload limit matrix (default / 8 MiB / 32 MiB)
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            liblua5.4-dev \
+            lua5.4 \
+            cmake \
+            ninja-build \
+            gcc \
+            g++
+
+      - name: Run the limit build matrix
+        # Offline: builds default, 8 MiB and 32 MiB and runs the focused tests against both real
+        # modules; 1 byte and 512 MiB are configure-only; invalid values must be rejected.
+        run: JOBS=4 bash scripts/test_limit_builds.sh
 
   batch-mode:
     name: Batch mode (VECTOR_OTEL_EMIT_BATCH_SIZE=3)
@@ -137,6 +210,11 @@ jobs:
 
       - name: Run batch-mode tests
         run: ./build-batch/vector_otel_tests --gtest_filter='*BatchMode*'
+
+      - name: Run the fault-injection and worker-isolation suites at batch size 3
+        run: |
+          ./build-batch/vector_otel_fault_tests
+          ./build-batch/vector_otel_worker_tests
 
   coverage:
     name: Code Coverage

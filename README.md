@@ -273,6 +273,39 @@ Pass these options to `cmake -B build`:
 | `-DCMAKE_BUILD_TYPE` | `Release` | Build mode (`Release`, `Debug`, `RelWithDebInfo`) |
 | `-DENABLE_NATIVE_TUNING=ON` | `OFF` | Enables `-march=native` compiler optimisations |
 | `-DVECTOR_OTEL_EMIT_BATCH_SIZE=N`| `1` | Compile-time emit batch size ($N \ge 1$) |
+| `-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=C`| `20971520` (20 MiB) | Maximum uncompressed JSON payload accepted by **both** modules, in bytes (`1..536870912`) — see [Extraction Limits](#extraction-limits-and-memory) |
+| `-DENABLE_SANITIZERS=ON` | `OFF` | ASan + UBSan (the fault-injection target is not built) |
+| `-DENABLE_TSAN=ON` | `OFF` | ThreadSanitizer (exclusive with `ENABLE_SANITIZERS`; run `vector_otel_worker_tests`) |
+| `-DBUILD_EXTRACTION_BENCHMARKS=ON` | `OFF` | Builds `vector_otel_latency_bench` (see `bench/README.md`) |
+
+### Extraction Limits and Memory
+
+Both modules enforce the same admission limits before anything is delivered:
+
+| Limit | Value | Error text (second return value) |
+|:---|:---|:---|
+| Uncompressed JSON payload | `C` bytes (build-time, default 20 MiB) | `payload exceeds <C>-byte uncompressed JSON limit` |
+| Records per call (log records / spans / metric data points; table and JSON input) | 2048 (fixed) | `event exceeds 2048-record limit` |
+
+- An over-limit call returns `(nil, <text above>, 0)` — nothing is emitted and no partial delivery happens.
+- `C` is a **rebuild-and-redeploy** setting: it is baked into both `vector_otel.so` and `vector_native.so`. Build both with the same value and deploy them together. Invalid values (`0`, above `536870912`, leading zeros, signs, units, non-digits) fail at configure time; nothing is clamped.
+  ```bash
+  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVECTOR_OTEL_MAX_PAYLOAD_BYTES=33554432   # 32 MiB
+  ```
+- The limit applies to the **uncompressed** JSON the module receives. Any source-side compression (for example the `opentelemetry` source or an HTTP/gRPC decoder) has its own, independent size cap that you must set separately; this module never sees compressed bytes.
+- **Table input is bounded by the 2048-record limit but not by `C`**: a decoded Lua table has no serialised size, so its memory is whatever Vector already allocated for it. The module never copies a table into a buffer larger than a single staged row.
+- **Memory.** Each Vector worker thread that parses JSON keeps one prepared parser workspace of roughly $(20/3) \times C$ bytes (input copy + simdjson parser capacity), allocated on first use and reused for the life of the thread:
+
+  | `C` | per workspace | 8 workers, one module | 8 workers, both modules (`vector_otel` + `vector_native`) |
+  |:---|:---|:---|:---|
+  | 20 MiB (default) | ~133.33 MiB | ~1.04 GiB | ~2.08 GiB |
+  | 32 MiB | ~213.33 MiB | ~1.67 GiB | ~3.33 GiB |
+
+  These figures cover the parser workspace only — **before** Lua heap, emitted events, Vector queues and sinks. There is no universal total-RSS guarantee; size the container with the per-worker figure for your `C` and measure under your real pipeline. Per-call extraction memory is otherwise bounded and independent of the number of records.
+- **Partial delivery is never replayed.** If `emit` raises, or a later row fails (allocation failure, malformed record), rows already passed to `emit` stay delivered and are counted in the third return value. Do not retry the whole event blindly — that duplicates the delivered prefix. Route the failure (DLQ / error metric) in your Vector pipeline; the module has no custom metric API and never writes to stdout/stderr on the hot path.
+- **Allocation guarantees (scoped).** Extraction itself does not raise into your pipeline: every Lua allocation failure and every callback error inside `process()` is converted to the `(nil, message, partial)` return, and the Lua state remains usable for the next call. This covers the module's own work; memory pressure elsewhere in the Vector process (for example the Lua garbage collector between calls) is outside it.
+
+To check a build matrix offline (default, 8 MiB, 32 MiB executed; 1 byte and 512 MiB configure-only; invalid values rejected): `bash scripts/test_limit_builds.sh`.
 
 ---
 
@@ -322,10 +355,10 @@ transforms:
         end
 
         -- Flatten batch and stream individual ClickHouse/Parquet-aligned rows
-        local count, err = otel_logs.process(payload, emit)
+        local count, err, partial = otel_logs.process(payload, emit)
         if not count then
           -- Raising an error triggers Vector's component_errors_total metric
-          error("OTLP logs extraction failed: " .. tostring(err))
+          error("OTLP logs extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:
@@ -395,9 +428,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.log or event
-        local count, err = native_logs.process(payload, emit)
+        local count, err, partial = native_logs.process(payload, emit)
         if not count then
-          error("Vector native logs extraction failed: " .. tostring(err))
+          error("Vector native logs extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:
@@ -414,9 +447,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.log or event
-        local count, err = native_traces.process(payload, emit)
+        local count, err, partial = native_traces.process(payload, emit)
         if not count then
-          error("Vector native traces extraction failed: " .. tostring(err))
+          error("Vector native traces extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:
@@ -433,9 +466,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.metric or event
-        local count, err = native_metrics.process(payload, emit)
+        local count, err, partial = native_metrics.process(payload, emit)
         if not count then
-          error("Vector native metrics extraction failed: " .. tostring(err))
+          error("Vector native metrics extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:
@@ -471,9 +504,9 @@ function process(event, emit)
         return
     end
 
-    local count, err = otel_logs.process(payload, emit)
+    local count, err, partial = otel_logs.process(payload, emit)
     if not count then
-        error("OTLP logs extraction failed: " .. tostring(err))
+        error("OTLP logs extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
     end
 end
 '''
@@ -569,7 +602,7 @@ native_metrics.process(payload: string | table, emit: function) -> (integer, nil
 
 - **Success**: Returns `(emitted_count, nil)`
   ```lua
-  local count, err = otel_logs.process(payload, emit)
+  local count, err, partial = otel_logs.process(payload, emit)
   -- count == 128, err == nil
   ```
 - **Failure**: Returns `(nil, error_str, emitted_count_before_failure)`
@@ -578,10 +611,21 @@ native_metrics.process(payload: string | table, emit: function) -> (integer, nil
   -- count == nil, err == "error message", partial_count == 0
   ```
 - **Partial counts**: `emitted_count` / `partial_count` is the number of rows whose `emit` call returned successfully. Rows already passed to `emit` cannot be recalled, so a failed call is **not atomic**: log `partial_count` if you need to know how much was delivered. With `VECTOR_OTEL_EMIT_BATCH_SIZE > 1`, rows still queued when a payload fails to parse are discarded and are not counted.
-- **Errors raised by `emit`**: `emit` is invoked under `lua_pcall`; an error in your callback stops the call and is returned as `(nil, message, partial_count)`.
+- **Errors raised by `emit`**: `emit` is invoked under `lua_pcall`; an error in your callback stops the call and is returned as `(nil, message, partial_count)`. A non-string error value is reported as `Lua operation failed`.
+- **Always inspect all three returns** (`count, err, partial`), as in the examples above, and only call `require()` / set `package.cpath` in the top-level `source:` block, never inside `process()`.
+- **Table-mode limitation**: table input is validated and read without raising, but unlike JSON input it cannot be dry-run-validated before the first row is emitted, so a malformed record deep in a table fails *after* earlier rows were delivered (see partial counts).
 - **Acknowledgements in Vector**: events that a Lua transform builds from Lua tables are new events. Per Vector's Lua transform implementation (not verified against every version), they do not carry the input event's source acknowledgement finalizers, so end-to-end acknowledgements do not follow emitted rows past the Lua transform. Treat this module as best-effort with respect to delivery guarantees.
 - **Empty / Sparse Payloads**: Payloads with empty records or missing scopes safely return `(0, nil)` without errors.
 - **FFI Safety**: C++ exceptions are caught at the FFI boundary and converted into error return values. No unhandled C++ exceptions or Lua panics escape.
+
+### Behavioural Notes
+
+- **Rows are built from a staged tape, not by mutating Lua tables during extraction**, so a failure part-way through a record never leaves a half-built table behind. Observable consequences relative to earlier releases:
+  - Exponential-histogram `Positive` / `positive` (and the negative-bucket twins) are now **separate tables with equal content** rather than one aliased table; treat them as read-only copies.
+  - Native metrics in table mode normalise `exemplars` into fresh tables instead of passing the input table through by reference.
+  - The `Unsupported non-OTLP metric variant` error keeps its exact text.
+- **Unchanged JSON/table asymmetries** (preserved on purpose): an absent `traceState` (traces) or `EventName` (logs) is `""` in JSON mode and omitted in table mode; OTLP traces have no `ScopeAttributes` column.
+- **Throughput.** Failure-safe extraction costs measurable per-call and per-row time compared with the unprotected implementation it replaced (about +3% to +25% p50 at 64–2048 records with a no-op callback, more at one record); see `bench/README.md` for the method and numbers.
 
 ### Emitted Tables Are Shared
 
@@ -698,13 +742,22 @@ The project enforces strict automated verification protocols across multiple tes
    ```
    Tests module exports, error contracts, ClickHouse schemas against golden fixtures, and executes a **50,000-event stress loop** asserting $0.00\text{ KB}$ memory delta across runs.
 
-3. **End-to-End Vector Pipeline Validation**:
+3. **Worker isolation, sanitizers and limit matrix**:
+   ```bash
+   ./build/vector_otel_worker_tests              # 8 concurrent Lua states, mixed signals/modules/modes
+   bash scripts/test_limit_builds.sh             # default / 8 MiB / 32 MiB builds + configure-only 1 B / 512 MiB
+   cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON && cmake --build build-asan
+   cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON && cmake --build build-tsan
+   ```
+   `vector_otel_fault_tests` (allocator fault injection; replaces global `operator new`) runs only in the un-sanitised build.
+
+4. **End-to-End Vector Pipeline Validation**:
    ```bash
    vector validate --no-environment tests/vector/vector_test.yaml tests/vector/vector_native_test.yaml
    ```
    Validates syntax and schema compatibility against official Vector release binaries for both OTLP-decoded (`vector_otel.so`) and Vector native (`vector_native.so`) pipelines.
 
-4. **Comparative Benchmark Matrix** (`bench/compare.sh`):
+5. **Comparative Benchmark Matrix** (`bench/compare.sh`) and per-call latency (`vector_otel_latency_bench`):
    ```bash
    bash bench/compare.sh
    ```

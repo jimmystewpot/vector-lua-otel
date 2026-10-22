@@ -8,6 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(ENABLE_NATIVE_TUNING "Enable -march=native" OFF)
 option(ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
 option(ENABLE_SANITIZERS "Enable ASAN and UBSAN instrumentation" OFF)
+option(BUILD_EXTRACTION_BENCHMARKS "Build the opt-in extraction latency benchmark (vector_otel_latency_bench)" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer instrumentation (exclusive with ENABLE_SANITIZERS)" OFF)
 set(VECTOR_OTEL_EMIT_BATCH_SIZE 1 CACHE STRING "Compile-time emit batch size (default: 1)")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -151,35 +152,37 @@ add_test(NAME payload_limits
           -DTEST_BINARY_ROOT=${CMAKE_BINARY_DIR}/payload_limit_configure "-DPASS_THROUGH=${_pt}"
           -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_payload_limits.cmake)
 
-# Fault-injection tests. This executable REPLACES the global operator new/delete (see
-# tests/support/fault_new.cpp) so it must never be combined with sanitizers' allocator
-# interception: run it unsanitised (see the plan's verification notes).
-add_executable(vector_otel_fault_tests
-  tests/cpp/test_main.cpp
-  tests/cpp/test_fault_harness.cpp
-  tests/cpp/test_lua_fault_harness.cpp
-  tests/cpp/test_contract_fixtures.cpp
-  tests/cpp/test_parser_workspace.cpp
-  tests/cpp/test_operation_context.cpp
-  tests/cpp/test_admission.cpp
-  tests/cpp/test_staged_row.cpp
-  tests/cpp/test_table_staging.cpp
-  tests/cpp/test_failure_safety.cpp
-  src/module.cpp
-  src/native_module.cpp
-  tests/support/fault_new.cpp
-  tests/support/fault_allocator.cpp
-  tests/support/contract_fixtures.cpp
-  tests/support/legacy_reference.cpp
-)
-target_include_directories(vector_otel_fault_tests PRIVATE tests/support)
-target_link_libraries(vector_otel_fault_tests PRIVATE
-  vector_otel_core
-  ${LUA_LIBRARIES}
-  GTest::gtest
-)
-target_compile_definitions(vector_otel_fault_tests PRIVATE VECTOR_OTEL_UNCHECKED_READ_KEYS)
-add_test(NAME vector_otel_fault_tests COMMAND vector_otel_fault_tests)
+if(NOT ENABLE_SANITIZERS AND NOT ENABLE_TSAN)
+  # Fault-injection tests. This executable REPLACES the global operator new/delete (see
+  # tests/support/fault_new.cpp) so it must never be combined with sanitizers' allocator
+  # interception, so it is not built at all when ENABLE_SANITIZERS / ENABLE_TSAN is on.
+  add_executable(vector_otel_fault_tests
+    tests/cpp/test_main.cpp
+    tests/cpp/test_fault_harness.cpp
+    tests/cpp/test_lua_fault_harness.cpp
+    tests/cpp/test_contract_fixtures.cpp
+    tests/cpp/test_parser_workspace.cpp
+    tests/cpp/test_operation_context.cpp
+    tests/cpp/test_admission.cpp
+    tests/cpp/test_staged_row.cpp
+    tests/cpp/test_table_staging.cpp
+    tests/cpp/test_failure_safety.cpp
+    src/module.cpp
+    src/native_module.cpp
+    tests/support/fault_new.cpp
+    tests/support/fault_allocator.cpp
+    tests/support/contract_fixtures.cpp
+    tests/support/legacy_reference.cpp
+  )
+  target_include_directories(vector_otel_fault_tests PRIVATE tests/support)
+  target_link_libraries(vector_otel_fault_tests PRIVATE
+    vector_otel_core
+    ${LUA_LIBRARIES}
+    GTest::gtest
+  )
+  target_compile_definitions(vector_otel_fault_tests PRIVATE VECTOR_OTEL_UNCHECKED_READ_KEYS)
+  add_test(NAME vector_otel_fault_tests COMMAND vector_otel_fault_tests)
+endif()
 
 # Worker-isolation tests: one Lua state per thread, no replaced global operator new, so this
 # target is also the one built and run under ThreadSanitizer (-DENABLE_TSAN=ON).
@@ -200,3 +203,13 @@ target_link_libraries(vector_otel_worker_tests PRIVATE
 )
 target_compile_definitions(vector_otel_worker_tests PRIVATE VECTOR_OTEL_UNCHECKED_READ_KEYS)
 add_test(NAME vector_otel_worker_tests COMMAND vector_otel_worker_tests)
+
+if(BUILD_EXTRACTION_BENCHMARKS)
+  add_executable(vector_otel_latency_bench
+    bench/extraction_latency.cpp
+    src/module.cpp
+    src/native_module.cpp
+  )
+  target_include_directories(vector_otel_latency_bench PRIVATE tests/support)
+  target_link_libraries(vector_otel_latency_bench PRIVATE vector_otel_core ${LUA_LIBRARIES})
+endif()
