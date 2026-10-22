@@ -48,7 +48,7 @@ print(">> Testing module loading and exports...")
 
 local vo = require("vector_otel")
 assert(type(vo) == "table", "vector_otel must export a table")
-assert(vo._VERSION == "0.1.0", "Expected _VERSION 0.1.0, got: " .. tostring(vo._VERSION))
+assert(vo._VERSION == "0.2.0", "Expected _VERSION 0.2.0, got: " .. tostring(vo._VERSION))
 
 -- Submodule tables on main module
 assert(type(vo.logs) == "table", "vo.logs must be a table")

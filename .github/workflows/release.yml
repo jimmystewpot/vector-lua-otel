@@ -90,6 +90,10 @@ jobs:
             echo "::error::vector_otel.so incorrectly links liblua"
             exit 1
           fi
+          if readelf -d "$SRC_DIR/build/vector_native.so" | grep -q liblua; then
+            echo "::error::vector_native.so incorrectly links liblua"
+            exit 1
+          fi
 
       - name: Upload packaged release assets
         uses: actions/upload-artifact@v4
@@ -162,12 +166,13 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ needs.verify-and-package.outputs.tag }}
           IS_PRERELEASE: ${{ needs.verify-and-package.outputs.is_prerelease }}
           TARBALL_NAME: ${{ needs.verify-and-package.outputs.tarball_name }}
           ROCKSPEC_NAME: ${{ needs.verify-and-package.outputs.rockspec_name }}
         run: |
-          RELEASE_FLAGS=(--verify-tag --title "vector-lua-otel ${TAG_NAME}" --generate-notes)
+          RELEASE_FLAGS=(--repo "${GH_REPO}" --verify-tag --title "vector-lua-otel ${TAG_NAME}" --generate-notes)
           if [[ "$IS_PRERELEASE" == "true" ]]; then
             RELEASE_FLAGS+=(--prerelease)
           else

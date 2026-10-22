@@ -70,7 +70,7 @@ int luaopen_vector_native_metrics(lua_State* L) {
 
 int luaopen_vector_native(lua_State* L) {
   lua_newtable(L);
-  lua_pushstring(L, "0.1.0");
+  lua_pushstring(L, "0.2.0");
   lua_setfield(L, -2, "_VERSION");
 
   luaopen_vector_native_logs(L);

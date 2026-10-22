@@ -54,7 +54,7 @@ TEST_F(ModuleExportsTest, ModuleStructureAndVersion) {
   // Check _VERSION
   lua_getfield(L_, -1, "_VERSION");
   EXPECT_TRUE(lua_isstring(L_, -1));
-  EXPECT_STREQ(lua_tostring(L_, -1), "0.1.0");
+  EXPECT_STREQ(lua_tostring(L_, -1), "0.2.0");
   lua_pop(L_, 1);
 
   // Check logs submodule
@@ -362,7 +362,7 @@ TEST_F(ModuleExportsTest, NativeModuleStructureAndVersion) {
   // Check _VERSION
   lua_getfield(L_, -1, "_VERSION");
   EXPECT_TRUE(lua_isstring(L_, -1));
-  EXPECT_STREQ(lua_tostring(L_, -1), "0.1.0");
+  EXPECT_STREQ(lua_tostring(L_, -1), "0.2.0");
   lua_pop(L_, 1);
 
   // Check logs submodule
