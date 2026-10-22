@@ -139,8 +139,19 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer,
 void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, int depth = 0);
 
 // Serialises attributes table (OTLP array-of-KeyValue or direct key-value map)
+// entries to FastJsonWriter without enclosing StartObject/EndObject or writer.Reset().
+void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                                     std::string_view* out_service_name = nullptr);
+
+// Serialises attributes table (OTLP array-of-KeyValue or direct key-value map)
 // directly to FastJsonWriter as a flattened JSON object without calling writer.Reset().
-void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer);
+void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                              std::string_view* out_service_name = nullptr);
+
+// Serialises metric exemplars array to FastJsonWriter in ClickHouse JSON format
+// [{"FilteredAttributes":{...},"TimeUnix":"...","Value":...,"SpanId":"...","TraceId":"..."}]
+// without calling writer.Reset().
+void SerializeTableExemplarsToJson(lua_State* L, int exemplars_idx, FastJsonWriter& writer);
 
 // Serialises span events array to FastJsonWriter in ClickHouse JSON format
 // [{"Timestamp":"...","Name":"...","Attributes":{...}}, ...] without calling writer.Reset().
