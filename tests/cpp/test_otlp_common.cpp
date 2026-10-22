@@ -1610,5 +1610,55 @@ TEST_F(OtlpCommonTest, PushAnyValuePlainObjectWithLaterStringValueKey) {
   lua_pop(L_, 1);
 }
 
+TEST_F(OtlpCommonTest, ParseSeverityNumberAndTryParseInt64Coverage) {
+  auto json = R"({
+    "sev_err": "SEVERITY_NUMBER_ERROR",
+    "sev_unspec": "SEVERITY_NUMBER_UNSPECIFIED",
+    "sev_plus": "+13",
+    "sev_plus_minus": "+-13",
+    "sev_ws": "   ",
+    "sev_int": 9,
+    "sev_bool": true,
+    "i_valid": -42,
+    "i_u64": 18446744073709551615,
+    "i_dbl": 123.0,
+    "i_str": "9007199254740993",
+    "i_bad": "not_an_int"
+  })"_padded;
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  auto v_err = obj["sev_err"].value();
+  EXPECT_EQ(ParseSeverityNumber(v_err), 17);
+  auto v_unspec = obj["sev_unspec"].value();
+  EXPECT_EQ(ParseSeverityNumber(v_unspec), 0);
+  auto v_plus = obj["sev_plus"].value();
+  EXPECT_EQ(ParseSeverityNumber(v_plus), 13);
+  auto v_pm = obj["sev_plus_minus"].value();
+  EXPECT_EQ(ParseSeverityNumber(v_pm), 0);
+  auto v_ws = obj["sev_ws"].value();
+  EXPECT_EQ(ParseSeverityNumber(v_ws), 0);
+  auto v_int = obj["sev_int"].value();
+  EXPECT_EQ(ParseSeverityNumber(v_int), 9);
+  auto v_bool = obj["sev_bool"].value();
+  EXPECT_EQ(ParseSeverityNumber(v_bool), 0);
+
+  int64_t out = 0;
+  auto vi_valid = obj["i_valid"].value();
+  EXPECT_TRUE(TryParseInt64(vi_valid, out));
+  EXPECT_EQ(out, -42);
+  auto vi_u64 = obj["i_u64"].value();
+  EXPECT_TRUE(TryParseInt64(vi_u64, out));
+  EXPECT_EQ(out, INT64_MAX);
+  auto vi_dbl = obj["i_dbl"].value();
+  EXPECT_TRUE(TryParseInt64(vi_dbl, out));
+  EXPECT_EQ(out, 123);
+  auto vi_str = obj["i_str"].value();
+  EXPECT_TRUE(TryParseInt64(vi_str, out));
+  EXPECT_EQ(out, 9007199254740993LL);
+  auto vi_bad = obj["i_bad"].value();
+  EXPECT_FALSE(TryParseInt64(vi_bad, out));
+}
+
 }  // namespace
 }  // namespace vector_otel::core

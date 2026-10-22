@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -951,7 +952,9 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer,
     ResetScratchString(tls_attr_service_scratch);
     ReserveScratchString(tls_attr_service_scratch, 128);
   }
-  (void)lua_checkstack(L, 10);
+  if (!lua_checkstack(L, 10)) {
+    throw std::runtime_error("Lua stack overflow in PushTableAttributes");
+  }
   int abs_idx = lua_absindex(L, attrs_idx);
   lua_newtable(L);
   int out_table_idx = lua_absindex(L, -1);
@@ -1066,7 +1069,9 @@ static void CopyTableFieldToTable(lua_State* L, int src_idx, const char* name1, 
 }
 
 void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
-  (void)lua_checkstack(L, 10);
+  if (!lua_checkstack(L, 10)) {
+    throw std::runtime_error("Lua stack overflow in WriteTableAttributesJson");
+  }
   int abs_idx = lua_absindex(L, attrs_idx);
   writer.StartObject();
 
@@ -1135,7 +1140,9 @@ void WriteTableAttributesJson(lua_State* L, int attrs_idx, FastJsonWriter& write
 }
 
 void SerializeTableSpanEventsToJson(lua_State* L, int events_idx, FastJsonWriter& writer) {
-  (void)lua_checkstack(L, 10);
+  if (!lua_checkstack(L, 10)) {
+    throw std::runtime_error("Lua stack overflow in SerializeTableSpanEventsToJson");
+  }
   int abs_idx = lua_absindex(L, events_idx);
   writer.StartArray();
 
@@ -1193,7 +1200,9 @@ void SerializeTableSpanEventsToJson(lua_State* L, int events_idx, FastJsonWriter
 }
 
 void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& writer) {
-  (void)lua_checkstack(L, 10);
+  if (!lua_checkstack(L, 10)) {
+    throw std::runtime_error("Lua stack overflow in SerializeTableSpanLinksToJson");
+  }
   int abs_idx = lua_absindex(L, links_idx);
   writer.StartArray();
 
@@ -1262,7 +1271,9 @@ void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& 
 }
 
 void PushTableExemplars(lua_State* L, int exemplars_idx, FastJsonWriter& writer) {
-  (void)lua_checkstack(L, 10);
+  if (!lua_checkstack(L, 10)) {
+    throw std::runtime_error("Lua stack overflow in PushTableExemplars");
+  }
   int abs_idx = lua_absindex(L, exemplars_idx);
   lua_newtable(L);
   int out_arr_idx = lua_absindex(L, -1);
@@ -1381,7 +1392,9 @@ void PushTableExemplars(lua_State* L, int exemplars_idx, FastJsonWriter& writer)
 }
 
 void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
-  (void)lua_checkstack(L, 10);
+  if (!lua_checkstack(L, 10)) {
+    throw std::runtime_error("Lua stack overflow in PushTableSpanEvents");
+  }
   int abs_idx = lua_absindex(L, events_idx);
   lua_newtable(L);
   int out_arr_idx = lua_absindex(L, -1);
@@ -1423,7 +1436,9 @@ void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
 }
 
 void PushTableSpanLinks(lua_State* L, int links_idx, FastJsonWriter& writer) {
-  (void)lua_checkstack(L, 10);
+  if (!lua_checkstack(L, 10)) {
+    throw std::runtime_error("Lua stack overflow in PushTableSpanLinks");
+  }
   int abs_idx = lua_absindex(L, links_idx);
   lua_newtable(L);
   int out_arr_idx = lua_absindex(L, -1);

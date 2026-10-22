@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -128,8 +129,11 @@ int64_t ReadTableAggregationTemporality(lua_State* L, int type_obj_idx) {
 }
 
 int ParseJsonBucketCountsTable(lua_State* L, simdjson::ondemand::value& fv) {
-  if (L == nullptr || !lua_checkstack(L, 8)) {
+  if (L == nullptr) {
     return LUA_NOREF;
+  }
+  if (!lua_checkstack(L, 8)) {
+    throw std::runtime_error("Lua stack overflow in ParseJsonBucketCountsTable");
   }
   lua_createtable(L, 16, 0);
   auto arr_res = fv.get_array();
@@ -147,8 +151,11 @@ int ParseJsonBucketCountsTable(lua_State* L, simdjson::ondemand::value& fv) {
 }
 
 int ParseJsonExplicitBoundsTable(lua_State* L, simdjson::ondemand::value& fv) {
-  if (L == nullptr || !lua_checkstack(L, 8)) {
+  if (L == nullptr) {
     return LUA_NOREF;
+  }
+  if (!lua_checkstack(L, 8)) {
+    throw std::runtime_error("Lua stack overflow in ParseJsonExplicitBoundsTable");
   }
   lua_createtable(L, 16, 0);
   auto arr_res = fv.get_array();
@@ -166,8 +173,11 @@ int ParseJsonExplicitBoundsTable(lua_State* L, simdjson::ondemand::value& fv) {
 }
 
 int ParseJsonQuantileValuesTable(lua_State* L, simdjson::ondemand::value& fv) {
-  if (L == nullptr || !lua_checkstack(L, 8)) {
+  if (L == nullptr) {
     return LUA_NOREF;
+  }
+  if (!lua_checkstack(L, 8)) {
+    throw std::runtime_error("Lua stack overflow in ParseJsonQuantileValuesTable");
   }
   lua_createtable(L, 8, 0);
   auto q_arr_res = fv.get_array();
@@ -298,8 +308,11 @@ bool ReadTableGenericMetricValue(lua_State* L, int obj_idx, bool& is_int, int64_
 
 int ParseExemplars(lua_State* L, simdjson::ondemand::value& val,
                    core::FastJsonWriter& json_writer) {
-  if (L == nullptr || !lua_checkstack(L, 12)) {
+  if (L == nullptr) {
     return LUA_NOREF;
+  }
+  if (!lua_checkstack(L, 12)) {
+    throw std::runtime_error("Lua stack overflow in ParseExemplars");
   }
   auto arr_res = val.get_array();
   if (arr_res.error() != simdjson::SUCCESS) {
@@ -444,38 +457,24 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
 
   core::LuaEmitter emitter(L, emit_idx);
 
-  auto check_structural_error = [&](simdjson::error_code err, ExtractionResult& out_err) -> bool {
-    if (err != simdjson::SUCCESS && err != simdjson::NO_SUCH_FIELD) {
-      out_err = ExtractionResult{false,
-                                 std::string("JSON parsing error: ") + simdjson::error_message(err),
-                                 emitter.EmittedCount()};
-      return true;
-    }
-    return false;
-  };
-
   try {
-    ExtractionResult struct_err{};
     auto res_metrics_res = root_obj.find_field_unordered("resourceMetrics");
     if (res_metrics_res.error() == simdjson::NO_SUCH_FIELD) {
       res_metrics_res = root_obj.find_field_unordered("resource_metrics");
     }
-    if (check_structural_error(res_metrics_res.error(), struct_err)) {
-      return struct_err;
+    if (res_metrics_res.error() == simdjson::NO_SUCH_FIELD) {
+      return ExtractionResult{true, "", 0};
     }
     if (res_metrics_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{true, "", 0};
+      return ExtractionResult{
+          false,
+          std::string("JSON parsing error: ") + simdjson::error_message(res_metrics_res.error()),
+          emitter.EmittedCount()};
     }
 
     auto res_metrics_val = res_metrics_res.value();
     auto res_metrics_arr_res = res_metrics_val.get_array();
     if (res_metrics_arr_res.error() != simdjson::SUCCESS) {
-      if (res_metrics_arr_res.error() != simdjson::INCORRECT_TYPE) {
-        return ExtractionResult{false,
-                                std::string("JSON parsing error: ") +
-                                    simdjson::error_message(res_metrics_arr_res.error()),
-                                emitter.EmittedCount()};
-      }
       return ExtractionResult{true, "", 0};
     }
 
@@ -492,12 +491,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
       }
       auto res_metric_obj_res = res_metric_elem.value().get_object();
       if (res_metric_obj_res.error() != simdjson::SUCCESS) {
-        if (res_metric_obj_res.error() != simdjson::INCORRECT_TYPE) {
-          return ExtractionResult{false,
-                                  std::string("JSON parsing error: ") +
-                                      simdjson::error_message(res_metric_obj_res.error()),
-                                  emitter.EmittedCount()};
-        }
         continue;
       }
       auto res_metric_obj = res_metric_obj_res.value();
@@ -506,9 +499,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
       core::ScopedLuaRef res_attrs_ref(L, LUA_NOREF);
 
       auto resource_field_res = res_metric_obj.find_field_unordered("resource");
-      if (check_structural_error(resource_field_res.error(), struct_err)) {
-        return struct_err;
-      }
       if (resource_field_res.error() == simdjson::SUCCESS) {
         auto res_val = resource_field_res.value();
         auto res_obj_res = res_val.get_object();
@@ -516,9 +506,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           auto res_obj = res_obj_res.value();
           if (L != nullptr) {
             auto attrs_res = res_obj.find_field_unordered("attributes");
-            if (check_structural_error(attrs_res.error(), struct_err)) {
-              return struct_err;
-            }
             if (attrs_res.error() == simdjson::SUCCESS) {
               auto attrs_val = attrs_res.value();
               core::PushAttributesTable(L, attrs_val, json_writer, &service_name);
@@ -539,21 +526,12 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
       if (scope_metrics_res.error() == simdjson::NO_SUCH_FIELD) {
         scope_metrics_res = res_metric_obj.find_field_unordered("scope_metrics");
       }
-      if (check_structural_error(scope_metrics_res.error(), struct_err)) {
-        return struct_err;
-      }
       if (scope_metrics_res.error() != simdjson::SUCCESS) {
         continue;
       }
 
       auto scope_metrics_arr_res = scope_metrics_res.value().get_array();
       if (scope_metrics_arr_res.error() != simdjson::SUCCESS) {
-        if (scope_metrics_arr_res.error() != simdjson::INCORRECT_TYPE) {
-          return ExtractionResult{false,
-                                  std::string("JSON parsing error: ") +
-                                      simdjson::error_message(scope_metrics_arr_res.error()),
-                                  emitter.EmittedCount()};
-        }
         continue;
       }
 
@@ -566,12 +544,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
         }
         auto scope_metric_obj_res = scope_metric_elem.value().get_object();
         if (scope_metric_obj_res.error() != simdjson::SUCCESS) {
-          if (scope_metric_obj_res.error() != simdjson::INCORRECT_TYPE) {
-            return ExtractionResult{false,
-                                    std::string("JSON parsing error: ") +
-                                        simdjson::error_message(scope_metric_obj_res.error()),
-                                    emitter.EmittedCount()};
-          }
           continue;
         }
         auto scope_metric_obj = scope_metric_obj_res.value();
@@ -581,9 +553,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
         core::ScopedLuaRef scope_attrs_ref(L, LUA_NOREF);
 
         auto scope_field_res = scope_metric_obj.find_field_unordered("scope");
-        if (check_structural_error(scope_field_res.error(), struct_err)) {
-          return struct_err;
-        }
         if (scope_field_res.error() == simdjson::SUCCESS) {
           auto scope_val = scope_field_res.value();
           auto scope_obj_res = scope_val.get_object();
@@ -592,9 +561,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
             scope_name = core::ExtractStringField(scope_obj, "name");
             scope_version = core::ExtractStringField(scope_obj, "version");
             auto attrs_res = scope_obj.find_field_unordered("attributes");
-            if (check_structural_error(attrs_res.error(), struct_err)) {
-              return struct_err;
-            }
             if (attrs_res.error() == simdjson::SUCCESS && L != nullptr) {
               auto attrs_val = attrs_res.value();
               core::PushAttributesTable(L, attrs_val, json_writer);
@@ -609,21 +575,12 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
         }
 
         auto metrics_res = scope_metric_obj.find_field_unordered("metrics");
-        if (check_structural_error(metrics_res.error(), struct_err)) {
-          return struct_err;
-        }
         if (metrics_res.error() != simdjson::SUCCESS) {
           continue;
         }
 
         auto metrics_arr_res = metrics_res.value().get_array();
         if (metrics_arr_res.error() != simdjson::SUCCESS) {
-          if (metrics_arr_res.error() != simdjson::INCORRECT_TYPE) {
-            return ExtractionResult{false,
-                                    std::string("JSON parsing error: ") +
-                                        simdjson::error_message(metrics_arr_res.error()),
-                                    emitter.EmittedCount()};
-          }
           continue;
         }
 
@@ -636,12 +593,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           }
           auto metric_obj_res = metric_elem.value().get_object();
           if (metric_obj_res.error() != simdjson::SUCCESS) {
-            if (metric_obj_res.error() != simdjson::INCORRECT_TYPE) {
-              return ExtractionResult{false,
-                                      std::string("JSON parsing error: ") +
-                                          simdjson::error_message(metric_obj_res.error()),
-                                      emitter.EmittedCount()};
-            }
             continue;
           }
           auto metric_obj = metric_obj_res.value();
@@ -713,13 +664,8 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
               }
               if (rank < best_type_rank) {
                 auto mt_res = mfv.type();
-                if (mt_res.error() != simdjson::SUCCESS) {
-                  return ExtractionResult{
-                      false,
-                      std::string("JSON parsing error: ") + simdjson::error_message(mt_res.error()),
-                      emitter.EmittedCount()};
-                }
-                if (mt_res.value() == simdjson::ondemand::json_type::object) {
+                if (mt_res.error() == simdjson::SUCCESS &&
+                    mt_res.value() == simdjson::ondemand::json_type::object) {
                   best_type_rank = rank;
                   matched_type_key = mk;
                   metric_type = candidate_type;
@@ -733,20 +679,11 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           }
 
           auto type_field_res = metric_obj.find_field_unordered(matched_type_key);
-          if (check_structural_error(type_field_res.error(), struct_err)) {
-            return struct_err;
-          }
           if (type_field_res.error() != simdjson::SUCCESS) {
             continue;
           }
           auto type_obj_res = type_field_res.value().get_object();
           if (type_obj_res.error() != simdjson::SUCCESS) {
-            if (type_obj_res.error() != simdjson::INCORRECT_TYPE) {
-              return ExtractionResult{false,
-                                      std::string("JSON parsing error: ") +
-                                          simdjson::error_message(type_obj_res.error()),
-                                      emitter.EmittedCount()};
-            }
             continue;
           }
           auto type_obj = type_obj_res.value();
@@ -781,19 +718,10 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
           if (dps_res.error() == simdjson::NO_SUCH_FIELD) {
             dps_res = type_obj.find_field_unordered("data_points");
           }
-          if (check_structural_error(dps_res.error(), struct_err)) {
-            return struct_err;
-          }
           if (dps_res.error() != simdjson::SUCCESS) continue;
 
           auto dps_arr_res = dps_res.value().get_array();
           if (dps_arr_res.error() != simdjson::SUCCESS) {
-            if (dps_arr_res.error() != simdjson::INCORRECT_TYPE) {
-              return ExtractionResult{false,
-                                      std::string("JSON parsing error: ") +
-                                          simdjson::error_message(dps_arr_res.error()),
-                                      emitter.EmittedCount()};
-            }
             continue;
           }
 
@@ -806,12 +734,6 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
             }
             auto dp_obj_res = dp_elem.value().get_object();
             if (dp_obj_res.error() != simdjson::SUCCESS) {
-              if (dp_obj_res.error() != simdjson::INCORRECT_TYPE) {
-                return ExtractionResult{false,
-                                        std::string("JSON parsing error: ") +
-                                            simdjson::error_message(dp_obj_res.error()),
-                                        emitter.EmittedCount()};
-              }
               continue;
             }
             auto dp_obj = dp_obj_res.value();
@@ -1122,6 +1044,461 @@ ExtractionResult ProcessMetrics(lua_State* L, std::string_view raw_json, int emi
   }
 }
 
+namespace {
+
+ExtractionResult ProcessMetricsTableImpl(lua_State* L, int abs_idx, core::LuaEmitter& emitter,
+                                         core::FastJsonWriter& json_writer,
+                                         std::string& tls_scope_name_scratch,
+                                         std::string& tls_scope_ver_scratch,
+                                         std::string& tls_metric_name_scratch,
+                                         std::string& tls_metric_desc_scratch,
+                                         std::string& tls_metric_unit_scratch) {
+  int rm_arr_idx = 0;
+
+  if (core::GetTableField(L, abs_idx, "resourceMetrics", "resource_metrics")) {
+    rm_arr_idx = lua_absindex(L, -1);
+  } else if (core::GetTableField(L, abs_idx, "metric")) {
+    if (lua_istable(L, -1) && core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
+      lua_remove(L, -2);
+      rm_arr_idx = lua_absindex(L, -1);
+    } else {
+      lua_pop(L, 1);
+    }
+  } else if (core::GetTableField(L, abs_idx, "log")) {
+    if (lua_istable(L, -1) && core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
+      lua_remove(L, -2);
+      rm_arr_idx = lua_absindex(L, -1);
+    } else {
+      lua_pop(L, 1);
+    }
+  }
+
+  if (rm_arr_idx == 0) {
+    rm_arr_idx = abs_idx;
+  }
+
+  if (!lua_istable(L, rm_arr_idx)) {
+    return ExtractionResult{true, "", 0};
+  }
+
+  std::array<char, 32> processed_at_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf.data());
+  std::string_view processed_at(processed_at_buf.data(), 30);
+
+  lua_Integer rm_len = static_cast<lua_Integer>(lua_rawlen(L, rm_arr_idx));
+  for (lua_Integer i = 1; i <= rm_len; ++i) {
+    lua_rawgeti(L, rm_arr_idx, i);
+    if (!lua_istable(L, -1)) {
+      lua_pop(L, 1);
+      continue;
+    }
+    int rm_obj_idx = lua_absindex(L, -1);
+
+    std::string_view service_name = "unknown_service";
+    core::ScopedLuaRef res_attrs_ref(L, LUA_NOREF);
+
+    if (core::GetTableField(L, rm_obj_idx, "resource")) {
+      int res_idx = lua_absindex(L, -1);
+      if (core::GetTableField(L, res_idx, "attributes")) {
+        core::PushTableAttributes(L, -1, json_writer, &service_name);
+        res_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);
+    }
+    if (!res_attrs_ref.valid()) {
+      lua_newtable(L);
+      res_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+    }
+
+    if (!core::GetTableField(L, rm_obj_idx, "scopeMetrics", "scope_metrics")) {
+      lua_pop(L, 1);
+      continue;
+    }
+    int sm_arr_idx = lua_absindex(L, -1);
+    if (!lua_istable(L, sm_arr_idx)) {
+      lua_pop(L, 2);
+      continue;
+    }
+
+    lua_Integer sm_len = static_cast<lua_Integer>(lua_rawlen(L, sm_arr_idx));
+    for (lua_Integer j = 1; j <= sm_len; ++j) {
+      lua_rawgeti(L, sm_arr_idx, j);
+      if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        continue;
+      }
+      int sm_obj_idx = lua_absindex(L, -1);
+
+      std::string_view scope_name;
+      std::string_view scope_version;
+      core::ScopedLuaRef scope_attrs_ref(L, LUA_NOREF);
+
+      if (core::GetTableField(L, sm_obj_idx, "scope")) {
+        int s_idx = lua_absindex(L, -1);
+        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
+        scope_version =
+            core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
+        if (core::GetTableField(L, s_idx, "attributes")) {
+          core::PushTableAttributes(L, -1, json_writer);
+          scope_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+          lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+      }
+      if (!scope_attrs_ref.valid()) {
+        lua_newtable(L);
+        scope_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
+      }
+
+      if (!core::GetTableField(L, sm_obj_idx, "metrics")) {
+        lua_pop(L, 1);
+        continue;
+      }
+      int metrics_arr_idx = lua_absindex(L, -1);
+      if (!lua_istable(L, metrics_arr_idx)) {
+        lua_pop(L, 2);
+        continue;
+      }
+
+      lua_Integer m_len = static_cast<lua_Integer>(lua_rawlen(L, metrics_arr_idx));
+      for (lua_Integer k = 1; k <= m_len; ++k) {
+        lua_rawgeti(L, metrics_arr_idx, k);
+        if (!lua_istable(L, -1)) {
+          lua_pop(L, 1);
+          continue;
+        }
+        int metric_obj_idx = lua_absindex(L, -1);
+
+        std::string_view metric_type;
+        int type_obj_idx = 0;
+
+        if (TryGetTableSubtable(L, metric_obj_idx, "gauge")) {
+          metric_type = "gauge";
+          type_obj_idx = lua_absindex(L, -1);
+        } else if (TryGetTableSubtable(L, metric_obj_idx, "sum")) {
+          metric_type = "sum";
+          type_obj_idx = lua_absindex(L, -1);
+        } else if (TryGetTableSubtable(L, metric_obj_idx, "histogram")) {
+          metric_type = "histogram";
+          type_obj_idx = lua_absindex(L, -1);
+        } else if (TryGetTableSubtable(L, metric_obj_idx, "exponentialHistogram",
+                                       "exponential_histogram")) {
+          metric_type = "exponential_histogram";
+          type_obj_idx = lua_absindex(L, -1);
+        } else if (TryGetTableSubtable(L, metric_obj_idx, "summary")) {
+          metric_type = "summary";
+          type_obj_idx = lua_absindex(L, -1);
+        }
+
+        if (metric_type.empty()) {
+          lua_pop(L, 1);
+          continue;
+        }
+
+        bool is_sum = (metric_type == "sum");
+        bool is_histogram = (metric_type == "histogram");
+        bool is_exp_histogram = (metric_type == "exponential_histogram");
+        bool is_summary = (metric_type == "summary");
+
+        int64_t agg_temporality = 0;
+        if (is_sum || is_histogram || is_exp_histogram) {
+          agg_temporality = ReadTableAggregationTemporality(L, type_obj_idx);
+        }
+
+        bool has_is_monotonic = false;
+        bool is_monotonic = false;
+        if (is_sum) {
+          if (core::GetTableField(L, type_obj_idx, "isMonotonic", "is_monotonic")) {
+            if (lua_isboolean(L, -1)) {
+              is_monotonic = (lua_toboolean(L, -1) != 0);
+              has_is_monotonic = true;
+            }
+            lua_pop(L, 1);
+          }
+        }
+
+        std::string_view metric_name =
+            core::ReadTableStringView(L, metric_obj_idx, "name", nullptr, tls_metric_name_scratch);
+        std::string_view metric_desc = core::ReadTableStringView(L, metric_obj_idx, "description",
+                                                                 nullptr, tls_metric_desc_scratch);
+        std::string_view metric_unit =
+            core::ReadTableStringView(L, metric_obj_idx, "unit", nullptr, tls_metric_unit_scratch);
+
+        if (core::GetTableField(L, type_obj_idx, "dataPoints", "data_points")) {
+          int dps_arr_idx = lua_absindex(L, -1);
+          if (lua_istable(L, dps_arr_idx)) {
+            lua_Integer dps_len = static_cast<lua_Integer>(lua_rawlen(L, dps_arr_idx));
+
+            for (lua_Integer dp_i = 1; dp_i <= dps_len; ++dp_i) {
+              lua_rawgeti(L, dps_arr_idx, dp_i);
+              if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+              }
+              int dp_obj_idx = lua_absindex(L, -1);
+
+              uint64_t start_nanos =
+                  core::ReadTableUint64(L, dp_obj_idx, "startTimeUnixNano", "start_time_unix_nano");
+              std::array<char, 32> start_ts_buf;
+              size_t start_ts_len = 0;
+              if (start_nanos > 0) {
+                core::FormatIso8601Nano(start_nanos, start_ts_buf.data());
+                start_ts_len = 30;
+              }
+
+              uint64_t time_nanos =
+                  core::ReadTableUint64(L, dp_obj_idx, "timeUnixNano", "time_unix_nano");
+              std::array<char, 32> time_ts_buf;
+              size_t time_ts_len = 0;
+              if (time_nanos > 0) {
+                core::FormatIso8601Nano(time_nanos, time_ts_buf.data());
+                time_ts_len = 30;
+              }
+
+              emitter.StartRecord();
+              emitter.SetString("MetricName", metric_name);
+              emitter.SetString("MetricDescription", metric_desc);
+              emitter.SetString("MetricUnit", metric_unit);
+              emitter.SetString("MetricType", metric_type);
+              emitter.SetString("ServiceName", service_name);
+
+              if (is_sum || is_histogram || is_exp_histogram) {
+                emitter.SetInt64("AggregationTemporality", agg_temporality);
+              }
+              if (is_sum && has_is_monotonic) {
+                emitter.SetBool("IsMonotonic", is_monotonic);
+              }
+
+              lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_ref.get());
+              emitter.SetTableFromStack("ResourceAttributes");
+
+              emitter.SetString("ScopeName", scope_name);
+              emitter.SetString("ScopeVersion", scope_version);
+
+              lua_rawgeti(L, LUA_REGISTRYINDEX, scope_attrs_ref.get());
+              emitter.SetTableFromStack("ScopeAttributes");
+
+              if (core::GetTableField(L, dp_obj_idx, "attributes")) {
+                core::PushTableAttributes(L, -1, json_writer);
+                emitter.SetTableFromStack("Attributes");
+                lua_pop(L, 1);
+              } else {
+                lua_newtable(L);
+                emitter.SetTableFromStack("Attributes");
+              }
+
+              emitter.SetString("StartTimeUnix",
+                                std::string_view(start_ts_buf.data(), start_ts_len));
+              emitter.SetString("TimeUnix", std::string_view(time_ts_buf.data(), time_ts_len));
+
+              if (!is_histogram && !is_exp_histogram && !is_summary) {
+                bool is_int = false;
+                int64_t i_val = 0;
+                double d_val = 0.0;
+                if (ReadTableGenericMetricValue(L, dp_obj_idx, is_int, i_val, d_val)) {
+                  if (is_int) {
+                    emitter.SetInt64("Value", i_val);
+                  } else {
+                    emitter.SetDouble("Value", d_val);
+                  }
+                }
+              }
+
+              if (is_histogram) {
+                lua_createtable(L, 0, 14);
+                int h_tab_idx = lua_absindex(L, -1);
+                SetDualIntField(L, h_tab_idx, "aggregationTemporality", "AggregationTemporality",
+                                static_cast<lua_Integer>(agg_temporality));
+                uint64_t h_count = core::ReadTableUint64(L, dp_obj_idx, "count", "Count");
+                SetDualIntField(L, h_tab_idx, "count", "Count", ClampUint64ToLuaInt(h_count));
+
+                double h_sum = core::ReadTableDouble(L, dp_obj_idx, "sum", "Sum", 0.0);
+                SetDualDoubleField(L, h_tab_idx, "sum", "Sum", h_sum);
+
+                double h_min = 0.0;
+                if (core::TryReadTableDouble(L, dp_obj_idx, "min", "Min", h_min)) {
+                  SetDualDoubleField(L, h_tab_idx, "min", "Min", h_min);
+                }
+                double h_max = 0.0;
+                if (core::TryReadTableDouble(L, dp_obj_idx, "max", "Max", h_max)) {
+                  SetDualDoubleField(L, h_tab_idx, "max", "Max", h_max);
+                }
+
+                if (core::GetTableField(L, dp_obj_idx, "bucketCounts", "bucket_counts",
+                                        "BucketCounts")) {
+                  PushNormalizedTableBucketCounts(L, -1);
+                  lua_remove(L, -2);
+                } else {
+                  lua_newtable(L);
+                }
+                SetDualSubtableField(L, h_tab_idx, "bucketCounts", "BucketCounts");
+
+                if (core::GetTableField(L, dp_obj_idx, "explicitBounds", "explicit_bounds",
+                                        "ExplicitBounds")) {
+                  PushNormalizedTableExplicitBounds(L, -1);
+                  lua_remove(L, -2);
+                } else {
+                  lua_newtable(L);
+                }
+                SetDualSubtableField(L, h_tab_idx, "explicitBounds", "ExplicitBounds");
+
+                emitter.SetTableFromStack("Histogram");
+              }
+
+              if (is_exp_histogram) {
+                lua_createtable(L, 0, 20);
+                int eh_tab_idx = lua_absindex(L, -1);
+                SetDualIntField(L, eh_tab_idx, "aggregationTemporality", "AggregationTemporality",
+                                static_cast<lua_Integer>(agg_temporality));
+                uint64_t eh_count = core::ReadTableUint64(L, dp_obj_idx, "count", "Count");
+                SetDualIntField(L, eh_tab_idx, "count", "Count", ClampUint64ToLuaInt(eh_count));
+
+                double eh_sum = 0.0;
+                if (core::TryReadTableDouble(L, dp_obj_idx, "sum", "Sum", eh_sum)) {
+                  SetDualDoubleField(L, eh_tab_idx, "sum", "Sum", eh_sum);
+                }
+                double eh_min = 0.0;
+                if (core::TryReadTableDouble(L, dp_obj_idx, "min", "Min", eh_min)) {
+                  SetDualDoubleField(L, eh_tab_idx, "min", "Min", eh_min);
+                }
+                double eh_max = 0.0;
+                if (core::TryReadTableDouble(L, dp_obj_idx, "max", "Max", eh_max)) {
+                  SetDualDoubleField(L, eh_tab_idx, "max", "Max", eh_max);
+                }
+
+                int64_t eh_scale = core::ReadTableInt64(L, dp_obj_idx, "scale", "Scale", 0);
+                SetDualIntField(L, eh_tab_idx, "scale", "Scale",
+                                static_cast<lua_Integer>(eh_scale));
+
+                uint64_t eh_zero_count =
+                    core::ReadTableUint64(L, dp_obj_idx, "zeroCount", "zero_count", 0, "ZeroCount");
+                SetDualIntField(L, eh_tab_idx, "zeroCount", "ZeroCount",
+                                ClampUint64ToLuaInt(eh_zero_count));
+
+                double eh_zero_threshold = core::ReadTableDouble(
+                    L, dp_obj_idx, "zeroThreshold", "zero_threshold", 0.0, "ZeroThreshold");
+                SetDualDoubleField(L, eh_tab_idx, "zeroThreshold", "ZeroThreshold",
+                                   eh_zero_threshold);
+
+                auto push_exp_buckets_subtable = [&](const char* k1, const char* k2) {
+                  lua_createtable(L, 0, 4);
+                  int sub_idx = lua_absindex(L, -1);
+                  int64_t offset = 0;
+                  if (core::GetTableField(L, dp_obj_idx, k1, k2)) {
+                    if (lua_istable(L, -1)) {
+                      int b_obj_idx = lua_absindex(L, -1);
+                      offset = core::ReadTableInt64(L, b_obj_idx, "offset", "Offset", 0);
+                      if (core::GetTableField(L, b_obj_idx, "bucketCounts", "bucket_counts",
+                                              "BucketCounts")) {
+                        PushNormalizedTableBucketCounts(L, -1);
+                        lua_remove(L, -2);
+                      } else {
+                        lua_newtable(L);
+                      }
+                    } else {
+                      lua_newtable(L);
+                    }
+                    lua_remove(L, -2);
+                  } else {
+                    lua_newtable(L);
+                  }
+                  SetDualSubtableField(L, sub_idx, "bucketCounts", "BucketCounts");
+                  SetDualIntField(L, sub_idx, "offset", "Offset", static_cast<lua_Integer>(offset));
+                  SetDualSubtableField(L, eh_tab_idx, k1, k2);
+                };
+                push_exp_buckets_subtable("positive", "Positive");
+                push_exp_buckets_subtable("negative", "Negative");
+
+                emitter.SetTableFromStack("ExponentialHistogram");
+              }
+
+              if (is_summary) {
+                lua_createtable(L, 0, 6);
+                int s_tab_idx = lua_absindex(L, -1);
+                uint64_t s_count = core::ReadTableUint64(L, dp_obj_idx, "count", "Count");
+                SetDualIntField(L, s_tab_idx, "count", "Count", ClampUint64ToLuaInt(s_count));
+
+                double s_sum = core::ReadTableDouble(L, dp_obj_idx, "sum", "Sum", 0.0);
+                SetDualDoubleField(L, s_tab_idx, "sum", "Sum", s_sum);
+
+                if (core::GetTableField(L, dp_obj_idx, "quantileValues", "quantile_values",
+                                        "QuantileValues")) {
+                  if (lua_istable(L, -1)) {
+                    int qv_in_idx = lua_absindex(L, -1);
+                    lua_Integer qv_len = static_cast<lua_Integer>(lua_rawlen(L, qv_in_idx));
+                    lua_createtable(L, static_cast<int>(qv_len > 0 ? qv_len : 0), 0);
+                    lua_Integer out_qi = 1;
+                    for (lua_Integer qi = 1; qi <= qv_len; ++qi) {
+                      lua_rawgeti(L, qv_in_idx, qi);
+                      if (lua_istable(L, -1)) {
+                        int q_item_idx = lua_absindex(L, -1);
+                        double q_val =
+                            core::ReadTableDouble(L, q_item_idx, "quantile", "Quantile", 0.0);
+                        double v_val = core::ReadTableDouble(L, q_item_idx, "value", "Value", 0.0);
+                        lua_createtable(L, 0, 4);
+                        SetDualDoubleField(L, -1, "quantile", "Quantile", q_val);
+                        SetDualDoubleField(L, -1, "value", "Value", v_val);
+                        lua_rawseti(L, -3, out_qi++);
+                      }
+                      lua_pop(L, 1);
+                    }
+                  } else {
+                    lua_newtable(L);
+                  }
+                  lua_remove(L, -2);
+                } else {
+                  lua_newtable(L);
+                }
+                SetDualSubtableField(L, s_tab_idx, "quantileValues", "QuantileValues");
+                emitter.SetTableFromStack("Summary");
+              }
+
+              emitter.SetInt64("Flags",
+                               static_cast<int64_t>(static_cast<uint32_t>(
+                                   core::ReadTableUint64(L, dp_obj_idx, "flags", "Flags"))));
+
+              if (core::GetTableField(L, dp_obj_idx, "exemplars", "Exemplars")) {
+                core::PushTableExemplars(L, -1, json_writer);
+                lua_remove(L, -2);  // remove raw input exemplars table
+                emitter.SetTableFromStack("Exemplars");
+              } else {
+                lua_newtable(L);
+                emitter.SetTableFromStack("Exemplars");
+              }
+
+              emitter.SetString("processed_at", processed_at);
+
+              emitter.EndRecord();
+              lua_pop(L, 1);  // pop dp_obj
+              if (emitter.HasError()) {
+                return ExtractionResult{false, std::string(emitter.ErrorMessage()),
+                                        emitter.EmittedCount()};
+              }
+            }
+          }
+          lua_pop(L, 1);  // pop dps_arr
+        }
+
+        lua_pop(L, 1);  // pop type_obj
+        lua_pop(L, 1);  // pop metric_obj
+      }
+      lua_pop(L, 1);  // pop metrics_arr
+      lua_pop(L, 1);  // pop sm_obj
+    }
+    lua_pop(L, 1);  // pop sm_arr
+    lua_pop(L, 1);  // pop rm_obj
+  }
+
+  emitter.Flush();
+  if (emitter.HasError()) {
+    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+  }
+  return ExtractionResult{true, "", emitter.EmittedCount()};
+}
+
+}  // namespace
+
 ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) {
   const int entry_top = lua_gettop(L);
   int abs_idx = lua_absindex(L, table_idx);
@@ -1171,450 +1548,9 @@ ExtractionResult ProcessMetricsTable(lua_State* L, int table_idx, int emit_idx) 
   core::LuaEmitter emitter(L, abs_emit_idx);
 
   try {
-    int rm_arr_idx = 0;
-
-    if (core::GetTableField(L, abs_idx, "resourceMetrics", "resource_metrics")) {
-      rm_arr_idx = lua_absindex(L, -1);
-    } else if (core::GetTableField(L, abs_idx, "metric")) {
-      if (lua_istable(L, -1) && core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
-        lua_remove(L, -2);
-        rm_arr_idx = lua_absindex(L, -1);
-      } else {
-        lua_pop(L, 1);
-      }
-    } else if (core::GetTableField(L, abs_idx, "log")) {
-      if (lua_istable(L, -1) && core::GetTableField(L, -1, "resourceMetrics", "resource_metrics")) {
-        lua_remove(L, -2);
-        rm_arr_idx = lua_absindex(L, -1);
-      } else {
-        lua_pop(L, 1);
-      }
-    }
-
-    if (rm_arr_idx == 0) {
-      rm_arr_idx = abs_idx;
-    }
-
-    if (!lua_istable(L, rm_arr_idx)) {
-      return ExtractionResult{true, "", 0};
-    }
-
-    std::array<char, 32> processed_at_buf;
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), processed_at_buf.data());
-    std::string_view processed_at(processed_at_buf.data(), 30);
-
-    lua_Integer rm_len = static_cast<lua_Integer>(lua_rawlen(L, rm_arr_idx));
-    for (lua_Integer i = 1; i <= rm_len; ++i) {
-      lua_rawgeti(L, rm_arr_idx, i);
-      if (!lua_istable(L, -1)) {
-        lua_pop(L, 1);
-        continue;
-      }
-      int rm_obj_idx = lua_absindex(L, -1);
-
-      std::string_view service_name = "unknown_service";
-      core::ScopedLuaRef res_attrs_ref(L, LUA_NOREF);
-
-      if (core::GetTableField(L, rm_obj_idx, "resource")) {
-        int res_idx = lua_absindex(L, -1);
-        if (core::GetTableField(L, res_idx, "attributes")) {
-          core::PushTableAttributes(L, -1, json_writer, &service_name);
-          res_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-          lua_pop(L, 1);
-        }
-        lua_pop(L, 1);
-      }
-      if (!res_attrs_ref.valid()) {
-        lua_newtable(L);
-        res_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-      }
-
-      if (!core::GetTableField(L, rm_obj_idx, "scopeMetrics", "scope_metrics")) {
-        lua_pop(L, 1);
-        continue;
-      }
-      int sm_arr_idx = lua_absindex(L, -1);
-      if (!lua_istable(L, sm_arr_idx)) {
-        lua_pop(L, 2);
-        continue;
-      }
-
-      lua_Integer sm_len = static_cast<lua_Integer>(lua_rawlen(L, sm_arr_idx));
-      for (lua_Integer j = 1; j <= sm_len; ++j) {
-        lua_rawgeti(L, sm_arr_idx, j);
-        if (!lua_istable(L, -1)) {
-          lua_pop(L, 1);
-          continue;
-        }
-        int sm_obj_idx = lua_absindex(L, -1);
-
-        std::string_view scope_name;
-        std::string_view scope_version;
-        core::ScopedLuaRef scope_attrs_ref(L, LUA_NOREF);
-
-        if (core::GetTableField(L, sm_obj_idx, "scope")) {
-          int s_idx = lua_absindex(L, -1);
-          scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
-          scope_version =
-              core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
-          if (core::GetTableField(L, s_idx, "attributes")) {
-            core::PushTableAttributes(L, -1, json_writer);
-            scope_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-            lua_pop(L, 1);
-          }
-          lua_pop(L, 1);
-        }
-        if (!scope_attrs_ref.valid()) {
-          lua_newtable(L);
-          scope_attrs_ref.reset(luaL_ref(L, LUA_REGISTRYINDEX));
-        }
-
-        if (!core::GetTableField(L, sm_obj_idx, "metrics")) {
-          lua_pop(L, 1);
-          continue;
-        }
-        int metrics_arr_idx = lua_absindex(L, -1);
-        if (!lua_istable(L, metrics_arr_idx)) {
-          lua_pop(L, 2);
-          continue;
-        }
-
-        lua_Integer m_len = static_cast<lua_Integer>(lua_rawlen(L, metrics_arr_idx));
-        for (lua_Integer k = 1; k <= m_len; ++k) {
-          lua_rawgeti(L, metrics_arr_idx, k);
-          if (!lua_istable(L, -1)) {
-            lua_pop(L, 1);
-            continue;
-          }
-          int metric_obj_idx = lua_absindex(L, -1);
-
-          std::string_view metric_type;
-          int type_obj_idx = 0;
-
-          if (TryGetTableSubtable(L, metric_obj_idx, "gauge")) {
-            metric_type = "gauge";
-            type_obj_idx = lua_absindex(L, -1);
-          } else if (TryGetTableSubtable(L, metric_obj_idx, "sum")) {
-            metric_type = "sum";
-            type_obj_idx = lua_absindex(L, -1);
-          } else if (TryGetTableSubtable(L, metric_obj_idx, "histogram")) {
-            metric_type = "histogram";
-            type_obj_idx = lua_absindex(L, -1);
-          } else if (TryGetTableSubtable(L, metric_obj_idx, "exponentialHistogram",
-                                         "exponential_histogram")) {
-            metric_type = "exponential_histogram";
-            type_obj_idx = lua_absindex(L, -1);
-          } else if (TryGetTableSubtable(L, metric_obj_idx, "summary")) {
-            metric_type = "summary";
-            type_obj_idx = lua_absindex(L, -1);
-          }
-
-          if (metric_type.empty()) {
-            lua_pop(L, 1);
-            continue;
-          }
-
-          bool is_sum = (metric_type == "sum");
-          bool is_histogram = (metric_type == "histogram");
-          bool is_exp_histogram = (metric_type == "exponential_histogram");
-          bool is_summary = (metric_type == "summary");
-
-          int64_t agg_temporality = 0;
-          if (is_sum || is_histogram || is_exp_histogram) {
-            agg_temporality = ReadTableAggregationTemporality(L, type_obj_idx);
-          }
-
-          bool has_is_monotonic = false;
-          bool is_monotonic = false;
-          if (is_sum) {
-            if (core::GetTableField(L, type_obj_idx, "isMonotonic", "is_monotonic")) {
-              if (lua_isboolean(L, -1)) {
-                is_monotonic = (lua_toboolean(L, -1) != 0);
-                has_is_monotonic = true;
-              }
-              lua_pop(L, 1);
-            }
-          }
-
-          std::string_view metric_name = core::ReadTableStringView(
-              L, metric_obj_idx, "name", nullptr, tls_metric_name_scratch);
-          std::string_view metric_desc = core::ReadTableStringView(
-              L, metric_obj_idx, "description", nullptr, tls_metric_desc_scratch);
-          std::string_view metric_unit = core::ReadTableStringView(
-              L, metric_obj_idx, "unit", nullptr, tls_metric_unit_scratch);
-
-          if (core::GetTableField(L, type_obj_idx, "dataPoints", "data_points")) {
-            int dps_arr_idx = lua_absindex(L, -1);
-            if (lua_istable(L, dps_arr_idx)) {
-              lua_Integer dps_len = static_cast<lua_Integer>(lua_rawlen(L, dps_arr_idx));
-
-              for (lua_Integer dp_i = 1; dp_i <= dps_len; ++dp_i) {
-                lua_rawgeti(L, dps_arr_idx, dp_i);
-                if (!lua_istable(L, -1)) {
-                  lua_pop(L, 1);
-                  continue;
-                }
-                int dp_obj_idx = lua_absindex(L, -1);
-
-                uint64_t start_nanos = core::ReadTableUint64(L, dp_obj_idx, "startTimeUnixNano",
-                                                             "start_time_unix_nano");
-                std::array<char, 32> start_ts_buf;
-                size_t start_ts_len = 0;
-                if (start_nanos > 0) {
-                  core::FormatIso8601Nano(start_nanos, start_ts_buf.data());
-                  start_ts_len = 30;
-                }
-
-                uint64_t time_nanos =
-                    core::ReadTableUint64(L, dp_obj_idx, "timeUnixNano", "time_unix_nano");
-                std::array<char, 32> time_ts_buf;
-                size_t time_ts_len = 0;
-                if (time_nanos > 0) {
-                  core::FormatIso8601Nano(time_nanos, time_ts_buf.data());
-                  time_ts_len = 30;
-                }
-
-                emitter.StartRecord();
-                emitter.SetString("MetricName", metric_name);
-                emitter.SetString("MetricDescription", metric_desc);
-                emitter.SetString("MetricUnit", metric_unit);
-                emitter.SetString("MetricType", metric_type);
-                emitter.SetString("ServiceName", service_name);
-
-                if (is_sum || is_histogram || is_exp_histogram) {
-                  emitter.SetInt64("AggregationTemporality", agg_temporality);
-                }
-                if (is_sum && has_is_monotonic) {
-                  emitter.SetBool("IsMonotonic", is_monotonic);
-                }
-
-                lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_ref.get());
-                emitter.SetTableFromStack("ResourceAttributes");
-
-                emitter.SetString("ScopeName", scope_name);
-                emitter.SetString("ScopeVersion", scope_version);
-
-                lua_rawgeti(L, LUA_REGISTRYINDEX, scope_attrs_ref.get());
-                emitter.SetTableFromStack("ScopeAttributes");
-
-                if (core::GetTableField(L, dp_obj_idx, "attributes")) {
-                  core::PushTableAttributes(L, -1, json_writer);
-                  emitter.SetTableFromStack("Attributes");
-                  lua_pop(L, 1);
-                } else {
-                  lua_newtable(L);
-                  emitter.SetTableFromStack("Attributes");
-                }
-
-                emitter.SetString("StartTimeUnix",
-                                  std::string_view(start_ts_buf.data(), start_ts_len));
-                emitter.SetString("TimeUnix", std::string_view(time_ts_buf.data(), time_ts_len));
-
-                if (!is_histogram && !is_exp_histogram && !is_summary) {
-                  bool is_int = false;
-                  int64_t i_val = 0;
-                  double d_val = 0.0;
-                  if (ReadTableGenericMetricValue(L, dp_obj_idx, is_int, i_val, d_val)) {
-                    if (is_int) {
-                      emitter.SetInt64("Value", i_val);
-                    } else {
-                      emitter.SetDouble("Value", d_val);
-                    }
-                  }
-                }
-
-                if (is_histogram) {
-                  lua_createtable(L, 0, 14);
-                  int h_tab_idx = lua_absindex(L, -1);
-                  SetDualIntField(L, h_tab_idx, "aggregationTemporality", "AggregationTemporality",
-                                  static_cast<lua_Integer>(agg_temporality));
-                  uint64_t h_count = core::ReadTableUint64(L, dp_obj_idx, "count", "Count");
-                  SetDualIntField(L, h_tab_idx, "count", "Count", ClampUint64ToLuaInt(h_count));
-
-                  double h_sum = core::ReadTableDouble(L, dp_obj_idx, "sum", "Sum", 0.0);
-                  SetDualDoubleField(L, h_tab_idx, "sum", "Sum", h_sum);
-
-                  double h_min = 0.0;
-                  if (core::TryReadTableDouble(L, dp_obj_idx, "min", "Min", h_min)) {
-                    SetDualDoubleField(L, h_tab_idx, "min", "Min", h_min);
-                  }
-                  double h_max = 0.0;
-                  if (core::TryReadTableDouble(L, dp_obj_idx, "max", "Max", h_max)) {
-                    SetDualDoubleField(L, h_tab_idx, "max", "Max", h_max);
-                  }
-
-                  if (core::GetTableField(L, dp_obj_idx, "bucketCounts", "bucket_counts",
-                                          "BucketCounts")) {
-                    PushNormalizedTableBucketCounts(L, -1);
-                    lua_remove(L, -2);
-                  } else {
-                    lua_newtable(L);
-                  }
-                  SetDualSubtableField(L, h_tab_idx, "bucketCounts", "BucketCounts");
-
-                  if (core::GetTableField(L, dp_obj_idx, "explicitBounds", "explicit_bounds",
-                                          "ExplicitBounds")) {
-                    PushNormalizedTableExplicitBounds(L, -1);
-                    lua_remove(L, -2);
-                  } else {
-                    lua_newtable(L);
-                  }
-                  SetDualSubtableField(L, h_tab_idx, "explicitBounds", "ExplicitBounds");
-
-                  emitter.SetTableFromStack("Histogram");
-                }
-
-                if (is_exp_histogram) {
-                  lua_createtable(L, 0, 20);
-                  int eh_tab_idx = lua_absindex(L, -1);
-                  SetDualIntField(L, eh_tab_idx, "aggregationTemporality", "AggregationTemporality",
-                                  static_cast<lua_Integer>(agg_temporality));
-                  uint64_t eh_count = core::ReadTableUint64(L, dp_obj_idx, "count", "Count");
-                  SetDualIntField(L, eh_tab_idx, "count", "Count", ClampUint64ToLuaInt(eh_count));
-
-                  double eh_sum = 0.0;
-                  if (core::TryReadTableDouble(L, dp_obj_idx, "sum", "Sum", eh_sum)) {
-                    SetDualDoubleField(L, eh_tab_idx, "sum", "Sum", eh_sum);
-                  }
-                  double eh_min = 0.0;
-                  if (core::TryReadTableDouble(L, dp_obj_idx, "min", "Min", eh_min)) {
-                    SetDualDoubleField(L, eh_tab_idx, "min", "Min", eh_min);
-                  }
-                  double eh_max = 0.0;
-                  if (core::TryReadTableDouble(L, dp_obj_idx, "max", "Max", eh_max)) {
-                    SetDualDoubleField(L, eh_tab_idx, "max", "Max", eh_max);
-                  }
-
-                  int64_t eh_scale = core::ReadTableInt64(L, dp_obj_idx, "scale", "Scale", 0);
-                  SetDualIntField(L, eh_tab_idx, "scale", "Scale",
-                                  static_cast<lua_Integer>(eh_scale));
-
-                  uint64_t eh_zero_count = core::ReadTableUint64(L, dp_obj_idx, "zeroCount",
-                                                                 "zero_count", 0, "ZeroCount");
-                  SetDualIntField(L, eh_tab_idx, "zeroCount", "ZeroCount",
-                                  ClampUint64ToLuaInt(eh_zero_count));
-
-                  double eh_zero_threshold = core::ReadTableDouble(
-                      L, dp_obj_idx, "zeroThreshold", "zero_threshold", 0.0, "ZeroThreshold");
-                  SetDualDoubleField(L, eh_tab_idx, "zeroThreshold", "ZeroThreshold",
-                                     eh_zero_threshold);
-
-                  auto push_exp_buckets_subtable = [&](const char* k1, const char* k2) {
-                    lua_createtable(L, 0, 4);
-                    int sub_idx = lua_absindex(L, -1);
-                    int64_t offset = 0;
-                    if (core::GetTableField(L, dp_obj_idx, k1, k2)) {
-                      if (lua_istable(L, -1)) {
-                        int b_obj_idx = lua_absindex(L, -1);
-                        offset = core::ReadTableInt64(L, b_obj_idx, "offset", "Offset", 0);
-                        if (core::GetTableField(L, b_obj_idx, "bucketCounts", "bucket_counts",
-                                                "BucketCounts")) {
-                          PushNormalizedTableBucketCounts(L, -1);
-                          lua_remove(L, -2);
-                        } else {
-                          lua_newtable(L);
-                        }
-                      } else {
-                        lua_newtable(L);
-                      }
-                      lua_remove(L, -2);
-                    } else {
-                      lua_newtable(L);
-                    }
-                    SetDualSubtableField(L, sub_idx, "bucketCounts", "BucketCounts");
-                    SetDualIntField(L, sub_idx, "offset", "Offset",
-                                    static_cast<lua_Integer>(offset));
-                    SetDualSubtableField(L, eh_tab_idx, k1, k2);
-                  };
-                  push_exp_buckets_subtable("positive", "Positive");
-                  push_exp_buckets_subtable("negative", "Negative");
-
-                  emitter.SetTableFromStack("ExponentialHistogram");
-                }
-
-                if (is_summary) {
-                  lua_createtable(L, 0, 6);
-                  int s_tab_idx = lua_absindex(L, -1);
-                  uint64_t s_count = core::ReadTableUint64(L, dp_obj_idx, "count", "Count");
-                  SetDualIntField(L, s_tab_idx, "count", "Count", ClampUint64ToLuaInt(s_count));
-
-                  double s_sum = core::ReadTableDouble(L, dp_obj_idx, "sum", "Sum", 0.0);
-                  SetDualDoubleField(L, s_tab_idx, "sum", "Sum", s_sum);
-
-                  if (core::GetTableField(L, dp_obj_idx, "quantileValues", "quantile_values",
-                                          "QuantileValues")) {
-                    if (lua_istable(L, -1)) {
-                      int qv_in_idx = lua_absindex(L, -1);
-                      lua_Integer qv_len = static_cast<lua_Integer>(lua_rawlen(L, qv_in_idx));
-                      lua_createtable(L, static_cast<int>(qv_len > 0 ? qv_len : 0), 0);
-                      lua_Integer out_qi = 1;
-                      for (lua_Integer qi = 1; qi <= qv_len; ++qi) {
-                        lua_rawgeti(L, qv_in_idx, qi);
-                        if (lua_istable(L, -1)) {
-                          int q_item_idx = lua_absindex(L, -1);
-                          double q_val =
-                              core::ReadTableDouble(L, q_item_idx, "quantile", "Quantile", 0.0);
-                          double v_val =
-                              core::ReadTableDouble(L, q_item_idx, "value", "Value", 0.0);
-                          lua_createtable(L, 0, 4);
-                          SetDualDoubleField(L, -1, "quantile", "Quantile", q_val);
-                          SetDualDoubleField(L, -1, "value", "Value", v_val);
-                          lua_rawseti(L, -3, out_qi++);
-                        }
-                        lua_pop(L, 1);
-                      }
-                    } else {
-                      lua_newtable(L);
-                    }
-                    lua_remove(L, -2);
-                  } else {
-                    lua_newtable(L);
-                  }
-                  SetDualSubtableField(L, s_tab_idx, "quantileValues", "QuantileValues");
-                  emitter.SetTableFromStack("Summary");
-                }
-
-                emitter.SetInt64("Flags",
-                                 static_cast<int64_t>(static_cast<uint32_t>(
-                                     core::ReadTableUint64(L, dp_obj_idx, "flags", "Flags"))));
-
-                if (core::GetTableField(L, dp_obj_idx, "exemplars", "Exemplars")) {
-                  core::PushTableExemplars(L, -1, json_writer);
-                  lua_remove(L, -2);  // remove raw input exemplars table
-                  emitter.SetTableFromStack("Exemplars");
-                } else {
-                  lua_newtable(L);
-                  emitter.SetTableFromStack("Exemplars");
-                }
-
-                emitter.SetString("processed_at", processed_at);
-
-                emitter.EndRecord();
-                lua_pop(L, 1);  // pop dp_obj
-                if (emitter.HasError()) {
-                  return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                          emitter.EmittedCount()};
-                }
-              }
-            }
-            lua_pop(L, 1);  // pop dps_arr
-          }
-
-          lua_pop(L, 1);  // pop type_obj
-          lua_pop(L, 1);  // pop metric_obj
-        }
-        lua_pop(L, 1);  // pop metrics_arr
-        lua_pop(L, 1);  // pop sm_obj
-      }
-      lua_pop(L, 1);  // pop sm_arr
-      lua_pop(L, 1);  // pop rm_obj
-    }
-
-    emitter.Flush();
-    if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-    }
-    return ExtractionResult{true, "", emitter.EmittedCount()};
+    return ProcessMetricsTableImpl(L, abs_idx, emitter, json_writer, tls_scope_name_scratch,
+                                   tls_scope_ver_scratch, tls_metric_name_scratch,
+                                   tls_metric_desc_scratch, tls_metric_unit_scratch);
   } catch (const std::exception& e) {
     return ExtractionResult{false, std::string("Extraction exception: ") + e.what(),
                             emitter.EmittedCount()};

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -693,8 +694,7 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
     return;
   }
   if (!lua_checkstack(L, 8)) {
-    lua_newtable(L);
-    return;
+    throw std::runtime_error("Lua stack overflow in PushAttributesTable");
   }
   lua_newtable(L);
 

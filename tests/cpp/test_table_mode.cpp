@@ -2562,5 +2562,189 @@ TEST_F(TableModeTest, StackSafetyCheck) {
   lua_pop(L_, 2);  // pop table_sample and dummy_emit
 }
 
+TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    collected_events = {}
+    function collect_cb(ev)
+      collected_events[#collected_events + 1] = ev
+    end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "collect_cb");
+  int cb_idx = lua_gettop(L_);
+
+  // 1. Table mode: uintValue/uint_value in attributes, float kind/status.code, dense events/links
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return {
+      resourceSpans = { {
+        resource = {
+          attributes = {
+            { key = "service.name", value = { stringValue = "uint-svc" } },
+            { key = "u1", value = { uintValue = 42 } },
+            { key = "u2", value = { uint_value = "18446744073709551615" } },
+            { key = "nested", value = { kvlistValue = { values = {
+              { key = "inner_u", value = { uintValue = 77 } }
+            } } } }
+          }
+        },
+        scopeSpans = { {
+          spans = { {
+            traceId = "0123456789abcdef0123456789abcdef",
+            spanId = "0123456789abcdef",
+            name = "op",
+            kind = 2.0,
+            status = { code = 1.0, message = "ok" },
+            events = {
+              "skip_me",
+              {
+                name = "ev1",
+                attributes = { { key = "ev_u", value = { uintValue = 123 } } }
+              },
+              false,
+              {
+                name = "ev2",
+                attributes = { map_u = { uint_value = "456" } }
+              }
+            },
+            links = {
+              123,
+              {
+                traceId = "0123456789abcdef0123456789abcdef",
+                spanId = "0123456789abcdef",
+                TraceState = "ts=1",
+                attributes = { { key = "lk_u", value = { uintValue = 789 } } }
+              }
+            }
+          } }
+        } }
+      } }
+    }
+  )"),
+            LUA_OK);
+  auto tr_res = extractors::ProcessTracesTable(L_, -1, cb_idx);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(tr_res.success);
+  EXPECT_EQ(tr_res.emitted_count, 1);
+
+  // 2. Direct PushTableSpanEvents, PushTableSpanLinks, PushTableExemplars with leading non-tables
+  core::FastJsonWriter writer;
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return { "skip1", { name = "e1" }, "skip2", { name = "e2" } }
+  )"),
+            LUA_OK);
+  core::PushTableSpanEvents(L_, -1, writer);
+  EXPECT_EQ(lua_rawlen(L_, -1), 2U);
+  lua_pop(L_, 2);
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return { "skip1", { traceId = "1111", TraceState = "s1" }, "skip2", { traceId = "2222" } }
+  )"),
+            LUA_OK);
+  core::PushTableSpanLinks(L_, -1, writer);
+  EXPECT_EQ(lua_rawlen(L_, -1), 2U);
+  lua_pop(L_, 2);
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    return { "skip1", { asInt = "10" }, "skip2", { asDouble = "2.5" }, { asInt = "bad_int" } }
+  )"),
+            LUA_OK);
+  core::PushTableExemplars(L_, -1, writer);
+  EXPECT_EQ(lua_rawlen(L_, -1), 3U);
+  lua_pop(L_, 2);
+
+  // 3. JSON mode: ProcessTraces with uintValue in event/link attributes, ProcessLogs with string
+  // severityNumber, ProcessMetrics with invalid asInt string
+  std::string json_traces = R"({
+    "resourceSpans": [{
+      "scopeSpans": [{
+        "spans": [{
+          "traceId": "0123456789abcdef0123456789abcdef",
+          "spanId": "0123456789abcdef",
+          "name": "json_span",
+          "events": [{
+            "name": "jev",
+            "attributes": [
+              {"key": "u_ev", "value": {"uintValue": "999"}},
+              {"key": "u_ev2", "value": {"uint_value": 888}}
+            ]
+          }],
+          "links": [{
+            "traceId": "0123456789abcdef0123456789abcdef",
+            "spanId": "0123456789abcdef",
+            "attributes": {"u_lk": {"uintValue": 777}}
+          }]
+        }]
+      }]
+    }]
+  })";
+  auto jtr_res = extractors::ProcessTraces(L_, json_traces, cb_idx);
+  EXPECT_TRUE(jtr_res.success);
+  EXPECT_EQ(jtr_res.emitted_count, 1);
+
+  std::string json_logs = R"({
+    "resourceLogs": [{
+      "scopeLogs": [{
+        "logRecords": [
+          {"severityNumber": "SEVERITY_NUMBER_ERROR", "body": {"stringValue": "err_log"}},
+          {"severity_number": "SEVERITY_NUMBER_WARN", "body": {"stringValue": "warn_log"}}
+        ]
+      }]
+    }]
+  })";
+  auto jlg_res = extractors::ProcessLogs(L_, json_logs, cb_idx);
+  EXPECT_TRUE(jlg_res.success);
+  EXPECT_EQ(jlg_res.emitted_count, 2);
+
+  std::string json_metrics = R"({
+    "resourceMetrics": [{
+      "scopeMetrics": [{
+        "metrics": [{
+          "name": "bad_int_metric",
+          "gauge": {
+            "dataPoints": [{
+              "asInt": "not_an_int",
+              "exemplars": [{"asInt": "also_bad_int"}]
+            }]
+          }
+        }]
+      }]
+    }]
+  })";
+  auto jmt_res = extractors::ProcessMetrics(L_, json_metrics, cb_idx);
+  EXPECT_TRUE(jmt_res.success);
+  EXPECT_EQ(jmt_res.emitted_count, 1);
+
+  lua_pop(L_, 1);  // pop collect_cb
+
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    assert(#collected_events == 5, "expected 5 events, got " .. #collected_events)
+    local t1 = collected_events[1].log
+    assert(t1.SpanKind == "SPAN_KIND_SERVER", "SpanKind mismatch: " .. tostring(t1.SpanKind))
+    assert(t1.StatusCode == "STATUS_CODE_OK", "StatusCode mismatch: " .. tostring(t1.StatusCode))
+    assert(t1.ResourceAttributes.u1 == 42)
+    assert(t1.ResourceAttributes.u2 == 9223372036854775807)
+    assert(string.find(t1.ResourceAttributes.nested, '"inner_u":77', 1, true) ~= nil)
+    assert(string.find(t1.Events, '"ev_u":123', 1, true) ~= nil)
+    assert(string.find(t1.Events, '"map_u":456', 1, true) ~= nil)
+    assert(string.find(t1.Links, '"lk_u":789', 1, true) ~= nil)
+
+    local t2 = collected_events[2].log
+    assert(string.find(t2.Events, '"u_ev":999', 1, true) ~= nil)
+    assert(string.find(t2.Events, '"u_ev2":888', 1, true) ~= nil)
+    assert(string.find(t2.Links, '"u_lk":777', 1, true) ~= nil)
+
+    local l1 = collected_events[3].log
+    assert(l1.SeverityNumber == 17)
+    local l2 = collected_events[4].log
+    assert(l2.SeverityNumber == 13)
+
+    local m1 = collected_events[5].log
+    assert(m1.Value == nil, "invalid asInt must omit Value")
+    assert(m1.Exemplars[1].Value == nil, "invalid exemplar asInt must omit Value")
+  )"),
+            LUA_OK)
+      << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace vector_otel
