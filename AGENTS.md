@@ -62,7 +62,7 @@ Every modification to this repository **must** strictly adhere to the following 
 9. **Vector Native Event Invariants (`vector_native.so`)**:
    - **Traces via `trace_to_log` (`log_namespace: false`)**: Vector's Lua v2 transform only accepts `Log` and `Metric` events, so native `Trace` events from `opentelemetry` (`use_otlp_decoding: false`) must pass through `trace_to_log` (`log_namespace: false`) before `vector_native.traces.process`.
    - **Timestamp Fallback to `processed_at` (`now()`)**: When primary and secondary timestamps are absent in native events, `Timestamp` (or `TimeUnix` for metrics) falls back to the record's `processed_at` (`now()`) timestamp.
-   - **Non-OTLP Metric Variant Exclusion**: Vector-only metric variants (`distribution`, `set`, `sketch`) are intentionally unsupported in `vector_native.metrics.process` and must return `(nil, "Unsupported non-OTLP metric variant: <variant>", partial_count)`.
+   - **Non-OTLP Metric Variant Exclusion**: Vector-only metric variants (`distribution`, `set`, `sketch`) are intentionally unsupported in `vector_native.metrics.process` and must return `(nil, "Unsupported non-OTLP metric variant '<variant>': vector_native only supports OpenTelemetry metric types (counter, gauge, aggregated_histogram, aggregated_summary)", partial_count)`.
 
 ---
 

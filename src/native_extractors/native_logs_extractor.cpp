@@ -264,7 +264,7 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
     }
     auto fv = fv_res.value();
 
-    if (k == "log" && depth == 0 && !has_recognized_field) {
+    if (k == "log" && depth == 0) {
       auto t_res = fv.type();
       if (t_res.error() == simdjson::SUCCESS) {
         if (t_res.value() == simdjson::ondemand::json_type::object) {
@@ -998,16 +998,15 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
     if (core::GetTableFieldRaw(L, abs_idx, "log")) {
       int log_idx = lua_absindex(L, -1);
       if (lua_istable(L, log_idx)) {
+        handled_log_wrapper = true;
         const size_t inner_len = lua_rawlen(L, log_idx);
         if (inner_len > 0) {
-          handled_log_wrapper = true;
           if (!extract_array(log_idx, inner_len)) {
             lua_pop(L, 1);
             return ExtractionResult{false, std::string(emitter.ErrorMessage()),
                                     emitter.EmittedCount()};
           }
         } else if (HasNativeLogFields(L, log_idx)) {
-          handled_log_wrapper = true;
           if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, writer, tls_res_schema_scratch,
                                            tls_service_scratch, tls_scope_schema_scratch,
                                            tls_scope_name_scratch, tls_scope_ver_scratch,

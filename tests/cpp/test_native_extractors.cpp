@@ -279,6 +279,15 @@ TEST_F(NativeExtractorsTest, NativeLogsTable_EmptyTableReturnsZeroNoEmit) {
     EXPECT_EQ(res.emitted_count, 0);
   }
   {
+    const char* script = R"(return { source_type = "opentelemetry", log = {} })";
+    ASSERT_EQ(luaL_dostring(L_, script), LUA_OK);
+    int table_idx = lua_gettop(L_);
+    auto res = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+    lua_pop(L_, 1);
+    EXPECT_TRUE(res.success);
+    EXPECT_EQ(res.emitted_count, 0);
+  }
+  {
     lua_pushstring(L_, "not a table");
     int bad_idx = lua_gettop(L_);
     auto res = ProcessNativeLogsTable(L_, bad_idx, emit_idx_);
@@ -1174,6 +1183,35 @@ TEST_F(NativeExtractorsTest, NativeMetricsJson_AllSupportedVariants) {
     assert(m4.Histogram == nil)
     assert(m4.TimeUnix == m4.processed_at)
     assert(m4.StartTimeUnix == "")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, JsonWrapperSourceTypeBeforeInnerObject) {
+  auto log_res = ProcessNativeLogs(
+      L_, R"({"source_type":"opentelemetry","log":{"message":"wrapped-after-source-type"}})",
+      emit_idx_);
+  EXPECT_TRUE(log_res.success) << log_res.error;
+  EXPECT_EQ(log_res.emitted_count, 1);
+
+  auto trace_res = ProcessNativeTraces(
+      L_, R"({"source_type":"opentelemetry","log":{"name":"span-after-source-type"}})", emit_idx_);
+  EXPECT_TRUE(trace_res.success) << trace_res.error;
+  EXPECT_EQ(trace_res.emitted_count, 1);
+
+  auto metric_res = ProcessNativeMetrics(
+      L_,
+      R"({"source_type":"opentelemetry","metric":{"name":"metric_after_src","gauge":{"value":9.5}}})",
+      emit_idx_);
+  EXPECT_TRUE(metric_res.success) << metric_res.error;
+  EXPECT_EQ(metric_res.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 3, "Expected 3 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Body == "wrapped-after-source-type", "Log Body mismatch: " .. tostring(emitted[1].log.Body))
+    assert(emitted[2].log.SpanName == "span-after-source-type", "Trace SpanName mismatch: " .. tostring(emitted[2].log.SpanName))
+    assert(emitted[3].log.MetricName == "metric_after_src", "MetricName mismatch: " .. tostring(emitted[3].log.MetricName))
+    assert(math.abs(emitted[3].log.Value - 9.5) < 1e-6, "Metric Value mismatch: " .. tostring(emitted[3].log.Value))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
