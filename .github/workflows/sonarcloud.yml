@@ -65,7 +65,8 @@ jobs:
           gcovr --sonarqube build/coverage.xml -r . \
             --exclude "tests/.*" \
             --exclude "build/.*" \
-            --exclude "cmake/.*"
+            --exclude "cmake/.*" \
+            --exclude "third_party/.*"
 
       - name: Analyze project with SonarCloud
         if: env.SONAR_TOKEN != ''
