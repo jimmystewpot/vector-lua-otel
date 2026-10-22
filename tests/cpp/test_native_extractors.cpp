@@ -1397,6 +1397,160 @@ TEST_F(NativeExtractorsTest, JsonWrapperRecognizedOuterFieldBeforeInnerAndNonZer
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(NativeExtractorsTest, NativeLogsNumericSeverityCodes) {
+  // Test numeric severity codes 1 to 24 and string severity name tokens
+  std::string json = R"([
+    {"message":"m1","severity_number":1,"severity_text":"TRACE"},
+    {"message":"m2","severity_number":"SEVERITY_NUMBER_DEBUG3"},
+    {"message":"m3","severity_number":9,"severity_text":"INFO"},
+    {"message":"m4","severity_number":13},
+    {"message":"m5","severity_number":17,"severity_text":"ERROR"},
+    {"message":"m6","severity_number":"SEVERITY_NUMBER_FATAL4"}
+  ])";
+  auto res = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 6);
+
+  const char* verify = R"(
+    assert(#emitted == 6, "Expected 6 emitted events, got " .. #emitted)
+    assert(emitted[1].log.SeverityNumber == 1, "m1 SeverityNumber mismatch")
+    assert(emitted[1].log.SeverityText == "TRACE", "m1 SeverityText mismatch")
+    assert(emitted[2].log.SeverityNumber == 7, "m2 SeverityNumber mismatch")
+    assert(emitted[3].log.SeverityNumber == 9, "m3 SeverityNumber mismatch")
+    assert(emitted[3].log.SeverityText == "INFO", "m3 SeverityText mismatch")
+    assert(emitted[4].log.SeverityNumber == 13, "m4 SeverityNumber mismatch")
+    assert(emitted[5].log.SeverityNumber == 17, "m5 SeverityNumber mismatch")
+    assert(emitted[5].log.SeverityText == "ERROR", "m5 SeverityText mismatch")
+    assert(emitted[6].log.SeverityNumber == 24, "m6 SeverityNumber mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsArrayWrapperJsonAndTable) {
+  // 1. JSON array wrapper: {"log": [{"message":"m1","severity_number":9},{"message":"m2","severity_number":13}]}
+  std::string json_wrapped =
+      R"({"log":[{"message":"m1","severity_number":9},{"message":"m2","severity_number":13}]})";
+  auto res1 = ProcessNativeLogs(L_, json_wrapped, emit_idx_);
+  EXPECT_TRUE(res1.success) << res1.error;
+  EXPECT_EQ(res1.emitted_count, 2);
+
+  // 2. Table array wrapper: { log = { { message = "m3" }, { message = "m4" } } }
+  const char* script = R"(
+    return {
+      log = {
+        { message = "m3", severity_number = 5 },
+        { message = "m4", severity_number = 17 }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res2 = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 2);
+
+  const char* verify = R"(
+    assert(#emitted == 4, "Expected 4 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Body == "m1", "m1 Body mismatch")
+    assert(emitted[2].log.Body == "m2", "m2 Body mismatch")
+    assert(emitted[3].log.Body == "m3", "m3 Body mismatch")
+    assert(emitted[4].log.Body == "m4", "m4 Body mismatch")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsTimestampFallbackToProcessedAt) {
+  // When no timestamps are provided, fall back to processed_at (ISO-8601 UTC nano)
+  const char* script = R"(
+    return {
+      message = "pure fallback record"
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  std::string json = R"({"message":"json fallback"})";
+  auto res2 = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 2, "Expected 2 emitted events, got " .. #emitted)
+    local r1 = emitted[1].log
+    assert(r1.Timestamp ~= nil and #r1.Timestamp == 30, "r1.Timestamp missing or invalid: " .. tostring(r1.Timestamp))
+    assert(r1.Timestamp == r1.processed_at, "r1.Timestamp must match processed_at")
+
+    local r2 = emitted[2].log
+    assert(r2.Timestamp ~= nil and #r2.Timestamp == 30, "r2.Timestamp missing or invalid: " .. tostring(r2.Timestamp))
+    assert(r2.Timestamp == r2.processed_at, "r2.Timestamp must match processed_at")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, NativeLogsBodyFormatsAndScopeJson) {
+  // Test body stringValue in table mode and scope_schema_url in JSON mode
+  const char* script = R"(
+    return {
+      body = { stringValue = "nested string value" },
+      scope = { schema_url = "https://schemas.example.com/scope" }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
+  int table_idx = lua_gettop(L_);
+  auto res = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+  lua_pop(L_, 1);
+  EXPECT_TRUE(res.success) << res.error;
+  EXPECT_EQ(res.emitted_count, 1);
+
+  std::string json = R"({
+    "message": "scoped log",
+    "scope": {
+      "name": "my-logger",
+      "version": "2.0.0",
+      "schema_url": "https://opentelemetry.io/schemas/scope-v2"
+    },
+    "resource_schema_url": "https://opentelemetry.io/schemas/resource-v2",
+    "trace_flags": 1,
+    "event_name": "custom.log.event"
+  })";
+  auto res2 = ProcessNativeLogs(L_, json, emit_idx_);
+  EXPECT_TRUE(res2.success) << res2.error;
+  EXPECT_EQ(res2.emitted_count, 1);
+
+  std::string json_bodies = R"([
+    {"body": {"stringValue": "json stringValue"}},
+    {"body": null},
+    {"body": {"complex": true}}
+  ])";
+  auto res3 = ProcessNativeLogs(L_, json_bodies, emit_idx_);
+  EXPECT_TRUE(res3.success) << res3.error;
+  EXPECT_EQ(res3.emitted_count, 3);
+
+  const char* verify = R"(
+    assert(#emitted == 5, "Expected 5 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Body == "nested string value", "Table stringValue Body mismatch: " .. tostring(emitted[1].log.Body))
+    assert(emitted[1].log.ScopeSchemaUrl == "https://schemas.example.com/scope", "ScopeSchemaUrl mismatch")
+
+    local r2 = emitted[2].log
+    assert(r2.ScopeName == "my-logger", "ScopeName mismatch")
+    assert(r2.ScopeVersion == "2.0.0", "ScopeVersion mismatch")
+    assert(r2.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope-v2", "ScopeSchemaUrl mismatch")
+    assert(r2.ResourceSchemaUrl == "https://opentelemetry.io/schemas/resource-v2", "ResourceSchemaUrl mismatch")
+    assert(r2.TraceFlags == 1, "TraceFlags mismatch")
+    assert(r2.EventName == "custom.log.event", "EventName mismatch")
+
+    assert(emitted[3].log.Body == "json stringValue", "r3 Body mismatch: " .. tostring(emitted[3].log.Body))
+    assert(emitted[4].log.Body == "", "r4 Body mismatch: " .. tostring(emitted[4].log.Body))
+    assert(emitted[5].log.Body == '{"complex":true}', "r5 Body mismatch: " .. tostring(emitted[5].log.Body))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
 }  // namespace
 }  // namespace native_extractors
 }  // namespace vector_otel
