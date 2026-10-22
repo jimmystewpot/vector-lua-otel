@@ -67,6 +67,9 @@ target_compile_definitions(vector_otel_core PUBLIC
 # Production shared module: MUST NOT link liblua
 add_library(vector_otel MODULE src/module.cpp)
 set_target_properties(vector_otel PROPERTIES PREFIX "")
+if(APPLE)
+  set_target_properties(vector_otel PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
+endif()
 target_link_libraries(vector_otel PRIVATE vector_otel_core)
 
 if(NOT DEFINED LIBDIR)
