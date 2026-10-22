@@ -26,8 +26,8 @@ int ProcessNativeTracesFn(lua_State* L) {
 }
 
 int ProcessNativeMetricsFn(lua_State* L) {
-  return core::ProcessDispatcher<native_extractors::ProcessNativeMetrics,
-                                 native_extractors::ProcessNativeMetricsTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Native, core::Signal::Metrics,
+                               native_extractors::NativeMetricsExtractors());
 }
 
 const luaL_Reg kLogsFuncs[] = {

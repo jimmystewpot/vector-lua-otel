@@ -14,6 +14,7 @@
 #include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
 #include "vector_otel/native_extractors/native_logs_extractor.hpp"
+#include "vector_otel/native_extractors/native_metrics_extractor.hpp"
 #include "vector_otel/native_extractors/native_traces_extractor.hpp"
 
 namespace vector_otel::core {
@@ -542,6 +543,108 @@ const Sig kNativeTracesSig{
     native_extractors::ProcessNativeTraces,
     native_extractors::ProcessNativeTracesTable,
     nullptr,
+    /*native=*/true,
+    /*shared_tables=*/false};
+
+// ---- native metrics ---------------------------------------------------------------------------
+
+// Records cycle through gauge, counter, aggregated_histogram and aggregated_summary so every body
+// type (and every shared array it anchors) is exercised by each sweep.
+std::string NativeMetricBodyJson(int i) {
+  switch (i % 4) {
+    case 0:
+      return "\"gauge\":{\"value\":1.5}";
+    case 1:
+      return "\"counter\":{\"value\":2}";
+    case 2:
+      return "\"aggregated_histogram\":{\"count\":6,\"sum\":10.5,\"explicitBounds\":[1.0,5.0],"
+             "\"counts\":[1,2,3]}";
+    default:
+      return "\"aggregated_summary\":{\"count\":4,\"sum\":2.5,\"quantiles\":[{\"quantile\":0.5,"
+             "\"value\":1.0},{\"quantile\":0.99,\"value\":2.0}]}";
+  }
+}
+
+std::string NativeMetricBodyLua(int i) {
+  switch (i % 4) {
+    case 0:
+      return "gauge={value=1.5}";
+    case 1:
+      return "counter={value=2}";
+    case 2:
+      return "aggregated_histogram={count=6,sum=10.5,explicitBounds={1.0,5.0},counts={1,2,3}}";
+    default:
+      return "aggregated_summary={count=4,sum=2.5,quantiles={{quantile=0.5,value=1.0},"
+             "{quantile=0.99,value=2.0}}}";
+  }
+}
+
+std::string NativeMetricRecordJson(int r, int i) {
+  const std::string n = std::to_string(i);
+  return "{\"name\":\"m-" + n +
+         "\",\"namespace\":\"ns\",\"description\":\"d\",\"unit\":\"1\",\"kind\":\"incremental\","
+         "\"timestamp\":\"2023-11-14T22:13:20.000000001Z\",\"tags\":{\"resource.service.name\":"
+         "\"svc-" +
+         std::to_string(r) + "\",\"scope.name\":\"scope-" + std::to_string(r) + "\",\"host\":\"h" +
+         n + "\"}," + NativeMetricBodyJson(i) + "}";
+}
+
+std::string NativeMetricRecordLua(int r, int i) {
+  const std::string n = std::to_string(i);
+  return "{name=\"m-" + n +
+         "\",namespace=\"ns\",description=\"d\",unit=\"1\",kind=\"incremental\","
+         "timestamp=\"2023-11-14T22:13:20.000000001Z\",tags={[\"resource.service.name\"]=\"svc-" +
+         std::to_string(r) + "\",[\"scope.name\"]=\"scope-" + std::to_string(r) + "\",host=\"h" +
+         n + "\"}," + NativeMetricBodyLua(i) + "}";
+}
+
+std::string NativeMetricsJson(int resources, int records) {
+  std::string out = "[";
+  for (int r = 0; r < resources; ++r) {
+    for (int i = 0; i < records; ++i) {
+      if (r > 0 || i > 0) out += ',';
+      out += NativeMetricRecordJson(r, i);
+    }
+  }
+  return out + "]";
+}
+
+std::string NativeMetricsLua(int resources, int records) {
+  std::string out = "return {";
+  for (int r = 0; r < resources; ++r) {
+    for (int i = 0; i < records; ++i) out += NativeMetricRecordLua(r, i) + ",";
+  }
+  return out + "}";
+}
+
+bool NativeMetricRowComplete(const std::string& dump) {
+  auto has = [&](const char* needle) { return dump.find(needle) != std::string::npos; };
+  if (!has("\"Exemplars\":") || !has("\"ScopeAttributes\":{") || !has("\"ResourceAttributes\":{") ||
+      !has("\"Attributes\":{")) {
+    return false;
+  }
+  if (has("\"MetricType\":\"histogram\"")) {
+    return has("\"bucketCounts\":[1,2,3]") && has("\"explicitBounds\":[");
+  }
+  if (has("\"MetricType\":\"summary\"")) return has("\"quantileValues\":[");
+  return true;
+}
+
+const Sig kNativeMetricsSig{
+    "metrics",
+    NativeMetricsJson,
+    NativeMetricsLua,
+    true,
+    {"\"MetricName\":\"ns.m-0\"", "\"MetricType\":\"gauge\"", "\"ServiceName\":\"svc-0\"",
+     "\"ScopeName\":\"scope-0\"", "\"Attributes\":{\"host\":\"h0\"}",
+     "\"ResourceAttributes\":{\"service.name\":\"svc-0\"}", "\"MetricUnit\":\"1\""},
+    {"{}", "[]", "[{}]", "{\"metric\":{}}", "{\"log\":[]}", "{\"log\":[{}]}", "[{\"metric\":{}}]",
+     "{\"name\":\"m\"}"},
+    {"return {}", "return {{}}", "return {metric={}}", "return {log={{}}}", "return {{metric={}}}",
+     "return {{unrelated=1}}", "return {name=\"m\"}"},
+    native_extractors::ProcessNativeMetrics,
+    native_extractors::ProcessNativeMetricsTable,
+    NativeMetricRowComplete,
     /*native=*/true,
     /*shared_tables=*/false};
 
@@ -1504,9 +1607,318 @@ TEST(FailureSafetyNativeTraces, MalformedEntriesAndRoots) {
   EXPECT_EQ(rt.count, 2);
 }
 
+// ---- native metrics: accepted shapes, mappings, unsupported variants, limits ------------------
+
+struct NativeMetricCase {
+  const char* name;
+  const char* json;
+  const char* lua;
+  std::vector<std::string> fragments;  // each must appear in the first delivered row (both inputs)
+};
+
+TEST(FailureSafetyNativeMetrics, AcceptedShapesAndMappings) {
+  const NativeMetricCase cases[] = {
+      {"counter with temporality and monotonicity",
+       R"({"name":"c","counter":{"value":2},"kind":"incremental","is_monotonic":true})",
+       R"(return {name="c",counter={value=2},kind="incremental",is_monotonic=true})",
+       {R"("MetricName":"c")", R"("MetricType":"sum")", R"("Value":2)", R"("IsMonotonic":true)",
+        R"("AggregationTemporality":1)", R"("ResourceAttributes":{})", R"("ScopeAttributes":{})",
+        R"("Attributes":{})", R"("Exemplars":{})", R"("ServiceName":"unknown_service")",
+        R"("Flags":0)"}},
+      {"gauge keeps a double value",
+       R"({"name":"g","gauge":{"value":99.25}})",
+       R"(return {name="g",gauge={value=99.25}})",
+       {R"("MetricType":"gauge")", R"("Value":99.25)"}},
+      {"metric without a value has no Value column",
+       R"({"name":"g","gauge":{}})",
+       R"(return {name="g",gauge={}})",
+       {R"("MetricType":"gauge")"}},
+      {"namespace prefixes the name",
+       R"({"name":"n","namespace":"ns","gauge":{"value":1}})",
+       R"(return {name="n",namespace="ns",gauge={value=1}})",
+       {R"("MetricName":"ns.n")"}},
+      {"metric wrapper",
+       R"({"metric":{"name":"w","gauge":{"value":1}}})",
+       R"(return {metric={name="w",gauge={value=1}}})",
+       {R"("MetricName":"w")"}},
+      {"histogram with bucket objects strips infinity",
+       R"({"name":"h","aggregated_histogram":{"count":3,"sum":4.5,"min":1,"max":3,"buckets":[{"count":1,"upper_limit":1.0},{"count":2,"upper_limit":"+Inf"}]}})",
+       R"(return {name="h",aggregated_histogram={count=3,sum=4.5,min=1,max=3,buckets={{count=1,upper_limit=1.0},{count=2,upper_limit=1e999}}}})",
+       {R"("MetricType":"histogram")", R"("bucketCounts":[1,2])", R"("BucketCounts":[1,2])",
+        R"("explicitBounds":[1)", R"("count":3)", R"("Count":3)", R"("min":1)", R"("Max":3)"}},
+      {"histogram with parallel arrays",
+       R"({"name":"h","aggregated_histogram":{"count":6,"sum":10.5,"explicitBounds":[1.0,5.0],"counts":[1,2,3]}})",
+       R"(return {name="h",aggregated_histogram={count=6,sum=10.5,explicitBounds={1.0,5.0},counts={1,2,3}}})",
+       {R"("bucketCounts":[1,2,3])", R"("BucketCounts":[1,2,3])", R"("explicitBounds":[1)",
+        R"("ExplicitBounds":[1)"}},
+      {"summary with quantile objects",
+       R"({"name":"s","aggregated_summary":{"count":2,"sum":3.5,"quantiles":[{"quantile":0.5,"value":1.0},{"quantile":0.99,"value":2.0}]}})",
+       R"(return {name="s",aggregated_summary={count=2,sum=3.5,quantiles={{quantile=0.5,value=1.0},{quantile=0.99,value=2.0}}}})",
+       {R"("MetricType":"summary")", R"("quantileValues":[{)", R"("QuantileValues":[{)",
+        R"("Quantile":0.99)", R"("value":2)"}},
+      {"summary with parallel quantile and value arrays",
+       R"({"name":"s","aggregated_summary":{"count":2,"sum":3.5,"quantiles":[0.5,0.99],"values":[1.0,2.0]}})",
+       R"(return {name="s",aggregated_summary={count=2,sum=3.5,quantiles={0.5,0.99},values={1.0,2.0}}})",
+       {R"("quantile":0.5)", R"("Value":2)"}},
+      {"tags split into resource, scope, unit, description and attributes",
+       R"({"name":"t","gauge":{"value":1},"tags":{"resource.service.name":"svc","resource.region":"eu","scope.name":"sc","scope.version":"2","scope.attr":"sv","otel.unit":"ms","otel.description":"desc","host":"h1","count":7,"ratio":1.5,"flag":true}})",
+       R"(return {name="t",gauge={value=1},tags={["resource.service.name"]="svc",["resource.region"]="eu",["scope.name"]="sc",["scope.version"]="2",["scope.attr"]="sv",["otel.unit"]="ms",["otel.description"]="desc",host="h1",count=7,ratio=1.5,flag=true}})",
+       {R"("ServiceName":"svc")", R"("ResourceAttributes":{"region":"eu","service.name":"svc"})",
+        R"("ScopeName":"sc")", R"("ScopeVersion":"2")", R"("ScopeAttributes":{"attr":"sv"})",
+        R"("MetricUnit":"ms")", R"("MetricDescription":"desc")",
+        R"("Attributes":{"count":7,"flag":true,"host":"h1","ratio":1.5)"}},
+      {"multi-value tags keep the last value",
+       R"({"name":"m","gauge":{"value":1},"tags":{"zone":["a","b"]}})",
+       R"(return {name="m",gauge={value=1},tags={zone={"a","b"}}})",
+       {R"("Attributes":{"zone":"b"})"}},
+      {"top-level service name is the fallback",
+       R"({"name":"m","gauge":{"value":1},"service_name":"top"})",
+       R"(return {name="m",gauge={value=1},service_name="top"})",
+       {R"("ServiceName":"top")"}},
+      {"interval derives the start time",
+       R"({"name":"m","gauge":{"value":1},"timestamp":"2023-11-14T22:13:21Z","interval_ms":1000})",
+       R"(return {name="m",gauge={value=1},timestamp="2023-11-14T22:13:21Z",interval_ms=1000})",
+       {R"("StartTimeUnix":"2023-11-14T22:13:20.000000000Z")",
+        R"("TimeUnix":"2023-11-14T22:13:21.000000000Z")"}},
+      {"resources, scope attributes and attributes",
+       R"({"name":"m","gauge":{"value":1},"resources":{"service.name":"r","k":"v"},"scope":{"name":"sn","attributes":{"sa":"sb"}},"attributes":{"a":"b"}})",
+       R"(return {name="m",gauge={value=1},resources={["service.name"]="r",k="v"},scope={name="sn",attributes={sa="sb"}},attributes={a="b"}})",
+       {R"("ServiceName":"r")", R"("ResourceAttributes":{"k":"v","service.name":"r"})",
+        R"("ScopeName":"sn")", R"("ScopeAttributes":{"sa":"sb"})", R"("Attributes":{"a":"b"})"}},
+  };
+  for (const NativeMetricCase& c : cases) {
+    for (bool table : {false, true}) {
+      SCOPED_TRACE(std::string(c.name) + (table ? " (table)" : " (json)"));
+      RawState s;
+      ProcRecorder rec;
+      rec.dump = true;
+      const ProcResult r =
+          CallProcess(s, true, "metrics", table ? TablePayload(c.lua) : JsonPayload(c.json), rec);
+      ASSERT_EQ(r.status, LUA_OK);
+      ASSERT_EQ(r.nresults, 2) << r.error;
+      EXPECT_EQ(r.count, 1);
+      EXPECT_EQ(rec.rows, 1);
+      ASSERT_FALSE(rec.events.empty());
+      for (const std::string& fragment : c.fragments) {
+        EXPECT_NE(rec.events[0].find(fragment), std::string::npos)
+            << fragment << " in " << rec.events[0];
+      }
+      for (int i = 0; i < kInvocationSlotCount; ++i) {
+        EXPECT_EQ(AnchorSlotType(s.L(), ModuleKind::Native, static_cast<AnchorSlot>(i)),
+                  LUA_TBOOLEAN);
+      }
+    }
+  }
+}
+
+// JSON attribute sources merge in document order and a later write to a key wins; table input
+// reads resources before attributes before tags.
+TEST(FailureSafetyNativeMetrics, AttributeSourcesMergeLastWriteWins) {
+  RawState a;
+  ProcRecorder json_first;
+  json_first.dump = true;
+  ASSERT_EQ(CallProcess(a, true, "metrics", JsonPayload(R"({"name":"m","gauge":{"value":1},
+                          "tags":{"resource.k":"tag","resource.t":"1","plain":"tag"},
+                          "resources":{"k":"res","r":"2"},"attributes":{"plain":"attr"}})"),
+                        json_first)
+                .count,
+            1);
+  EXPECT_NE(json_first.events[0].find(R"("ResourceAttributes":{"k":"res","r":"2","t":"1"})"),
+            std::string::npos)
+      << json_first.events[0];
+  EXPECT_NE(json_first.events[0].find(R"("Attributes":{"plain":"attr"})"), std::string::npos);
+
+  RawState b;
+  ProcRecorder json_last;
+  json_last.dump = true;
+  ASSERT_EQ(CallProcess(b, true, "metrics", JsonPayload(R"({"name":"m","gauge":{"value":1},
+                          "resources":{"k":"res"},"attributes":{"plain":"attr"},
+                          "tags":{"resource.k":"tag","plain":"tag"}})"),
+                        json_last)
+                .count,
+            1);
+  EXPECT_NE(json_last.events[0].find(R"("ResourceAttributes":{"k":"tag"})"), std::string::npos)
+      << json_last.events[0];
+  EXPECT_NE(json_last.events[0].find(R"("Attributes":{"plain":"tag"})"), std::string::npos);
+
+  RawState c;
+  ProcRecorder tbl;
+  tbl.dump = true;
+  ASSERT_EQ(CallProcess(c, true, "metrics", TablePayload(R"(return {name="m",gauge={value=1},
+                          tags={["resource.k"]="tag",plain="tag"},
+                          resources={k="res"},attributes={plain="attr"}})"),
+                        tbl)
+                .count,
+            1);
+  EXPECT_NE(tbl.events[0].find(R"("ResourceAttributes":{"k":"tag"})"), std::string::npos)
+      << tbl.events[0];
+  EXPECT_NE(tbl.events[0].find(R"("Attributes":{"plain":"tag"})"), std::string::npos);
+}
+
+// Table-mode exemplars are normalised into the row (the legacy path passed the caller's table
+// through by reference).
+TEST(FailureSafetyNativeMetrics, TableExemplarsAreCopiedNotAliased) {
+  RawState s;
+  ProcRecorder rec;
+  rec.dump = true;
+  const ProcResult r = CallProcess(
+      s, true, "metrics",
+      TablePayload(R"(return {name="m",gauge={value=1},exemplars={{value=1.5,span_id="ab"},5}})"),
+      rec);
+  ASSERT_EQ(r.nresults, 2) << r.error;
+  ASSERT_EQ(rec.rows, 1);
+  EXPECT_NE(rec.events[0].find(R"("Exemplars":[{)"), std::string::npos) << rec.events[0];
+  EXPECT_NE(rec.events[0].find(R"("SpanId":"ab")"), std::string::npos) << rec.events[0];
+}
+
+TEST(FailureSafetyNativeMetrics, UnsupportedVariantsFailWithExactMessageAndPartialCount) {
+  for (const char* variant : {"distribution", "set", "sketch"}) {
+    const std::string expected = std::string("Unsupported non-OTLP metric variant '") + variant +
+                                 "': vector_native only supports OpenTelemetry metric types "
+                                 "(counter, gauge, aggregated_histogram, aggregated_summary)";
+    for (bool table : {false, true}) {
+      SCOPED_TRACE(std::string(variant) + (table ? " (table)" : " (json)"));
+      RawState s;
+      ProcRecorder rec;
+      const std::string json =
+          std::string(R"([{"name":"ok","gauge":{"value":1}},{"name":"bad",")") + variant +
+          R"(":{"x":1}},{"name":"never","gauge":{"value":2}}])";
+      const std::string lua = std::string(R"(return {{name="ok",gauge={value=1}},{name="bad",)") +
+                              variant + R"(={x=1}},{name="never",gauge={value=2}}})";
+      const ProcResult r =
+          CallProcess(s, true, "metrics", table ? TablePayload(lua) : JsonPayload(json), rec);
+      ASSERT_EQ(r.status, LUA_OK);
+      ASSERT_EQ(r.nresults, 3);
+      EXPECT_TRUE(r.first_nil);
+      EXPECT_EQ(r.error, expected);
+      EXPECT_EQ(r.count, rec.rows) << "partial count must equal rows in completed callbacks";
+      EXPECT_EQ(r.count, (1 / kN) * kN);
+      for (int i = 0; i < kInvocationSlotCount; ++i) {
+        EXPECT_EQ(AnchorSlotType(s.L(), ModuleKind::Native, static_cast<AnchorSlot>(i)),
+                  LUA_TBOOLEAN);
+      }
+    }
+  }
+  // A null variant is ignored in JSON input.
+  RawState s;
+  ProcRecorder rec;
+  const ProcResult r = CallProcess(
+      s, true, "metrics", JsonPayload(R"({"name":"ok","gauge":{"value":1},"set":null})"), rec);
+  ASSERT_EQ(r.nresults, 2) << r.error;
+  EXPECT_EQ(r.count, 1);
+}
+
+// Root shapes, wrapper handling and error propagation that the shape table cannot express.
+TEST(FailureSafetyNativeMetrics, RootShapesWrappersAndErrors) {
+  // A scalar root, or a non-object array element, is a JSON error (not a silent skip).
+  for (const char* bad : {"5", R"([{"name":"a","gauge":{"value":1}},5])"}) {
+    SCOPED_TRACE(bad);
+    RawState s;
+    ProcRecorder rec;
+    const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(bad), rec);
+    ASSERT_EQ(r.nresults, 3);
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_EQ(r.count, rec.rows);
+  }
+
+  // The "log" wrapper key is accepted in both inputs, like "metric".
+  for (bool table : {false, true}) {
+    SCOPED_TRACE(table ? "table log wrapper" : "json log wrapper");
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    const ProcResult r =
+        CallProcess(s, true, "metrics",
+                    table ? TablePayload(R"(return {log={name="w",gauge={value=1}}})")
+                          : JsonPayload(R"({"log":{"name":"w","gauge":{"value":1}}})"),
+                    rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    EXPECT_EQ(r.count, 1);
+    ASSERT_EQ(rec.rows, 1);
+    EXPECT_NE(rec.events[0].find(R"("MetricName":"w")"), std::string::npos);
+  }
+
+  // An unmatched wrapper must not clobber the staging of its enclosing object.
+  {
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    const ProcResult r = CallProcess(
+        s, true, "metrics",
+        JsonPayload(R"({"name":"outer","aggregated_histogram":{"count":2,"sum":1,"counts":[1,1]},)"
+                    R"("tags":{"resource.k":"v","scope.s":"t","h":"x"},"metric":{"unrelated":1}})"),
+        rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    ASSERT_EQ(rec.rows, 1);
+    EXPECT_NE(rec.events[0].find(R"("MetricName":"outer")"), std::string::npos) << rec.events[0];
+    EXPECT_NE(rec.events[0].find(R"("ResourceAttributes":{"k":"v"})"), std::string::npos)
+        << rec.events[0];
+    EXPECT_NE(rec.events[0].find(R"("ScopeAttributes":{"s":"t"})"), std::string::npos);
+    EXPECT_NE(rec.events[0].find(R"("Attributes":{"h":"x"})"), std::string::npos);
+    EXPECT_NE(rec.events[0].find(R"("bucketCounts":[1,1])"), std::string::npos);
+  }
+
+  // The derived start time clamps at the epoch instead of wrapping.
+  {
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    const ProcResult r = CallProcess(
+        s, true, "metrics",
+        JsonPayload(R"({"name":"m","gauge":{"value":1},"timestamp":"1970-01-01T00:00:00.000001Z",)"
+                    R"("interval_ms":5})"),
+        rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    ASSERT_EQ(rec.rows, 1);
+    EXPECT_NE(rec.events[0].find(R"("StartTimeUnix":"1970-01-01T00:00:00.000000000Z")"),
+              std::string::npos)
+        << rec.events[0];
+  }
+
+  // An unsupported variant inside a single table record or a table wrapper is an error.
+  const std::string expected =
+      "Unsupported non-OTLP metric variant 'set': vector_native only supports OpenTelemetry "
+      "metric types (counter, gauge, aggregated_histogram, aggregated_summary)";
+  for (const char* lua : {R"(return {name="x",gauge={value=1},set={x=1}})",
+                          R"(return {metric={name="x",gauge={value=1},set={x=1}}})"}) {
+    SCOPED_TRACE(lua);
+    RawState s;
+    ProcRecorder rec;
+    const ProcResult r = CallProcess(s, true, "metrics", TablePayload(lua), rec);
+    ASSERT_EQ(r.nresults, 3);
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_EQ(r.error, expected);
+    EXPECT_EQ(r.count, 0);
+  }
+}
+
+// The 2048 limit counts events, never the buckets or quantiles inside one.
+TEST(FailureSafetyNativeMetrics, LimitCountsEventsNotBuckets) {
+  std::string counts_json;
+  std::string counts_lua;
+  for (int i = 0; i < 3000; ++i) {
+    counts_json += (i ? ",0" : "0");
+    counts_lua += (i ? ",0" : "0");
+  }
+  const std::string json =
+      R"({"name":"h","aggregated_histogram":{"count":0,"sum":0,"counts":[)" + counts_json + "]}}";
+  const std::string lua =
+      R"(return {name="h",aggregated_histogram={count=0,sum=0,counts={)" + counts_lua + "}}}";
+  for (bool table : {false, true}) {
+    SCOPED_TRACE(table ? "table input" : "json input");
+    RawState s;
+    ProcRecorder rec;
+    const ProcResult r =
+        CallProcess(s, true, "metrics", table ? TablePayload(lua) : JsonPayload(json), rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    EXPECT_EQ(r.count, 1);
+    EXPECT_EQ(rec.rows, 1);
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
                          testing::Values(&kLogsSig, &kTracesSig, &kMetricsSig, &kAnyMetricsSig,
-                                         &kNativeLogsSig, &kNativeTracesSig),
+                                         &kNativeLogsSig, &kNativeTracesSig, &kNativeMetricsSig),
                          [](const testing::TestParamInfo<const Sig*>& info) {
                            // `name` is the process() signal; the all-types variant shares it.
                            if (info.param == &kAnyMetricsSig)
