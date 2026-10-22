@@ -7,3 +7,4 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export LUA_CPATH="${PROJECT_ROOT}/build/?.so;;"
 
 lua5.4 "${SCRIPT_DIR}/test_vector_otel.lua"
+lua5.4 "${SCRIPT_DIR}/test_vector_native.lua"

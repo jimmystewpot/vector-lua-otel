@@ -1,0 +1,142 @@
+sources:
+  otel_native_in:
+    type: opentelemetry
+    http:
+      address: 0.0.0.0:4328
+    grpc:
+      address: 0.0.0.0:4327
+    use_otlp_decoding: false
+
+transforms:
+  traces_to_logs:
+    type: trace_to_log
+    inputs:
+      - otel_native_in.traces
+    log_namespace: false
+
+  extract_native_logs:
+    type: lua
+    version: "2"
+    inputs:
+      - otel_native_in.logs
+    source: |
+      package.cpath = "build/?.so;../build/?.so;../../build/?.so;" .. package.cpath
+      local native_logs = require("vector_native").logs
+
+      function process(event, emit)
+        local payload = event.log or event
+        local count, err = native_logs.process(payload, emit)
+        if not count then
+          error("Vector native logs extraction failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+
+  extract_native_traces:
+    type: lua
+    version: "2"
+    inputs:
+      - traces_to_logs
+    source: |
+      package.cpath = "build/?.so;../build/?.so;../../build/?.so;" .. package.cpath
+      local native_traces = require("vector_native").traces
+
+      function process(event, emit)
+        local payload = event.log or event
+        local count, err = native_traces.process(payload, emit)
+        if not count then
+          error("Vector native traces extraction failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+
+  extract_native_metrics:
+    type: lua
+    version: "2"
+    inputs:
+      - otel_native_in.metrics
+    source: |
+      package.cpath = "build/?.so;../build/?.so;../../build/?.so;" .. package.cpath
+      local native_metrics = require("vector_native").metrics
+
+      function process(event, emit)
+        local payload = event.metric or event
+        local count, err = native_metrics.process(payload, emit)
+        if not count then
+          error("Vector native metrics extraction failed: " .. tostring(err))
+        end
+      end
+    hooks:
+      process: "process"
+
+sinks:
+  s3_parquet_native_logs:
+    type: aws_s3
+    inputs:
+      - extract_native_logs
+    bucket: telemetry-warehouse
+    region: us-east-1
+    key_prefix: logs/year=%Y/month=%m/day=%d/
+    compression: none
+    encoding:
+      codec: text
+    batch_encoding:
+      codec: parquet
+      schema_file: schemas/parquet/logs.schema
+      compression:
+        algorithm: zstd
+        level: 3
+    buffer:
+      type: memory
+      max_events: 10000
+    batch:
+      max_bytes: 10485760
+      timeout_secs: 30
+
+  s3_parquet_native_traces:
+    type: aws_s3
+    inputs:
+      - extract_native_traces
+    bucket: telemetry-warehouse
+    region: us-east-1
+    key_prefix: traces/year=%Y/month=%m/day=%d/
+    compression: none
+    encoding:
+      codec: text
+    batch_encoding:
+      codec: parquet
+      schema_file: schemas/parquet/traces.schema
+      compression:
+        algorithm: zstd
+        level: 3
+    buffer:
+      type: memory
+      max_events: 10000
+    batch:
+      max_bytes: 10485760
+      timeout_secs: 30
+
+  s3_parquet_native_metrics:
+    type: aws_s3
+    inputs:
+      - extract_native_metrics
+    bucket: telemetry-warehouse
+    region: us-east-1
+    key_prefix: metrics/year=%Y/month=%m/day=%d/
+    compression: none
+    encoding:
+      codec: text
+    batch_encoding:
+      codec: parquet
+      schema_file: schemas/parquet/metrics.schema
+      compression:
+        algorithm: zstd
+        level: 3
+    buffer:
+      type: memory
+      max_events: 10000
+    batch:
+      max_bytes: 10485760
+      timeout_secs: 30
