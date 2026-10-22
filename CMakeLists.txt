@@ -121,6 +121,7 @@ target_link_libraries(vector_otel_tests PRIVATE
 add_test(NAME vector_otel_tests COMMAND vector_otel_tests)
 target_compile_definitions(vector_otel_tests PRIVATE
   VECTOR_OTEL_TEST_EXPECTED_MAX_PAYLOAD_BYTES=${VECTOR_OTEL_MAX_PAYLOAD_BYTES}
+  VECTOR_OTEL_UNCHECKED_READ_KEYS  # tests probe the readers with arbitrary keys (see read_keys.hpp)
 )
 
 # Configure-only tests for the VECTOR_OTEL_MAX_PAYLOAD_BYTES contract. The end-to-end cases
@@ -150,6 +151,7 @@ add_executable(vector_otel_fault_tests
   tests/cpp/test_operation_context.cpp
   tests/cpp/test_admission.cpp
   tests/cpp/test_staged_row.cpp
+  tests/cpp/test_table_staging.cpp
   src/module.cpp
   src/native_module.cpp
   tests/support/fault_new.cpp
@@ -162,4 +164,5 @@ target_link_libraries(vector_otel_fault_tests PRIVATE
   ${LUA_LIBRARIES}
   GTest::gtest
 )
+target_compile_definitions(vector_otel_fault_tests PRIVATE VECTOR_OTEL_UNCHECKED_READ_KEYS)
 add_test(NAME vector_otel_fault_tests COMMAND vector_otel_fault_tests)

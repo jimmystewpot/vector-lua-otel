@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "vector_otel/core/read_keys.hpp"
+
 namespace vector_otel::core {
 
 namespace {
@@ -62,12 +64,20 @@ int BootstrapLeaf(lua_State* L) {
       {ImmutableSlot::kStackMessage, kStackText},
   };
   static_assert(
-      sizeof(fixed) / sizeof(fixed[0]) + 1 == static_cast<std::size_t>(ImmutableSlot::kCount),
-      "every immutable slot must be interned");
+      sizeof(fixed) / sizeof(fixed[0]) + 2 == static_cast<std::size_t>(ImmutableSlot::kCount),
+      "every immutable slot must be interned (payload limit and read keys are built separately)");
   for (const Fixed& f : fixed) {
     lua_pushlstring(L, f.text.data(), f.text.size());
     lua_rawseti(L, 2, ImmutableIndex(f.slot));
   }
+
+  // Root every table-reader key so lua_pushstring() on it can never allocate later.
+  lua_createtable(L, static_cast<int>(kReadKeyCount), 0);
+  for (std::size_t i = 0; i < kReadKeyCount; ++i) {
+    lua_pushlstring(L, kReadKeyList[i].data(), kReadKeyList[i].size());
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
+  }
+  lua_rawseti(L, 2, ImmutableIndex(ImmutableSlot::kReadKeys));
 
   for (int i = 0; i < kInvocationSlotCount; ++i) {
     lua_pushboolean(L, 0);

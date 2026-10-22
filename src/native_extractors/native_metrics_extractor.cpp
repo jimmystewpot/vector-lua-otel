@@ -1159,7 +1159,7 @@ bool HasNativeMetricFields(lua_State* L, int table_idx) {
   if (!lua_istable(L, abs_idx) || core::IsLuaTableEmpty(L, abs_idx)) {
     return false;
   }
-  static constexpr const char* kKeys[] = {
+  static constexpr core::ReadKey kKeys[] = {
       "name",
       "namespace",
       "counter",
@@ -1178,7 +1178,7 @@ bool HasNativeMetricFields(lua_State* L, int table_idx) {
       "tags",
       "kind",
   };
-  for (const char* k : kKeys) {
+  for (const core::ReadKey& k : kKeys) {
     if (core::GetTableFieldRaw(L, abs_idx, k)) {
       lua_pop(L, 1);
       return true;
@@ -1502,11 +1502,11 @@ bool ExtractSingleNativeMetricTable(
   int abs_rec_idx = lua_absindex(L, rec_idx);
 
   // 1. Check for unsupported non-OTLP metric variants first
-  static constexpr const char* kUnsupportedVariants[] = {"distribution", "set", "sketch"};
-  for (const char* v : kUnsupportedVariants) {
+  static constexpr core::ReadKey kUnsupportedVariants[] = {"distribution", "set", "sketch"};
+  for (const core::ReadKey& v : kUnsupportedVariants) {
     if (core::GetTableFieldRaw(L, abs_rec_idx, v)) {
       lua_pop(L, 1);
-      err_out = UnsupportedMetricVariantError(v);
+      err_out = UnsupportedMetricVariantError(v.c_str());
       return false;
     }
   }

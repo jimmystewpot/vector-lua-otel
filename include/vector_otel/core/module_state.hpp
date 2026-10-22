@@ -39,6 +39,7 @@ enum class ImmutableSlot : int {
   kEmitArgMessage,
   kReentrantMessage,
   kStackMessage,
+  kReadKeys,  // array of every interned table-reader key (see read_keys.hpp)
   kCount,
 };
 

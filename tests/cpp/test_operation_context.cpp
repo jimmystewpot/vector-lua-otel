@@ -145,8 +145,11 @@ TEST(ModuleStateTest, ImmutableMessagesAreInternedAtBootstrapWithTheCompiledLimi
        "re-entrant vector_otel.process() invocation is not permitted"},
       {ImmutableSlot::kStackMessage, "out of lua stack space"},
   };
-  static_assert(sizeof(cases) / sizeof(cases[0]) ==
+  // kReadKeys (the rooted read-key table) is the last slot and is not a string.
+  static_assert(static_cast<std::size_t>(ImmutableSlot::kReadKeys) + 1 ==
                 static_cast<std::size_t>(ImmutableSlot::kCount));
+  static_assert(sizeof(cases) / sizeof(cases[0]) ==
+                static_cast<std::size_t>(ImmutableSlot::kReadKeys));
   for (const Case& c : cases) {
     PushImmutable(L, anchor, c.slot);
     ASSERT_EQ(lua_type(L, -1), LUA_TSTRING);

@@ -32,11 +32,11 @@ struct Walk {
 
 // Field names of the shapes the extractors read. Camel case is tried before snake case.
 struct Layout {
-  const char* resource[2];
-  const char* scope[2];
-  const char* leaf[2];             // logRecords / spans / metrics
-  const char* table_wrappers[2];   // OTLP table input: wrapper that may hold the resource array
-  const char* native_wrappers[2];  // native input: wrapper that may hold the event(s)
+  ReadKey resource[2];
+  ReadKey scope[2];
+  ReadKey leaf[2];             // logRecords / spans / metrics
+  ReadKey table_wrappers[2];   // OTLP table input: wrapper that may hold the resource array
+  ReadKey native_wrappers[2];  // native input: wrapper that may hold the event(s)
   bool metrics;
 };
 
@@ -74,8 +74,8 @@ const Layout& LayoutFor(Signal signal) noexcept {
 // The extractor reads exactly one metric type per descriptor: the lowest rank that is present as
 // an object. Counting only that type is what keeps a descriptor's alternatives from being summed.
 struct MetricType {
-  const char* name;
-  const char* alt;
+  ReadKey name;
+  ReadKey alt;
   int rank;  // 1-based; lower wins
 };
 constexpr MetricType kMetricTypes[] = {
@@ -87,7 +87,7 @@ constexpr int kMetricRankCount = 5;
 
 int MetricRank(std::string_view key) noexcept {
   for (const MetricType& t : kMetricTypes) {
-    if (key == t.name || (t.alt != nullptr && key == t.alt)) {
+    if (key == t.name.c_str() || (t.alt.present() && key == t.alt.c_str())) {
       return t.rank;
     }
   }
@@ -200,17 +200,17 @@ void CountOtlpJson(od::document& doc, const Layout& layout, Walk& w) noexcept {
     return;
   }
   od::value resources;
-  if (!FieldOf(root, layout.resource[0], layout.resource[1], resources)) {
+  if (!FieldOf(root, layout.resource[0].c_str(), layout.resource[1].c_str(), resources)) {
     return;
   }
   EachObject(resources, w, [&](od::object& resource) noexcept {
     od::value scopes;
-    if (!FieldOf(resource, layout.scope[0], layout.scope[1], scopes)) {
+    if (!FieldOf(resource, layout.scope[0].c_str(), layout.scope[1].c_str(), scopes)) {
       return;
     }
     EachObject(scopes, w, [&](od::object& scope) noexcept {
       od::value leaves;
-      if (!FieldOf(scope, layout.leaf[0], layout.leaf[1], leaves)) {
+      if (!FieldOf(scope, layout.leaf[0].c_str(), layout.leaf[1].c_str(), leaves)) {
         return;
       }
       if (!layout.metrics) {
@@ -243,9 +243,9 @@ void CountNativeJson(od::document& doc, const Layout& layout, Walk& w) noexcept 
   }
   // A single event is one candidate; a wrapper holding an array replaces that with its members.
   std::size_t candidates = 1;
-  for (const char* wrapper : layout.native_wrappers) {
+  for (const ReadKey& wrapper : layout.native_wrappers) {
     od::value value;
-    if (wrapper == nullptr || !FieldOf(root, wrapper, nullptr, value)) {
+    if (!wrapper.present() || !FieldOf(root, wrapper.c_str(), nullptr, value)) {
       continue;
     }
     od::json_type wrapper_type{};
@@ -317,8 +317,8 @@ void CountNonEmptyTables(lua_State* L, int arr, Walk& w) {
 void CountMetricTable(lua_State* L, int metric, Walk& w) {
   const int top = lua_gettop(L);
   for (const MetricType& type : kMetricTypes) {
-    for (const char* name : {type.name, type.alt}) {
-      if (name == nullptr || !GetTableFieldRaw(L, metric, name)) {
+    for (const ReadKey& name : {type.name, type.alt}) {
+      if (!name.present() || !GetTableFieldRaw(L, metric, name)) {
         continue;
       }
       if (!lua_istable(L, -1)) {
@@ -341,8 +341,8 @@ int ResolveResources(lua_State* L, int root, const Layout& layout) {
   if (GetTableFieldRaw(L, root, layout.resource[0], layout.resource[1])) {
     return lua_gettop(L);
   }
-  for (const char* wrapper : layout.table_wrappers) {
-    if (wrapper == nullptr) {
+  for (const ReadKey& wrapper : layout.table_wrappers) {
+    if (!wrapper.present()) {
       continue;
     }
     const int top = lua_gettop(L);
@@ -388,8 +388,8 @@ void CountNativeTable(lua_State* L, int root, const Layout& layout, Walk& w) {
     return;
   }
   const int top = lua_gettop(L);
-  for (const char* wrapper : layout.native_wrappers) {
-    if (wrapper == nullptr || !GetTableFieldRaw(L, root, wrapper)) {
+  for (const ReadKey& wrapper : layout.native_wrappers) {
+    if (!wrapper.present() || !GetTableFieldRaw(L, root, wrapper)) {
       continue;
     }
     const int value = lua_gettop(L);

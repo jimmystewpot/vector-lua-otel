@@ -63,7 +63,7 @@ void PushRefOrEmptyTable(lua_State* L, core::ScopedLuaRef& ref) {
   }
 }
 
-bool TryGetTableSubtable(lua_State* L, int obj_idx, const char* k1, const char* k2 = nullptr) {
+bool TryGetTableSubtable(lua_State* L, int obj_idx, core::ReadKey k1, core::ReadKey k2 = nullptr) {
   if (core::GetTableField(L, obj_idx, k1, k2)) {
     if (lua_istable(L, -1)) {
       return true;
@@ -1381,7 +1381,7 @@ ExtractionResult ProcessMetricsTableImpl(lua_State* L, int abs_idx, core::LuaEmi
                 SetDualDoubleField(L, eh_tab_idx, "zeroThreshold", "ZeroThreshold",
                                    eh_zero_threshold);
 
-                auto push_exp_buckets_subtable = [&](const char* k1, const char* k2) {
+                auto push_exp_buckets_subtable = [&](core::ReadKey k1, core::ReadKey k2) {
                   lua_createtable(L, 0, 4);
                   int sub_idx = lua_absindex(L, -1);
                   int64_t offset = 0;
@@ -1405,7 +1405,7 @@ ExtractionResult ProcessMetricsTableImpl(lua_State* L, int abs_idx, core::LuaEmi
                   }
                   SetDualSubtableField(L, sub_idx, "bucketCounts", "BucketCounts");
                   SetDualIntField(L, sub_idx, "offset", "Offset", static_cast<lua_Integer>(offset));
-                  SetDualSubtableField(L, eh_tab_idx, k1, k2);
+                  SetDualSubtableField(L, eh_tab_idx, k1.c_str(), k2.c_str());
                 };
                 push_exp_buckets_subtable("positive", "Positive");
                 push_exp_buckets_subtable("negative", "Negative");

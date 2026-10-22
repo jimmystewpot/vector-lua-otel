@@ -566,13 +566,14 @@ void OomTableBody(OperationContext& ctx, Scenario& sc) {
   RecordOutcome(ctx, sc, ok);
 }
 
-TEST(AdmissionTest, PersistentOomDuringTableCountingIsAMemoryError) {
+// Table counting reads only through rooted, pre-interned keys with raw Lua operations, so even a
+// persistent Lua allocator denial armed before the very first allocation cannot touch it: no
+// raise, no Memory error, and the same count as an unfaulted run.
+TEST(AdmissionTest, TableCountingNeverAllocatesFromTheLuaHeap) {
   RawState s;
   const std::string chunk = std::string(kLuaHelpers) +
                             "return {resource_logs = {{scope_logs = {{log_records = r(40)}}}}}";
-  bool saw_failure = false;
-  bool saw_success = false;
-  for (std::size_t skip = 0; skip < 48 && !saw_success; ++skip) {
+  for (std::size_t skip = 0; skip < 4; ++skip) {
     Scenario sc;
     sc.body = OomTableBody;
     sc.chunk = chunk.c_str();
@@ -582,20 +583,10 @@ TEST(AdmissionTest, PersistentOomDuringTableCountingIsAMemoryError) {
     s.alloc().ClearPlan();
     ASSERT_EQ(o.status, LUA_OK) << "skip " << skip;
     ASSERT_FALSE(sc.fixture_error);
-    if (sc.flag) {
-      EXPECT_EQ(sc.number, 40u);
-      saw_success = true;
-    } else {
-      saw_failure = true;
-      EXPECT_EQ(sc.code, ErrorCode::Memory) << "skip " << skip;
-      EXPECT_GT(sc.denied, 0u);
-      ASSERT_EQ(o.nresults, 3);
-      EXPECT_TRUE(o.first_nil);
-      EXPECT_EQ(o.last, 0);
-    }
+    EXPECT_TRUE(sc.flag) << "skip " << skip;
+    EXPECT_EQ(sc.number, 40u) << "skip " << skip;
+    EXPECT_EQ(sc.denied, 0u) << "counting allocated from the Lua heap (skip " << skip << ")";
   }
-  EXPECT_TRUE(saw_failure) << "no fault ever hit the traversal";
-  EXPECT_TRUE(saw_success);
 }
 
 // ---- byte limit -------------------------------------------------------------------------------

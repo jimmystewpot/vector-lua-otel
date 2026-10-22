@@ -98,6 +98,9 @@ struct OperationContext {
   void* row_scratch = nullptr;
   void* value_scratch = nullptr;
 
+  // Extraction without delivery (counting, read-only verification): rows are staged and dropped.
+  bool dry_run = false;
+
   // Payload handed to the leaf currently running under RunLuaLeaf().
   void* leaf_payload = nullptr;
 };

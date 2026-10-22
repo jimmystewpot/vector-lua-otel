@@ -827,7 +827,7 @@ bool HasNativeTraceFields(lua_State* L, int table_idx) {
   if (!lua_istable(L, abs_idx) || core::IsLuaTableEmpty(L, abs_idx)) {
     return false;
   }
-  static constexpr const char* kKeys[] = {
+  static constexpr core::ReadKey kKeys[] = {
       "trace_id",
       "traceId",
       "span_id",
@@ -873,7 +873,7 @@ bool HasNativeTraceFields(lua_State* L, int table_idx) {
       "service_name",
       "service",
   };
-  for (const char* k : kKeys) {
+  for (const core::ReadKey& k : kKeys) {
     if (core::GetTableFieldRaw(L, abs_idx, k)) {
       lua_pop(L, 1);
       return true;

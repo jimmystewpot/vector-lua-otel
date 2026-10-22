@@ -45,6 +45,11 @@ class Key {
     return k;
   }
 
+  // Lets helpers templated over the legacy emitter (std::string_view keys) accept a Key.
+  constexpr operator std::string_view() const noexcept {  // NOLINT(google-explicit-constructor)
+    return std::string_view(data_, size_);
+  }
+
   bool keyed() const noexcept { return kind_ != Kind::kNone; }
   bool is_static() const noexcept { return kind_ == Kind::kStatic; }
   const char* data() const noexcept { return data_; }

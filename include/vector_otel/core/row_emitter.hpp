@@ -1,0 +1,60 @@
+#pragma once
+
+// RowEmitter: the extractors' view of the output. It has the same record API as the legacy
+// LuaEmitter (StartRecord / Set* / EndRecord / Flush), but a record is staged into a StagedRow and
+// delivered by the protected emission leaves. It never touches Lua itself.
+//
+// Builder calls may throw (std::bad_alloc, std::length_error); they run in the extractor's outer
+// frame and are caught by the process runner. EndRecord/Flush never throw: a failed emission sets
+// the context's error and HasError().
+
+#include <string_view>
+
+#include "vector_otel/core/operation_context.hpp"
+#include "vector_otel/core/staged_row.hpp"
+
+namespace vector_otel::core {
+
+class RowEmitter {
+ public:
+  RowEmitter(OperationContext& ctx, StagedRow& row) noexcept : ctx_(ctx), row_(row) {}
+  RowEmitter(const RowEmitter&) = delete;
+  RowEmitter& operator=(const RowEmitter&) = delete;
+
+  void StartRecord() { row_.Reset(); }
+  void SetString(Key key, std::string_view value) { row_.Str(key, value); }
+  void SetInt64(Key key, std::int64_t value) { row_.Int(key, value); }
+  void SetUint64(Key key, std::uint64_t value) { row_.Uint(key, value); }
+  void SetDouble(Key key, double value) { row_.Dbl(key, value); }
+  void SetBool(Key key, bool value) { row_.Bool(key, value); }
+
+  // Finishes the record. Without an emit callback (dry run: ctx.dry_run) the row is discarded.
+  void EndRecord() noexcept {
+    if (!failed_ && !ctx_.dry_run && !EmitStagedRow(ctx_, row_)) {
+      failed_ = true;
+    }
+    ++staged_count_;
+  }
+  void Flush() noexcept {
+    if (!failed_ && !ctx_.dry_run && !FlushStagedRows(ctx_)) {
+      failed_ = true;
+    }
+  }
+
+  bool HasError() const noexcept { return failed_; }
+  std::string_view ErrorMessage() const noexcept { return ctx_.error.view(); }
+  int EmittedCount() const noexcept { return ctx_.delivered_count; }
+  // Records finished so far, whether or not they were delivered (dry-run counting).
+  int StagedCount() const noexcept { return staged_count_; }
+
+  StagedRow& row() noexcept { return row_; }
+  OperationContext& context() noexcept { return ctx_; }
+
+ private:
+  OperationContext& ctx_;
+  StagedRow& row_;
+  bool failed_ = false;
+  int staged_count_ = 0;
+};
+
+}  // namespace vector_otel::core
