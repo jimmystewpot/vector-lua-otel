@@ -1427,7 +1427,8 @@ TEST_F(NativeExtractorsTest, NativeLogsNumericSeverityCodes) {
 }
 
 TEST_F(NativeExtractorsTest, NativeLogsArrayWrapperJsonAndTable) {
-  // 1. JSON array wrapper: {"log": [{"message":"m1","severity_number":9},{"message":"m2","severity_number":13}]}
+  // 1. JSON array wrapper: {"log":
+  // [{"message":"m1","severity_number":9},{"message":"m2","severity_number":13}]}
   std::string json_wrapped =
       R"({"log":[{"message":"m1","severity_number":9},{"message":"m2","severity_number":13}]})";
   auto res1 = ProcessNativeLogs(L_, json_wrapped, emit_idx_);
@@ -1931,7 +1932,8 @@ TEST_F(NativeExtractorsTest, MetricsSpecialFloatValuesAndHistogramBounds) {
   EXPECT_TRUE(res1.success) << res1.error;
   EXPECT_EQ(res1.emitted_count, 2);
 
-  // 2. Test JSON histogram with string explicit bounds: NaN, Infinity, -Infinity (filtered out by TryParseJsonFiniteBound)
+  // 2. Test JSON histogram with string explicit bounds: NaN, Infinity, -Infinity (filtered out by
+  // TryParseJsonFiniteBound)
   std::string json_hist = R"({
     "name": "hist.with.special.bounds",
     "kind": "aggregated_histogram",
@@ -2086,7 +2088,8 @@ TEST_F(NativeExtractorsTest, MetricsZeroBucketCountsAndNonOtlpExclusions) {
   auto res2 = ProcessNativeMetricsTable(L_, bad_tbl_idx, emit_idx_);
   lua_pop(L_, 1);
   EXPECT_FALSE(res2.success);
-  EXPECT_NE(res2.error.find("Unsupported non-OTLP metric variant 'distribution'"), std::string::npos);
+  EXPECT_NE(res2.error.find("Unsupported non-OTLP metric variant 'distribution'"),
+            std::string::npos);
 
   // 3. Non-OTLP metric variants in JSON mode
   std::string json_sketch = R"({

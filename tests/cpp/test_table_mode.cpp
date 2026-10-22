@@ -2792,7 +2792,9 @@ TEST_F(TableModeTest, SerializeLuaValueToJsonEdgeCasesCoverage) {
   lua_pop(L_, 1);
 
   // 7. kvlistValue with non-string key
-  luaL_dostring(L_, "return { kvlistValue = { values = { { key = 123, value = { stringValue = 'val' } } } } }");
+  luaL_dostring(
+      L_,
+      "return { kvlistValue = { values = { { key = 123, value = { stringValue = 'val' } } } } }");
   writer.Reset();
   core::SerializeLuaValueToJson(L_, -1, writer, 0);
   EXPECT_NE(writer.Str().find("\"val\""), std::string::npos);
@@ -2824,7 +2826,8 @@ TEST_F(TableModeTest, OtlpTableWrappersLogAndTraceAndMetric) {
   EXPECT_TRUE(res_log.success) << res_log.error;
   EXPECT_EQ(res_log.emitted_count, 1);
 
-  // 2. Traces wrapped in { trace = { resourceSpans = { ... } } } and { log = { resourceSpans = { ... } } }
+  // 2. Traces wrapped in { trace = { resourceSpans = { ... } } } and { log = { resourceSpans = {
+  // ... } } }
   const char* script_traces1 = R"(
     return {
       trace = {
@@ -2871,7 +2874,8 @@ TEST_F(TableModeTest, OtlpTableWrappersLogAndTraceAndMetric) {
   EXPECT_TRUE(res_tr2.success) << res_tr2.error;
   EXPECT_EQ(res_tr2.emitted_count, 1);
 
-  // 3. Metrics wrapped in { metric = { resourceMetrics = { ... } } } and { log = { resourceMetrics = { ... } } }
+  // 3. Metrics wrapped in { metric = { resourceMetrics = { ... } } } and { log = { resourceMetrics
+  // = { ... } } }
   const char* script_metrics1 = R"(
     return {
       metric = {
