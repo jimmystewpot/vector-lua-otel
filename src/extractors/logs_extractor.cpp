@@ -100,20 +100,6 @@ LogsScratch& Scratch() {
   return scratch;
 }
 
-// Materialises a shared attributes tape into its anchor slot the first time a record needs it.
-// Dry runs never touch Lua.
-bool EnsureShared(OperationContext& ctx, const core::StagedRow& tape, AnchorSlot slot,
-                  bool& ready) {
-  if (ready || ctx.dry_run) {
-    return true;
-  }
-  if (!core::MaterializeToAnchor(ctx, tape, slot)) {
-    return false;
-  }
-  ready = true;
-  return true;
-}
-
 bool FailJson(OperationContext& ctx, simdjson::error_code code) {
   ctx.error.Set(ErrorCode::Json, simdjson::error_message(code));
   return false;
@@ -368,8 +354,9 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
         std::array<char, 32> ts_buf;
         core::FormatIso8601Nano(t_ns, ts_buf.data());
 
-        if (!EnsureShared(ctx, s.resource_tape, AnchorSlot::kResourceAttrs, resource_ready) ||
-            !EnsureShared(ctx, s.scope_tape, AnchorSlot::kScopeAttrs, scope_ready)) {
+        if (!core::EnsureSharedAnchor(ctx, s.resource_tape, AnchorSlot::kResourceAttrs,
+                                      resource_ready) ||
+            !core::EnsureSharedAnchor(ctx, s.scope_tape, AnchorSlot::kScopeAttrs, scope_ready)) {
           return false;
         }
 
@@ -525,8 +512,10 @@ bool ExtractLogsTableImpl(OperationContext& ctx, LogsScratch& s, TableScratch& t
             }
             const int rec_obj_idx = lua_absindex(L, -1);
 
-            if (!EnsureShared(ctx, s.resource_tape, AnchorSlot::kResourceAttrs, resource_ready) ||
-                !EnsureShared(ctx, s.scope_tape, AnchorSlot::kScopeAttrs, scope_ready)) {
+            if (!core::EnsureSharedAnchor(ctx, s.resource_tape, AnchorSlot::kResourceAttrs,
+                                          resource_ready) ||
+                !core::EnsureSharedAnchor(ctx, s.scope_tape, AnchorSlot::kScopeAttrs,
+                                          scope_ready)) {
               return false;
             }
 

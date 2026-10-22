@@ -59,4 +59,19 @@ class RowEmitter {
   int staged_count_ = 0;
 };
 
+// Materialises a shared (per-resource / per-scope / per-metric) attributes tape into its anchor
+// slot the first time a record needs it; later records reference the same table. Dry runs never
+// touch Lua.
+inline bool EnsureSharedAnchor(OperationContext& ctx, const StagedRow& tape, AnchorSlot slot,
+                               bool& ready) {
+  if (ready || ctx.dry_run) {
+    return true;
+  }
+  if (!MaterializeToAnchor(ctx, tape, slot)) {
+    return false;
+  }
+  ready = true;
+  return true;
+}
+
 }  // namespace vector_otel::core

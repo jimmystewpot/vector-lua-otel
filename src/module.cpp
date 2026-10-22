@@ -21,7 +21,8 @@ int ProcessLogs(lua_State* L) {
 }
 
 int ProcessTraces(lua_State* L) {
-  return core::ProcessDispatcher<extractors::ProcessTraces, extractors::ProcessTracesTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Otel, core::Signal::Traces,
+                               extractors::TracesExtractors());
 }
 
 int ProcessMetrics(lua_State* L) {

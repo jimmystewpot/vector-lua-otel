@@ -11,6 +11,7 @@
 #include "process_fixtures.hpp"
 #include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
+#include "vector_otel/extractors/traces_extractor.hpp"
 
 namespace vector_otel::core {
 namespace {
@@ -71,9 +72,134 @@ std::string LogsLua(int resources, int records) {
   return out + "}}";
 }
 
+// ---- traces factories -------------------------------------------------------------------------
+
+std::string SpanJson(int i) {
+  const std::string n = std::to_string(i);
+  return "{\"traceId\":\"0102030405060708090a0b0c0d0e0f10\",\"spanId\":\"0102030405060708\","
+         "\"name\":\"span-" +
+         n +
+         "\",\"kind\":2,\"startTimeUnixNano\":\"1700000000000000001\","
+         "\"endTimeUnixNano\":\"1700000000000000999\",\"status\":{\"code\":1,\"message\":\"ok\"},"
+         "\"attributes\":[{\"key\":\"k\",\"value\":{\"stringValue\":\"v" +
+         n +
+         "\"}}],"
+         "\"events\":[{\"timeUnixNano\":\"1700000000000000002\",\"name\":\"ev\",\"attributes\":"
+         "[{\"key\":\"ek\",\"value\":{\"stringValue\":\"ev" +
+         n +
+         "\"}}]}],"
+         "\"links\":[{\"traceId\":\"0102030405060708090a0b0c0d0e0f10\",\"spanId\":"
+         "\"0102030405060708\",\"traceState\":\"ts\",\"attributes\":[{\"key\":\"lk\",\"value\":"
+         "{\"stringValue\":\"l" +
+         n + "\"}}]}]}";
+}
+
+std::string SpanLua(int i) {
+  const std::string n = std::to_string(i);
+  return "{traceId=\"0102030405060708090a0b0c0d0e0f10\",spanId=\"0102030405060708\",name=\"span-" +
+         n +
+         "\",kind=2,startTimeUnixNano=\"1700000000000000001\","
+         "endTimeUnixNano=\"1700000000000000999\",status={code=1,message=\"ok\"},"
+         "attributes={{key=\"k\",value={stringValue=\"v" +
+         n +
+         "\"}}},"
+         "events={{timeUnixNano=\"1700000000000000002\",name=\"ev\",attributes="
+         "{{key=\"ek\",value={stringValue=\"ev" +
+         n +
+         "\"}}}}},"
+         "links={{traceId=\"0102030405060708090a0b0c0d0e0f10\",spanId=\"0102030405060708\","
+         "traceState=\"ts\",attributes={{key=\"lk\",value={stringValue=\"l" +
+         n + "\"}}}}}}";
+}
+
+std::string TracesJson(int resources, int records) {
+  std::string out = "{\"resourceSpans\":[";
+  for (int r = 0; r < resources; ++r) {
+    if (r > 0) out += ',';
+    out +=
+        "{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":"
+        "\"svc-" +
+        std::to_string(r) + "\"}}]},\"scopeSpans\":[{\"scope\":{\"name\":\"scope-" +
+        std::to_string(r) + "\"},\"spans\":[";
+    for (int i = 0; i < records; ++i) {
+      if (i > 0) out += ',';
+      out += SpanJson(i);
+    }
+    out += "]}]}";
+  }
+  return out + "]}";
+}
+
+std::string TracesLua(int resources, int records) {
+  std::string out = "return {resourceSpans={";
+  for (int r = 0; r < resources; ++r) {
+    out += "{resource={attributes={{key=\"service.name\",value={stringValue=\"svc-" +
+           std::to_string(r) + "\"}}}},scopeSpans={{scope={name=\"scope-" + std::to_string(r) +
+           "\"},spans={";
+    for (int i = 0; i < records; ++i) {
+      if (i > 0) out += ',';
+      out += SpanLua(i);
+    }
+    out += "}}}},";
+  }
+  return out + "}}";
+}
+
+// ---- per-signal description -------------------------------------------------------------------
+
+struct Sig {
+  const char* name;
+  std::string (*json)(int resources, int records);
+  std::string (*lua)(int resources, int records);
+  bool scope_attrs;                          // rows carry a shared ScopeAttributes table
+  std::vector<std::string> expected_fields;  // normalised fragments of the first staged row
+  std::vector<const char*> empty_json;
+  std::vector<const char*> empty_lua;
+  extractors::ExtractionResult (*compat_json)(lua_State*, std::string_view, int);
+  extractors::ExtractionResult (*compat_table)(lua_State*, int, int);
+};
+
+const Sig kLogsSig{
+    "logs",
+    LogsJson,
+    LogsLua,
+    true,
+    {"\"Body\":\"msg-0\"", "\"ServiceName\":\"svc-0\"", "\"LogAttributes\":{\"k\":\"v0\"}"},
+    {"{}", "{\"resourceLogs\":[]}", "{\"resourceLogs\":[{}]}",
+     "{\"resourceLogs\":[{\"scopeLogs\":[]}]}", "{\"resourceLogs\":[{\"scopeLogs\":[{}]}]}",
+     "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":[]}]}]}"},
+    {"return {}", "return {resourceLogs={}}", "return {resourceLogs={{}}}",
+     "return {resourceLogs={{scopeLogs={{}}}}}",
+     "return {resourceLogs={{scopeLogs={{logRecords={}}}}}}"},
+    extractors::ProcessLogs,
+    extractors::ProcessLogsTable};
+
+const Sig kTracesSig{
+    "traces",
+    TracesJson,
+    TracesLua,
+    false,
+    {"\"SpanName\":\"span-0\"", "\"ServiceName\":\"svc-0\"", "\"SpanAttributes\":{\"k\":\"v0\"}",
+     "\"SpanKind\":\"SPAN_KIND_SERVER\"", "\"StatusCode\":\"STATUS_CODE_OK\"", "\"Duration\":998"},
+    {"{}", "{\"resourceSpans\":[]}", "{\"resourceSpans\":[{}]}",
+     "{\"resourceSpans\":[{\"scopeSpans\":[]}]}", "{\"resourceSpans\":[{\"scopeSpans\":[{}]}]}",
+     "{\"resourceSpans\":[{\"scopeSpans\":[{\"spans\":[]}]}]}"},
+    {"return {}", "return {resourceSpans={}}", "return {resourceSpans={{}}}",
+     "return {resourceSpans={{scopeSpans={{}}}}}",
+     "return {resourceSpans={{scopeSpans={{spans={}}}}}}"},
+    extractors::ProcessTraces,
+    extractors::ProcessTracesTable};
+
+const Sig* g_sig = &kLogsSig;  // the signal under test (set by the fixture)
+
+class FailureSafetyOtelTest : public testing::TestWithParam<const Sig*> {
+ protected:
+  void SetUp() override { g_sig = GetParam(); }
+};
+
 Payload PayloadFor(bool table, int resources, int records) {
-  return table ? TablePayload(LogsLua(resources, records))
-               : JsonPayload(LogsJson(resources, records));
+  return table ? TablePayload(g_sig->lua(resources, records))
+               : JsonPayload(g_sig->json(resources, records));
 }
 
 void ExpectAnchorsReleased(lua_State* L) {
@@ -87,13 +213,13 @@ int CeilDiv(int a, int b) { return (a + b - 1) / b; }
 
 // ---- behaviour --------------------------------------------------------------------------------
 
-TEST(FailureSafetyTest, OtelLogsShareOneResourceAndScopeTablePerResource) {
+TEST_P(FailureSafetyOtelTest, ShareOneResourceAndScopeTablePerResource) {
   for (bool table : {false, true}) {
     SCOPED_TRACE(table ? "table input" : "json input");
     RawState s;
     ProcRecorder rec;
     rec.dump = true;
-    const ProcResult r = CallProcess(s, false, "logs", PayloadFor(table, 2, 3), rec);
+    const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(table, 2, 3), rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 2);
     EXPECT_TRUE(r.first_nil == false);
@@ -103,21 +229,24 @@ TEST(FailureSafetyTest, OtelLogsShareOneResourceAndScopeTablePerResource) {
     ASSERT_EQ(rec.resource_ptrs.size(), 6u);
     for (int i = 0; i < 6; ++i) {
       ASSERT_NE(rec.resource_ptrs[i], nullptr);
-      ASSERT_NE(rec.scope_ptrs[i], nullptr);
+      if (g_sig->scope_attrs) ASSERT_NE(rec.scope_ptrs[i], nullptr);
     }
     for (int i = 1; i < 3; ++i) {
       EXPECT_EQ(rec.resource_ptrs[0], rec.resource_ptrs[i]) << "ResourceAttributes copied per row";
-      EXPECT_EQ(rec.scope_ptrs[0], rec.scope_ptrs[i]) << "ScopeAttributes copied per row";
+      if (g_sig->scope_attrs) {
+        EXPECT_EQ(rec.scope_ptrs[0], rec.scope_ptrs[i]) << "ScopeAttributes copied per row";
+      }
       EXPECT_EQ(rec.resource_ptrs[3], rec.resource_ptrs[3 + i]);
     }
     EXPECT_NE(rec.resource_ptrs[0], rec.resource_ptrs[3]) << "distinct resources must not share";
-    EXPECT_NE(rec.scope_ptrs[0], rec.scope_ptrs[3]);
+    if (g_sig->scope_attrs) EXPECT_NE(rec.scope_ptrs[0], rec.scope_ptrs[3]);
     ExpectAnchorsReleased(s.L());
   }
 }
 
 // processed_at is the wall clock; legacy table mode omits an absent EventName while JSON mode
-// writes "" (behaviour preserved from before the staging rewrite).
+// writes "" (behaviour preserved from before the staging rewrite). The same applies to an absent
+// traceState on spans.
 std::string Normalized(std::string text) {
   for (std::size_t p; (p = text.find(",\"processed_at\":\"")) != std::string::npos;) {
     text.erase(p, text.find('"', p + 17) + 1 - p);
@@ -126,53 +255,47 @@ std::string Normalized(std::string text) {
   for (std::size_t e; (e = text.find(empty_name)) != std::string::npos;) {
     text.erase(e, empty_name.size());
   }
+  const std::string empty_state = ",\"TraceState\":\"\"";
+  for (std::size_t e; (e = text.find(empty_state)) != std::string::npos;) {
+    text.erase(e, empty_state.size());
+  }
   return text;
 }
 
-TEST(FailureSafetyTest, OtelLogsJsonAndTableInputsStageIdenticalRows) {
+TEST_P(FailureSafetyOtelTest, JsonAndTableInputsStageIdenticalRows) {
   RawState a;
   RawState b;
   ProcRecorder ja;
   ProcRecorder tb;
   ja.dump = tb.dump = true;
-  ASSERT_EQ(CallProcess(a, false, "logs", PayloadFor(false, 2, 2), ja).count, 4);
-  ASSERT_EQ(CallProcess(b, false, "logs", PayloadFor(true, 2, 2), tb).count, 4);
+  ASSERT_EQ(CallProcess(a, false, g_sig->name, PayloadFor(false, 2, 2), ja).count, 4);
+  ASSERT_EQ(CallProcess(b, false, g_sig->name, PayloadFor(true, 2, 2), tb).count, 4);
   ASSERT_EQ(ja.events.size(), tb.events.size());
   for (std::size_t i = 0; i < ja.events.size(); ++i) {
     EXPECT_EQ(Normalized(ja.events[i]), Normalized(tb.events[i])) << "event " << i;
   }
   ASSERT_FALSE(ja.events.empty());
-  EXPECT_NE(ja.events[0].find("\"Body\":\"msg-0\""), std::string::npos) << ja.events[0];
-  EXPECT_NE(ja.events[0].find("\"ServiceName\":\"svc-0\""), std::string::npos) << ja.events[0];
-  EXPECT_NE(ja.events[0].find("\"LogAttributes\":{\"k\":\"v0\"}"), std::string::npos)
-      << ja.events[0];
+  for (const std::string& fragment : g_sig->expected_fields) {
+    EXPECT_NE(ja.events[0].find(fragment), std::string::npos) << fragment << " in " << ja.events[0];
+  }
 }
 
-TEST(FailureSafetyTest, OtelLogsEmptyAndSparseInputsAreNotErrors) {
-  const char* json[] = {"{}",
-                        "{\"resourceLogs\":[]}",
-                        "{\"resourceLogs\":[{}]}",
-                        "{\"resourceLogs\":[{\"scopeLogs\":[]}]}",
-                        "{\"resourceLogs\":[{\"scopeLogs\":[{}]}]}",
-                        "{\"resourceLogs\":[{\"scopeLogs\":[{\"logRecords\":[]}]}]}"};
-  const char* lua[] = {"return {}", "return {resourceLogs={}}", "return {resourceLogs={{}}}",
-                       "return {resourceLogs={{scopeLogs={{}}}}}",
-                       "return {resourceLogs={{scopeLogs={{logRecords={}}}}}}"};
+TEST_P(FailureSafetyOtelTest, EmptyAndSparseInputsAreNotErrors) {
   RawState s;
-  for (const char* j : json) {
+  for (const char* j : g_sig->empty_json) {
     SCOPED_TRACE(j);
     ProcRecorder rec;
-    const ProcResult r = CallProcess(s, false, "logs", JsonPayload(j), rec);
+    const ProcResult r = CallProcess(s, false, g_sig->name, JsonPayload(j), rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 2);
     EXPECT_FALSE(r.first_nil);
     EXPECT_EQ(r.count, 0);
     EXPECT_EQ(rec.calls, 0);
   }
-  for (const char* t : lua) {
+  for (const char* t : g_sig->empty_lua) {
     SCOPED_TRACE(t);
     ProcRecorder rec;
-    const ProcResult r = CallProcess(s, false, "logs", TablePayload(t), rec);
+    const ProcResult r = CallProcess(s, false, g_sig->name, TablePayload(t), rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 2);
     EXPECT_FALSE(r.first_nil);
@@ -182,7 +305,7 @@ TEST(FailureSafetyTest, OtelLogsEmptyAndSparseInputsAreNotErrors) {
   ExpectAnchorsReleased(s.L());
 }
 
-TEST(FailureSafetyTest, OtelLogsArgumentErrorsUseTheExactMessages) {
+TEST_P(FailureSafetyOtelTest, ArgumentErrorsUseTheExactMessages) {
   RawState s;
   ProcRecorder rec;
   Payload none;
@@ -190,7 +313,7 @@ TEST(FailureSafetyTest, OtelLogsArgumentErrorsUseTheExactMessages) {
   Payload number = none;
   number.raw_type = LUA_TNUMBER;
   for (const Payload& p : {none, number}) {
-    const ProcResult r = CallProcess(s, false, "logs", p, rec);
+    const ProcResult r = CallProcess(s, false, g_sig->name, p, rec);
     ASSERT_EQ(r.status, LUA_OK);
     ASSERT_EQ(r.nresults, 3);
     EXPECT_TRUE(r.first_nil);
@@ -198,7 +321,8 @@ TEST(FailureSafetyTest, OtelLogsArgumentErrorsUseTheExactMessages) {
     EXPECT_EQ(r.count, 0);
   }
   const ProcResult r = CallProcess(
-      s, false, "logs", JsonPayload("{}"), rec, [](auto&& run) { run(); }, /*pass_emit=*/false);
+      s, false, g_sig->name, JsonPayload("{}"), rec, [](auto&& run) { run(); },
+      /*pass_emit=*/false);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 3);
   EXPECT_TRUE(r.first_nil);
@@ -207,10 +331,10 @@ TEST(FailureSafetyTest, OtelLogsArgumentErrorsUseTheExactMessages) {
   EXPECT_EQ(rec.calls, 0);
 }
 
-TEST(FailureSafetyTest, OtelLogsInvalidJsonIsAnErrorWithNothingEmitted) {
+TEST_P(FailureSafetyOtelTest, InvalidJsonIsAnErrorWithNothingEmitted) {
   RawState s;
   ProcRecorder rec;
-  const ProcResult r = CallProcess(s, false, "logs", JsonPayload("not json"), rec);
+  const ProcResult r = CallProcess(s, false, g_sig->name, JsonPayload("not json"), rec);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 3);
   EXPECT_TRUE(r.first_nil);
@@ -220,14 +344,14 @@ TEST(FailureSafetyTest, OtelLogsInvalidJsonIsAnErrorWithNothingEmitted) {
   ExpectAnchorsReleased(s.L());
 }
 
-TEST(FailureSafetyTest, OtelLogsRecordLimitIsEnforcedBeforeAnyEmission) {
+TEST_P(FailureSafetyOtelTest, RecordLimitIsEnforcedBeforeAnyEmission) {
   RawState s;
   ProcRecorder rec;
-  const ProcResult ok = CallProcess(s, false, "logs", PayloadFor(false, 1, 2048), rec);
+  const ProcResult ok = CallProcess(s, false, g_sig->name, PayloadFor(false, 1, 2048), rec);
   ASSERT_EQ(ok.nresults, 2);
   EXPECT_EQ(ok.count, 2048);
   ProcRecorder over;
-  const ProcResult r = CallProcess(s, false, "logs", PayloadFor(false, 1, 2049), over);
+  const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(false, 1, 2049), over);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 3);
   EXPECT_TRUE(r.first_nil);
@@ -235,19 +359,19 @@ TEST(FailureSafetyTest, OtelLogsRecordLimitIsEnforcedBeforeAnyEmission) {
   EXPECT_EQ(r.count, 0);
   EXPECT_EQ(over.calls, 0);
   ProcRecorder over_t;
-  const ProcResult rt = CallProcess(s, false, "logs", PayloadFor(true, 1, 2049), over_t);
+  const ProcResult rt = CallProcess(s, false, g_sig->name, PayloadFor(true, 1, 2049), over_t);
   ASSERT_EQ(rt.nresults, 3);
   EXPECT_EQ(rt.error, "event exceeds 2048-record limit");
   EXPECT_EQ(over_t.calls, 0);
 }
 
-TEST(FailureSafetyTest, OtelLogsCallbackFailureReportsRowsFromCompletedCallbacks) {
+TEST_P(FailureSafetyOtelTest, CallbackFailureReportsRowsFromCompletedCallbacks) {
   for (bool table : {false, true}) {
     SCOPED_TRACE(table ? "table input" : "json input");
     RawState s;
     ProcRecorder rec;
     rec.fail_at_call = 1;  // the second delivery raises
-    const ProcResult r = CallProcess(s, false, "logs", PayloadFor(table, 1, 5), rec);
+    const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(table, 1, 5), rec);
     ASSERT_EQ(r.status, LUA_OK);
     if (kN >= 5) {
       // a single delivery for all five rows: call index 1 never happens
@@ -264,11 +388,11 @@ TEST(FailureSafetyTest, OtelLogsCallbackFailureReportsRowsFromCompletedCallbacks
   }
 }
 
-TEST(FailureSafetyTest, OtelLogsReentrantProcessIsRejectedWithoutDisturbingTheOuterCall) {
+TEST_P(FailureSafetyOtelTest, ReentrantProcessIsRejectedWithoutDisturbingTheOuterCall) {
   RawState s;
   ProcRecorder rec;
   rec.reenter = true;
-  const ProcResult r = CallProcess(s, false, "logs", PayloadFor(false, 1, 3), rec);
+  const ProcResult r = CallProcess(s, false, g_sig->name, PayloadFor(false, 1, 3), rec);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 2);
   EXPECT_EQ(r.count, 3);
@@ -277,9 +401,9 @@ TEST(FailureSafetyTest, OtelLogsReentrantProcessIsRejectedWithoutDisturbingTheOu
   ExpectAnchorsReleased(s.L());
 }
 
-TEST(FailureSafetyTest, OtelLogsDryRunCountsWithoutEmitting) {
-  const std::string json = LogsJson(2, 3);
-  const extractors::ExtractionResult r = extractors::ProcessLogs(nullptr, json, 0);
+TEST_P(FailureSafetyOtelTest, DryRunCountsWithoutEmitting) {
+  const std::string json = g_sig->json(2, 3);
+  const extractors::ExtractionResult r = g_sig->compat_json(nullptr, json, 0);
   EXPECT_TRUE(r.success) << r.error;
   EXPECT_EQ(r.emitted_count, 6);
 }
@@ -302,7 +426,7 @@ void SweepLuaAllocations(bool table, int resources, int records) {
     ProcRecorder rec;
     rec.dump = true;
     const Payload payload = PayloadFor(table, resources, records);
-    const ProcResult r = CallProcess(s, false, "logs", payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
       s.alloc().SetPlan(LuaFaultMode::kPersistent, skip);
       run();
       s.alloc().ClearPlan();
@@ -313,6 +437,7 @@ void SweepLuaAllocations(bool table, int resources, int records) {
       EXPECT_NE(p, nullptr) << "a delivered row lost its shared ResourceAttributes table";
     }
     for (const void* p : rec.scope_ptrs) {
+      if (!g_sig->scope_attrs) break;
       EXPECT_NE(p, nullptr) << "a delivered row lost its shared ScopeAttributes table";
     }
     if (r.nresults == 3) {
@@ -328,7 +453,7 @@ void SweepLuaAllocations(bool table, int resources, int records) {
     }
     lua_gc(s.L(), LUA_GCCOLLECT);
     ProcRecorder again;
-    const ProcResult ok = CallProcess(s, false, "logs", payload, again);
+    const ProcResult ok = CallProcess(s, false, g_sig->name, payload, again);
     ASSERT_EQ(ok.status, LUA_OK);
     ASSERT_EQ(ok.nresults, 2);
     EXPECT_EQ(ok.count, total);
@@ -338,11 +463,11 @@ void SweepLuaAllocations(bool table, int resources, int records) {
   EXPECT_TRUE(saw_success);
 }
 
-TEST(FailureSafetyTest, OtelLogsSameStateOomReleasesResourceScopeAndRowJson) {
+TEST_P(FailureSafetyOtelTest, SameStateOomReleasesResourceScopeAndRowJson) {
   SweepLuaAllocations(false, 2, 3);
 }
 
-TEST(FailureSafetyTest, OtelLogsSameStateOomReleasesResourceScopeAndRowTable) {
+TEST_P(FailureSafetyOtelTest, SameStateOomReleasesResourceScopeAndRowTable) {
   SweepLuaAllocations(true, 2, 3);
 }
 
@@ -363,7 +488,7 @@ void SweepLuaWindows(bool table) {
     rec.dump = true;
     const Payload payload = PayloadFor(table, resources, records);
     std::size_t attempts = 0;
-    const ProcResult r = CallProcess(s, false, "logs", payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
       s.alloc().SetPlan(LuaFaultMode::kWindow, skip, 2);
       run();
       attempts = s.alloc().stats().attempts;
@@ -375,6 +500,7 @@ void SweepLuaWindows(bool table) {
       EXPECT_NE(p, nullptr) << "a delivered row lost its shared ResourceAttributes table";
     }
     for (const void* p : rec.scope_ptrs) {
+      if (!g_sig->scope_attrs) break;
       EXPECT_NE(p, nullptr) << "a delivered row lost its shared ScopeAttributes table";
     }
     if (r.nresults == 3) {
@@ -391,13 +517,9 @@ void SweepLuaWindows(bool table) {
   EXPECT_TRUE(saw_failure);
 }
 
-TEST(FailureSafetyTest, OtelLogsTransientOomNeverDeliversADamagedRowJson) {
-  SweepLuaWindows(false);
-}
+TEST_P(FailureSafetyOtelTest, TransientOomNeverDeliversADamagedRowJson) { SweepLuaWindows(false); }
 
-TEST(FailureSafetyTest, OtelLogsTransientOomNeverDeliversADamagedRowTable) {
-  SweepLuaWindows(true);
-}
+TEST_P(FailureSafetyOtelTest, TransientOomNeverDeliversADamagedRowTable) { SweepLuaWindows(true); }
 
 // Embedders and the compatibility wrappers run extractors on an arbitrary stack: whatever the
 // outcome, the caller's stack depth must be exactly what it was.
@@ -406,7 +528,7 @@ int RaisingEmit(lua_State* L) {
   return lua_error(L);
 }
 
-TEST(FailureSafetyTest, OtelLogsCompatCallsRestoreTheCallersStackOnFailure) {
+TEST_P(FailureSafetyOtelTest, CompatCallsRestoreTheCallersStackOnFailure) {
   RawState s;
   lua_State* L = s.L();
   ASSERT_EQ(luaopen_vector_otel(L), 1);
@@ -414,17 +536,17 @@ TEST(FailureSafetyTest, OtelLogsCompatCallsRestoreTheCallersStackOnFailure) {
   for (bool table : {false, true}) {
     SCOPED_TRACE(table ? "table input" : "json input");
     if (table) {
-      const std::string chunk = LogsLua(2, 3);
+      const std::string chunk = g_sig->lua(2, 3);
       ASSERT_EQ(luaL_loadstring(L, chunk.c_str()), LUA_OK);
       ASSERT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK);
     } else {
-      lua_pushstring(L, LogsJson(2, 3).c_str());
+      lua_pushstring(L, g_sig->json(2, 3).c_str());
     }
     lua_pushcfunction(L, RaisingEmit);
     const int top = lua_gettop(L);
     const extractors::ExtractionResult r =
-        table ? extractors::ProcessLogsTable(L, top - 1, top)
-              : extractors::ProcessLogs(L, lua_tostring(L, top - 1), top);
+        table ? g_sig->compat_table(L, top - 1, top)
+              : g_sig->compat_json(L, lua_tostring(L, top - 1), top);
     EXPECT_FALSE(r.success);
     EXPECT_NE(r.error.find("boom"), std::string::npos) << r.error;
     EXPECT_EQ(lua_gettop(L), top) << "the extractor leaked or dropped stack slots";
@@ -454,7 +576,7 @@ CppSweepResult RunColdThread(bool table, std::size_t skip, int resources, int re
     lua_pop(s.L(), 1);
     ProcRecorder rec;
     const Payload payload = PayloadFor(table, resources, records);
-    const ProcResult r = CallProcess(s, false, "logs", payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
       CppFaultScope scope(CppFaultMode::kPersistent, skip);
       run();
     });
@@ -495,26 +617,26 @@ void SweepCppAllocations(bool table) {
   EXPECT_TRUE(saw_success);
 }
 
-TEST(FailureSafetyTest, OtelLogsPersistentCppOomPreservesCompletedRowsJson) {
+TEST_P(FailureSafetyOtelTest, PersistentCppOomPreservesCompletedRowsJson) {
   SweepCppAllocations(false);
 }
 
-TEST(FailureSafetyTest, OtelLogsPersistentCppOomPreservesCompletedRowsTable) {
+TEST_P(FailureSafetyOtelTest, PersistentCppOomPreservesCompletedRowsTable) {
   SweepCppAllocations(true);
 }
 
 // After warm-up the extraction loop must not touch the C++ heap at all: refuse every allocation
 // from the first one and the whole call still succeeds.
-TEST(FailureSafetyTest, OtelLogsWarmExtractionNeverAllocatesFromTheCppHeap) {
+TEST_P(FailureSafetyOtelTest, WarmExtractionNeverAllocatesFromTheCppHeap) {
   for (bool table : {false, true}) {
     SCOPED_TRACE(table ? "table input" : "json input");
     RawState s;
     const Payload payload = PayloadFor(table, 2, 3);
     ProcRecorder warm;
-    ASSERT_EQ(CallProcess(s, false, "logs", payload, warm).count, 6);
+    ASSERT_EQ(CallProcess(s, false, g_sig->name, payload, warm).count, 6);
     ProcRecorder rec;
     std::size_t attempts = 0;
-    const ProcResult r = CallProcess(s, false, "logs", payload, rec, [&](auto&& run) {
+    const ProcResult r = CallProcess(s, false, g_sig->name, payload, rec, [&](auto&& run) {
       CppFaultScope scope(CppFaultMode::kPersistent, 0);
       run();
       attempts = scope.stats().attempts;
@@ -525,6 +647,36 @@ TEST(FailureSafetyTest, OtelLogsWarmExtractionNeverAllocatesFromTheCppHeap) {
     EXPECT_EQ(attempts, 0u) << "C++ heap allocations on the warm path";
   }
 }
+
+// Spans without events or links still carry the JSON array strings the schema expects.
+TEST(FailureSafetyTraces, SpansWithoutEventsOrLinksEmitEmptyArrays) {
+  const char* kJson =
+      R"({"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"0102030405060708090a0b0c0d0e0f10",)"
+      R"("spanId":"0102030405060708","name":"bare","startTimeUnixNano":"1","endTimeUnixNano":"2"}]}]}]})";
+  const char* kLua =
+      "return {resourceSpans={{scopeSpans={{spans={{traceId=\"0102030405060708090a0b0c0d0e0f10\","
+      "spanId=\"0102030405060708\",name=\"bare\",startTimeUnixNano=\"1\","
+      "endTimeUnixNano=\"2\"}}}}}}}";
+  for (const bool table : {false, true}) {
+    SCOPED_TRACE(table ? "table" : "json");
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    const ProcResult r =
+        CallProcess(s, false, "traces", table ? TablePayload(kLua) : JsonPayload(kJson), rec);
+    ASSERT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.count, 1) << r.error;
+    ASSERT_EQ(rec.events.size(), 1u);
+    EXPECT_NE(rec.events[0].find("\"Events\":\"[]\""), std::string::npos) << rec.events[0];
+    EXPECT_NE(rec.events[0].find("\"Links\":\"[]\""), std::string::npos) << rec.events[0];
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
+                         testing::Values(&kLogsSig, &kTracesSig),
+                         [](const testing::TestParamInfo<const Sig*>& info) {
+                           return std::string(info.param->name);
+                         });
 
 }  // namespace
 }  // namespace vector_otel::core
