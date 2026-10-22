@@ -1720,6 +1720,81 @@ TEST_F(NativeExtractorsTest, JsonWrapperRecognizedOuterFieldBeforeInnerAndNonZer
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
 
+TEST_F(NativeExtractorsTest,
+       NativeMetrics_TagPriorityOverResourcesAndRepeatedResourcesAndMidStreamErrors) {
+  // 1. JSON mode: tags BEFORE resources and attributes -> tags must override both ServiceName and
+  // duplicate attribute keys, matching resources-before-tags and Lua Table mode.
+  const char* json_tags_first = R"({
+    "name": "cpu",
+    "gauge": { "value": 1.0 },
+    "tags": {
+      "resource.service.name": "tag-svc",
+      "resource.env": "tag-env",
+      "dp_k": "tag-dp"
+    },
+    "resources": {
+      "service.name": "res-svc",
+      "env": "res-env",
+      "host": "h1"
+    },
+    "attributes": {
+      "dp_k": "attr-dp",
+      "other": 2
+    }
+  })";
+  auto r1 = ProcessNativeMetrics(L_, json_tags_first, emit_idx_);
+  EXPECT_TRUE(r1.success) << r1.error;
+  EXPECT_EQ(r1.emitted_count, 1);
+
+  // 2. JSON mode: repeated "resources" / "resource" replaces earlier resource attributes cleanly
+  const char* json_repeated_res = R"({
+    "name": "mem",
+    "gauge": { "value": 2.0 },
+    "resources": { "service.name": "old-svc", "stale": "yes" },
+    "resource": { "service.name": "new-svc", "fresh": "ok" }
+  })";
+  auto r2 = ProcessNativeMetrics(L_, json_repeated_res, emit_idx_);
+  EXPECT_TRUE(r2.success) << r2.error;
+  EXPECT_EQ(r2.emitted_count, 1);
+
+  const char* verify = R"(
+    assert(#emitted == 2, "Expected 2 emitted events, got " .. #emitted)
+    local e1 = emitted[1].log
+    assert(e1.ServiceName == "tag-svc", "Expected tag-svc, got: " .. tostring(e1.ServiceName))
+    assert(string.find(e1.ResourceAttributes, '"service.name":"tag-svc"', 1, true) ~= nil, e1.ResourceAttributes)
+    assert(string.find(e1.ResourceAttributes, '"service.name":"res-svc"', 1, true) == nil, e1.ResourceAttributes)
+    assert(string.find(e1.ResourceAttributes, '"env":"tag-env"', 1, true) ~= nil, e1.ResourceAttributes)
+    assert(string.find(e1.ResourceAttributes, '"env":"res-env"', 1, true) == nil, e1.ResourceAttributes)
+    assert(string.find(e1.ResourceAttributes, '"host":"h1"', 1, true) ~= nil, e1.ResourceAttributes)
+    assert(string.find(e1.Attributes, '"dp_k":"tag-dp"', 1, true) ~= nil, e1.Attributes)
+    assert(string.find(e1.Attributes, '"dp_k":"attr-dp"', 1, true) == nil, e1.Attributes)
+    assert(string.find(e1.Attributes, '"other":2', 1, true) ~= nil, e1.Attributes)
+
+    local e2 = emitted[2].log
+    assert(e2.ServiceName == "new-svc", "Expected new-svc, got: " .. tostring(e2.ServiceName))
+    assert(e2.ResourceAttributes == '{"service.name":"new-svc","fresh":"ok"}',
+           "Expected replaced ResourceAttributes, got: " .. tostring(e2.ResourceAttributes))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+
+  // 3. Malformed JSON syntax inside native histogram / exponential_histogram / summary fails batch
+  auto bad_hist = ProcessNativeMetrics(
+      L_, R"({"name":"bad_h","histogram":{"count":1,"buckets":[{"upper_limit":1.0,"count":1},}})",
+      emit_idx_);
+  EXPECT_FALSE(bad_hist.success);
+
+  auto bad_exp = ProcessNativeMetrics(
+      L_,
+      R"({"name":"bad_eh","exponential_histogram":{"count":1,"positive":{"offset":0,"counts":[1,]}}})",
+      emit_idx_);
+  EXPECT_FALSE(bad_exp.success);
+
+  auto bad_sum = ProcessNativeMetrics(
+      L_, R"({"name":"bad_s","summary":{"count":1,"quantiles":[{"quantile":0.5,"value":1.0},]}})",
+      emit_idx_);
+  EXPECT_FALSE(bad_sum.success);
+}
+
 TEST_F(NativeExtractorsTest, NativeLogsNumericSeverityCodes) {
   // Test numeric severity codes 1 to 24 and string severity name tokens
   std::string json = R"([
@@ -2163,24 +2238,13 @@ TEST_F(NativeExtractorsTest, MetricsSummaryQuantileObjectsAndFlatArrays) {
   const char* verify = R"(
     assert(#emitted == 3, "Expected 3 emitted events, got " .. #emitted)
     local r1 = emitted[1].log
-    assert(r1.Summary ~= nil, "r1.Summary table missing")
-    assert(r1.Summary.Count == 100, "r1.Summary.Count mismatch: " .. tostring(r1.Summary.Count))
-    assert(r1.Summary.Sum == 5000.0, "r1.Summary.Sum mismatch")
-    assert(#r1.Summary.QuantileValues == 2, "r1.Summary.QuantileValues count mismatch: " .. #r1.Summary.QuantileValues)
-    assert(math.abs(r1.Summary.QuantileValues[1].Quantile - 0.5) < 1e-6, "Quantile[1] mismatch")
-    assert(math.abs(r1.Summary.QuantileValues[1].Value - 40.0) < 1e-6, "Value[1] mismatch")
-    assert(math.abs(r1.Summary.QuantileValues[2].Quantile - 0.99) < 1e-6, "Quantile[2] mismatch")
-    assert(math.abs(r1.Summary.QuantileValues[2].Value - 120.0) < 1e-6, "Value[2] mismatch")
+    assert(r1.Summary == '{"count":100,"sum":5000,"quantileValues":[{"quantile":0.5,"value":40},{"quantile":0.99,"value":120}]}', "r1.Summary mismatch: " .. tostring(r1.Summary))
 
     local r2 = emitted[2].log
-    assert(r2.Summary.Count == 10, "r2.Summary.Count mismatch")
-    assert(#r2.Summary.QuantileValues == 2, "r2.Summary.QuantileValues count mismatch")
-    assert(math.abs(r2.Summary.QuantileValues[2].Value - 95.0) < 1e-6, "r2 Value[2] mismatch")
+    assert(r2.Summary == '{"count":10,"sum":100,"quantileValues":[{"quantile":0.5,"value":5},{"quantile":0.9,"value":95}]}', "r2.Summary mismatch: " .. tostring(r2.Summary))
 
     local r3 = emitted[3].log
-    assert(r3.Summary.Count == 50, "r3.Summary.Count mismatch")
-    assert(#r3.Summary.QuantileValues == 2, "r3.Summary.QuantileValues count mismatch")
-    assert(math.abs(r3.Summary.QuantileValues[2].Value - 15.0) < 1e-6, "r3 Value[2] mismatch")
+    assert(r3.Summary == '{"count":50,"sum":250,"quantileValues":[{"quantile":0.5,"value":5},{"quantile":0.95,"value":15}]}', "r3.Summary mismatch: " .. tostring(r3.Summary))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2222,12 +2286,15 @@ TEST_F(NativeExtractorsTest, MetricsJsonScopeAndResourceAttributes) {
     assert(r.ServiceName == "custom-srv", "ServiceName mismatch")
     assert(r.ScopeName == "system.metrics", "ScopeName mismatch")
     assert(r.ScopeVersion == "1.0.1", "ScopeVersion mismatch")
-    assert(r.ResourceAttributes["service.name"] == "custom-srv", "ResourceAttributes service.name mismatch")
-    assert(r.ResourceAttributes["host.name"] == "host-42", "ResourceAttributes host.name mismatch")
-    assert(r.Attributes.cpu_core == 4, "Attributes.cpu_core mismatch")
-    assert(math.abs(r.Attributes.load_ratio - 0.875) < 1e-6, "Attributes.load_ratio mismatch")
-    assert(r.Attributes.is_idle == false, "Attributes.is_idle mismatch")
-    assert(r.Attributes.extra_info:find('"model"') ~= nil and r.Attributes.extra_info:find('"x86"') ~= nil, "Attributes.extra_info mismatch: " .. tostring(r.Attributes.extra_info))
+    assert(type(r.ResourceAttributes) == "string")
+    assert(r.ResourceAttributes:find('"service.name":"custom-srv"', 1, true) ~= nil, "ResourceAttributes service.name mismatch")
+    assert(r.ResourceAttributes:find('"host.name":"host-42"', 1, true) ~= nil, "ResourceAttributes host.name mismatch")
+    assert(r.ScopeAttributes == '{"scope_lib":"cpu_watcher"}', "ScopeAttributes mismatch: " .. tostring(r.ScopeAttributes))
+    assert(type(r.Attributes) == "string")
+    assert(r.Attributes:find('"cpu_core":4', 1, true) ~= nil, "Attributes.cpu_core mismatch")
+    assert(r.Attributes:find('"load_ratio":0.875', 1, true) ~= nil, "Attributes.load_ratio mismatch")
+    assert(r.Attributes:find('"is_idle":false', 1, true) ~= nil, "Attributes.is_idle mismatch")
+    assert(r.Attributes:find('"extra_info":{"model":"x86"}', 1, true) ~= nil, "Attributes.extra_info mismatch: " .. tostring(r.Attributes))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2277,13 +2344,7 @@ TEST_F(NativeExtractorsTest, MetricsSpecialFloatValuesAndHistogramBounds) {
     assert(math.abs(emitted[2].log.Value - 3.14159) < 1e-5, "emitted[2].log.Value mismatch")
 
     local h = emitted[3].log.Histogram
-    assert(h ~= nil, "Histogram table missing")
-    assert(h.Count == 10, "Histogram Count mismatch")
-    -- The finite bounds must only include 1.0, 5.0, 10.0 (Infinity, NaN, +Infinity filtered)
-    assert(#h.ExplicitBounds == 3, "ExplicitBounds count mismatch: " .. #h.ExplicitBounds)
-    assert(math.abs(h.ExplicitBounds[1] - 1.0) < 1e-6)
-    assert(math.abs(h.ExplicitBounds[2] - 5.0) < 1e-6)
-    assert(math.abs(h.ExplicitBounds[3] - 10.0) < 1e-6)
+    assert(h == '{"aggregationTemporality":0,"count":10,"sum":55,"bucketCounts":[2,3,5],"explicitBounds":[1,5,10]}', "Histogram mismatch: " .. tostring(h))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 
@@ -2358,19 +2419,17 @@ TEST_F(NativeExtractorsTest, MetricsSpecialFloatValuesAndHistogramBounds) {
     assert(r4.ScopeName == "meter.lib", "r4 ScopeName mismatch")
     assert(r4.ScopeVersion == "3.2.1", "r4 ScopeVersion mismatch")
     assert(math.abs(r4.Value - 15.5) < 1e-6, "r4 Value mismatch")
-    assert(r4.ResourceAttributes["service.name"] == "table-metric-svc", "r4 ResourceAttributes mismatch")
+    assert(r4.ResourceAttributes:find('"service.name":"table-metric-svc"', 1, true) ~= nil, "r4 ResourceAttributes mismatch")
 
     local r5 = emitted[5].log
     assert(r5.MetricName == "arr.gauge.1", "r5 MetricName mismatch")
-    assert(r5.Attributes.attr_k == "attr_v", "r5 Attributes mismatch")
+    assert(r5.Attributes == '{"attr_k":"attr_v"}', "r5 Attributes mismatch: " .. tostring(r5.Attributes))
 
     local r6 = emitted[6].log
     assert(r6.MetricName == "arr.gauge.2", "r6 MetricName mismatch")
 
     local r7 = emitted[7].log
-    assert(r7.Histogram.Count == 3, "r7 Histogram Count mismatch")
-    assert(#r7.Histogram.BucketCounts == 2, "r7 BucketCounts length mismatch")
-    assert(r7.Histogram.BucketCounts[2] == 2, "r7 string bucket count parsed mismatch")
+    assert(r7.Histogram == '{"aggregationTemporality":0,"count":3,"sum":12,"bucketCounts":[1,2],"explicitBounds":[2.5,5]}', "r7 Histogram mismatch: " .. tostring(r7.Histogram))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify_more), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2479,22 +2538,15 @@ TEST_F(NativeExtractorsTest, MetricsOtelPrefixTagsAndParallelQuantilesJson) {
     assert(m1.MetricDescription == "Number of RPC requests")
     assert(m1.ScopeName == "rpc.meter")
     assert(m1.ScopeVersion == "1.5.0")
-    assert(type(m1.Attributes.endpoints) == "string")
+    assert(m1.Attributes == '{"endpoints":"/api/v2"}', "m1.Attributes mismatch: " .. tostring(m1.Attributes))
 
     local m2 = emitted[#emitted - 1].log
     assert(m2.MetricType == "summary")
-    assert(type(m2.Summary) == "table")
-    assert(#m2.Summary.QuantileValues == 3)
-    assert(m2.Summary.QuantileValues[1].Quantile == 0.5)
-    assert(m2.Summary.QuantileValues[1].Value == 1.0)
+    assert(m2.Summary == '{"count":50,"sum":125.5,"quantileValues":[{"quantile":0.5,"value":1},{"quantile":0.95,"value":5},{"quantile":0.99,"value":10}]}', "m2.Summary mismatch: " .. tostring(m2.Summary))
 
     local m3 = emitted[#emitted].log
     assert(m3.MetricType == "histogram")
-    assert(type(m3.Histogram) == "table")
-    assert(m3.Histogram.Min == 10.0)
-    assert(m3.Histogram.Max == 500.0)
-    assert(#m3.Histogram.BucketCounts == 3)
-    assert(#m3.Histogram.ExplicitBounds == 2)
+    assert(m3.Histogram == '{"aggregationTemporality":0,"count":20,"sum":2048,"min":10,"max":500,"bucketCounts":[5,10,5],"explicitBounds":[50,200]}', "m3.Histogram mismatch: " .. tostring(m3.Histogram))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2539,13 +2591,13 @@ TEST_F(NativeExtractorsTest, NativeLogsJsonFullAllFieldsCoverage) {
     assert(l.EventName == "app.boot")
     assert(l.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.21.0")
     assert(l.ServiceName == "full-svc")
-    assert(l.ResourceAttributes["service.name"] == "full-svc")
+    assert(l.ResourceAttributes:find('"service.name":"full-svc"', 1, true) ~= nil)
     assert(l.ScopeName == "app.logger")
     assert(l.ScopeVersion == "1.0.0")
     assert(l.ScopeSchemaUrl == "https://opentelemetry.io/schemas/scope/1.0")
-    assert(l.ScopeAttributes.sc_key == "sc_val")
-    assert(l.LogAttributes["http.status"] == 200)
-    assert(l.LogAttributes.user == "alice")
+    assert(l.ScopeAttributes == '{"sc_key":"sc_val"}')
+    assert(l.LogAttributes:find('"http.status":200', 1, true) ~= nil)
+    assert(l.LogAttributes:find('"user":"alice"', 1, true) ~= nil)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2658,8 +2710,8 @@ TEST_F(NativeExtractorsTest, NativeLogsNestedResourceAttributesAndTopLevelServic
     local l = emitted[#emitted].log
     assert(l.ServiceName == "top-level-svc")
     assert(l.ResourceSchemaUrl == "https://schema.example.com")
-    assert(l.ResourceAttributes["env"] == "staging")
-    assert(l.ScopeAttributes["scope_k"] == "scope_v")
+    assert(l.ResourceAttributes == '{"env":"staging"}')
+    assert(l.ScopeAttributes == '{"scope_k":"scope_v"}')
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -2755,19 +2807,16 @@ TEST_F(NativeExtractorsTest, MetricsMergeTagsAndResourcesAttributesJsonAndString
   const char* verify = R"(
     local m1 = emitted[#emitted - 1].log
     assert(m1.ServiceName == "top-svc-metric")
-    assert(m1.ResourceAttributes.k1 == "v1")
-    assert(m1.ResourceAttributes.k2 == "v2")
-    assert(m1.ScopeAttributes.s1 == "sv1")
-    assert(m1.ScopeAttributes.s2 == "sv2")
-    assert(m1.Attributes.attr1 == "val1")
-    assert(m1.Attributes.attr2 == "val2")
+    assert(m1.ResourceAttributes:find('"k1":"v1"', 1, true) ~= nil)
+    assert(m1.ResourceAttributes:find('"k2":"v2"', 1, true) ~= nil)
+    assert(m1.ScopeAttributes:find('"s1":"sv1"', 1, true) ~= nil)
+    assert(m1.ScopeAttributes:find('"s2":"sv2"', 1, true) ~= nil)
+    assert(m1.Attributes:find('"attr1":"val1"', 1, true) ~= nil)
+    assert(m1.Attributes:find('"attr2":"val2"', 1, true) ~= nil)
     assert(math.abs(m1.Value - 99.9) < 1e-4)
 
     local m2 = emitted[#emitted].log
-    assert(type(m2.Histogram) == "table")
-    assert(#m2.Histogram.ExplicitBounds == 2)
-    assert(m2.Histogram.ExplicitBounds[1] == 1.5)
-    assert(m2.Histogram.ExplicitBounds[2] == 10.0)
+    assert(m2.Histogram == '{"aggregationTemporality":0,"count":10,"sum":25,"bucketCounts":[2,8],"explicitBounds":[1.5,10]}', "m2.Histogram mismatch: " .. tostring(m2.Histogram))
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }

@@ -500,14 +500,27 @@ bool ReadTableTimestampField(lua_State* L, int table_idx, const char* name1, con
   return ok;
 }
 
-constexpr int kMaxLuaJsonDepth = 16;
+constexpr int kMaxLuaJsonDepth = 32;
+
+static bool HasSingleLuaTableKey(lua_State* L, int abs_idx) noexcept {
+  lua_pushnil(L);
+  if (lua_next(L, abs_idx) == 0) {
+    return false;
+  }
+  lua_pop(L, 1);  // pop first value, keep first key
+  if (lua_next(L, abs_idx) != 0) {
+    lua_pop(L, 2);  // pop second key and value
+    return false;
+  }
+  return true;
+}
 
 void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, int depth) {
   if (depth >= kMaxLuaJsonDepth) {
     writer.String("[max_depth_exceeded]");
     return;
   }
-  if (!lua_checkstack(L, 6)) {
+  if (!lua_checkstack(L, 8)) {
     writer.String("[out_of_stack]");
     return;
   }
@@ -530,7 +543,7 @@ void SerializeLuaValueToJson(lua_State* L, int val_idx, FastJsonWriter& writer, 
     writer.String(std::string_view(s, len));
   } else if (type == LUA_TTABLE) {
     const lua_Integer raw_len = static_cast<lua_Integer>(lua_rawlen(L, abs_idx));
-    if (raw_len == 0) {
+    if (raw_len == 0 && HasSingleLuaTableKey(L, abs_idx)) {
       // Check if it's an OTLP AnyValue wrapper:
       if (GetTableField(L, abs_idx, "stringValue", "string_value")) {
         if (lua_type(L, -1) == LUA_TSTRING) {
@@ -1080,7 +1093,7 @@ static bool TryExtractScalarServiceName(lua_State* L, int val_idx, std::string& 
     }
     return false;
   }
-  if (t == LUA_TTABLE && lua_rawlen(L, abs_idx) == 0) {
+  if (t == LUA_TTABLE && lua_rawlen(L, abs_idx) == 0 && HasSingleLuaTableKey(L, abs_idx)) {
     if (GetTableFieldRaw(L, abs_idx, "stringValue", "string_value")) {
       bool ok = false;
       if (lua_type(L, -1) == LUA_TSTRING) {
@@ -1096,6 +1109,39 @@ static bool TryExtractScalarServiceName(lua_State* L, int val_idx, std::string& 
     }
   }
   return false;
+}
+
+static void UpdateTableServiceNameCandidate(lua_State* L, int val_idx, std::string_view key_sv,
+                                            std::string_view* out_service_name,
+                                            std::string& scratch, bool& has_dot_svc,
+                                            bool& has_snake_svc) {
+  if (out_service_name == nullptr) {
+    return;
+  }
+  if (key_sv == "service.name") {
+    if (TryExtractScalarServiceName(L, val_idx, scratch)) {
+      *out_service_name = std::string_view(scratch);
+      has_dot_svc = true;
+    } else {
+      has_dot_svc = false;
+      if (!has_snake_svc) {
+        *out_service_name = "unknown_service";
+      }
+    }
+  } else if (key_sv == "service_name") {
+    if (!has_dot_svc) {
+      if (TryExtractScalarServiceName(L, val_idx, scratch)) {
+        *out_service_name = std::string_view(scratch);
+        has_snake_svc = true;
+      } else {
+        has_snake_svc = false;
+        *out_service_name = "unknown_service";
+      }
+    } else {
+      std::string dummy;
+      has_snake_svc = TryExtractScalarServiceName(L, val_idx, dummy);
+    }
+  }
 }
 
 void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter& writer,
@@ -1128,6 +1174,9 @@ void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter
     lua_pop(L, 1);  // pop item 1
   }
 
+  bool has_dot_svc = false;
+  bool has_snake_svc = false;
+
   if (is_kv_array) {
     for (lua_Integer i = 1; i <= len; ++i) {
       lua_rawgeti(L, abs_idx, i);
@@ -1140,14 +1189,13 @@ void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter
             std::string_view key_sv(ks, klen);
             if (GetTableField(L, item_idx, "value")) {
               if (out_service_name != nullptr &&
-                  (out_service_name->empty() || *out_service_name == "unknown_service") &&
                   (key_sv == "service.name" || key_sv == "service_name")) {
-                if (TryExtractScalarServiceName(L, -1, tls_attr_json_service_scratch)) {
-                  *out_service_name = std::string_view(tls_attr_json_service_scratch);
-                }
+                UpdateTableServiceNameCandidate(L, -1, key_sv, out_service_name,
+                                                tls_attr_json_service_scratch, has_dot_svc,
+                                                has_snake_svc);
               }
               writer.Key(key_sv);
-              SerializeLuaValueToJson(L, -1, writer, 1);
+              SerializeLuaValueToJson(L, -1, writer, 0);
               lua_pop(L, 1);  // pop value
             }
           }
@@ -1158,35 +1206,26 @@ void WriteTableAttributesEntriesJson(lua_State* L, int attrs_idx, FastJsonWriter
     }
   } else {
     // Direct key-value map
-    bool has_dot_svc = false;
     lua_pushnil(L);
     while (lua_next(L, abs_idx) != 0) {
       if (lua_type(L, -2) == LUA_TSTRING) {
         size_t klen = 0;
         const char* ks = lua_tolstring(L, -2, &klen);
         std::string_view key_sv(ks, klen);
-        if (out_service_name != nullptr) {
-          if (key_sv == "service.name" && !has_dot_svc) {
-            if (TryExtractScalarServiceName(L, -1, tls_attr_json_service_scratch)) {
-              *out_service_name = std::string_view(tls_attr_json_service_scratch);
-              has_dot_svc = true;
-            }
-          } else if (key_sv == "service_name" && !has_dot_svc &&
-                     tls_attr_json_service_scratch.empty()) {
-            if (TryExtractScalarServiceName(L, -1, tls_attr_json_service_scratch)) {
-              *out_service_name = std::string_view(tls_attr_json_service_scratch);
-            }
-          }
+        if (out_service_name != nullptr && (key_sv == "service.name" || key_sv == "service_name")) {
+          UpdateTableServiceNameCandidate(L, -1, key_sv, out_service_name,
+                                          tls_attr_json_service_scratch, has_dot_svc,
+                                          has_snake_svc);
         }
         writer.Key(key_sv);
-        SerializeLuaValueToJson(L, -1, writer, 1);
+        SerializeLuaValueToJson(L, -1, writer, 0);
       } else if (lua_type(L, -2) == LUA_TNUMBER) {
         lua_pushvalue(L, -2);
         size_t klen = 0;
         const char* ks = lua_tolstring(L, -1, &klen);
         writer.Key(std::string_view(ks, klen));
         lua_pop(L, 1);  // pop converted string
-        SerializeLuaValueToJson(L, -1, writer, 1);
+        SerializeLuaValueToJson(L, -1, writer, 0);
       }
       lua_pop(L, 1);  // pop value, keep key for next iteration
     }

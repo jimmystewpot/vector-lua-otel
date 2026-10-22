@@ -41,6 +41,13 @@ class FastJsonWriter {
   struct ContainerState {
     ContainerType type;
     bool empty;
+    size_t fields_start;
+  };
+
+  struct ObjectField {
+    size_t entry_start;
+    size_t key_end;
+    size_t entry_end;
   };
 
   void BeforeValue();
@@ -48,6 +55,7 @@ class FastJsonWriter {
 
   std::string buffer_;
   std::vector<ContainerState> stack_;
+  std::vector<ObjectField> fields_;
 };
 
 }  // namespace vector_otel::core
