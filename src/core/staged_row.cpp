@@ -9,7 +9,7 @@ namespace vector_otel::core {
 
 // ---- builder ----------------------------------------------------------------------------------
 
-void StagedRow::Reset() noexcept {
+void StagedRow::Reset(bool root_array) noexcept {
   // A single huge record must not pin its buffers forever. Releasing never allocates.
   if (arena_.capacity() > kRetainedArenaBytes) {
     std::string().swap(arena_);
@@ -20,6 +20,7 @@ void StagedRow::Reset() noexcept {
   nodes_.clear();
   arena_.clear();
   root_children_ = 0;
+  root_array_ = root_array;
   depth_ = 0;
 }
 
@@ -170,10 +171,12 @@ const Node* PushValue(lua_State* L, const Node* n, const char* arena) {
   return n + 1;
 }
 
-// Pushes a new table holding the row's root fields.
+// Pushes a new table holding the row's root fields (or elements, for a root-array tape).
 void PushRowTable(lua_State* L, const StagedRow& row) {
-  lua_createtable(L, 0, static_cast<int>(row.root_children()));
-  FillTable(L, lua_gettop(L), row.nodes(), static_cast<std::uint32_t>(row.root_children()), false,
+  const int children = static_cast<int>(row.root_children());
+  const bool array = row.root_array();
+  lua_createtable(L, array ? children : 0, array ? 0 : children);
+  FillTable(L, lua_gettop(L), row.nodes(), static_cast<std::uint32_t>(row.root_children()), array,
             row.arena());
 }
 

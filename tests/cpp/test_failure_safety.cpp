@@ -11,6 +11,7 @@
 #include "process_fixtures.hpp"
 #include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
+#include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
 
 namespace vector_otel::core {
@@ -145,6 +146,164 @@ std::string TracesLua(int resources, int records) {
   return out + "}}";
 }
 
+// ---- metrics factories ------------------------------------------------------------------------
+
+// One gauge data point (a record) carrying attributes and an exemplar with filtered attributes.
+std::string DataPointJson(int i) {
+  const std::string n = std::to_string(i);
+  return "{\"timeUnixNano\":\"1700000000000000" + std::string(i < 10 ? "00" : "0") + n +
+         "\",\"asInt\":\"" + n +
+         "\",\"attributes\":[{\"key\":\"k\",\"value\":{\"stringValue\":\"v" + n +
+         "\"}}],\"exemplars\":[{\"timeUnixNano\":\"1700000000000000001\",\"asDouble\":2.5,"
+         "\"traceId\":\"0102030405060708090a0b0c0d0e0f10\",\"spanId\":\"0102030405060708\","
+         "\"filteredAttributes\":[{\"key\":\"fk\",\"value\":{\"stringValue\":\"f" +
+         n + "\"}}]}]}";
+}
+
+std::string DataPointLua(int i) {
+  const std::string n = std::to_string(i);
+  return "{timeUnixNano=\"1700000000000000" + std::string(i < 10 ? "00" : "0") + n + "\",asInt=\"" +
+         n + "\",attributes={{key=\"k\",value={stringValue=\"v" + n +
+         "\"}}},exemplars={{timeUnixNano=\"1700000000000000001\",asDouble=2.5,"
+         "traceId=\"0102030405060708090a0b0c0d0e0f10\",spanId=\"0102030405060708\","
+         "filteredAttributes={{key=\"fk\",value={stringValue=\"f" +
+         n + "\"}}}}}}";
+}
+
+// `resources` resources, each with one scope and one gauge metric of `records` data points.
+std::string MetricsJson(int resources, int records) {
+  std::string out = "{\"resourceMetrics\":[";
+  for (int r = 0; r < resources; ++r) {
+    if (r > 0) out += ',';
+    out +=
+        "{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":"
+        "\"svc-" +
+        std::to_string(r) + "\"}}]},\"scopeMetrics\":[{\"scope\":{\"name\":\"scope-" +
+        std::to_string(r) +
+        "\"},\"metrics\":[{\"name\":\"m\",\"unit\":\"1\",\"gauge\":"
+        "{\"dataPoints\":[";
+    for (int i = 0; i < records; ++i) {
+      if (i > 0) out += ',';
+      out += DataPointJson(i);
+    }
+    out += "]}}]}]}";
+  }
+  return out + "]}";
+}
+
+std::string MetricsLua(int resources, int records) {
+  std::string out = "return {resourceMetrics={";
+  for (int r = 0; r < resources; ++r) {
+    out += "{resource={attributes={{key=\"service.name\",value={stringValue=\"svc-" +
+           std::to_string(r) + "\"}}}},scopeMetrics={{scope={name=\"scope-" + std::to_string(r) +
+           "\"},metrics={{name=\"m\",unit=\"1\",gauge={dataPoints={";
+    for (int i = 0; i < records; ++i) {
+      if (i > 0) out += ',';
+      out += DataPointLua(i);
+    }
+    out += "}}}}}}},";
+  }
+  return out + "}}";
+}
+
+// ---- metrics, every data point type -----------------------------------------------------------
+
+// Mechanical JSON -> Lua table literal: `"key":` -> `key=`, `[`/`]` -> `{`/`}`. The fixtures hold
+// no escaped quotes or brackets inside strings.
+std::string JsonToLua(const std::string& json) {
+  std::string out = "return ";
+  for (std::size_t i = 0; i < json.size(); ++i) {
+    const char c = json[i];
+    if (c == '"') {
+      const std::size_t end = json.find('"', i + 1);
+      const bool is_key = end + 1 < json.size() && json[end + 1] == ':';
+      if (is_key) {
+        out.append(json, i + 1, end - i - 1);
+        out += '=';
+        i = end + 1;
+      } else {
+        out.append(json, i, end - i + 1);
+        i = end;
+      }
+    } else if (c == '[') {
+      out += '{';
+    } else if (c == ']') {
+      out += '}';
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+constexpr int kMetricTypeCount = 5;
+
+// The data point fields shared by every metric type, exemplar included (the JSON path omits an
+// absent exemplar array while table mode writes an empty one).
+std::string CommonPoint(int i) {
+  const std::string n = std::to_string(i);
+  return "\"timeUnixNano\":\"1700000000000000" + std::string(i < 10 ? "00" : "0") + n +
+         "\",\"attributes\":[{\"key\":\"k\",\"value\":{\"stringValue\":\"v" + n +
+         "\"}}],\"exemplars\":[{\"timeUnixNano\":\"1700000000000000001\",\"asInt\":\"7\","
+         "\"traceId\":\"0102030405060708090a0b0c0d0e0f10\",\"spanId\":\"0102030405060708\","
+         "\"filteredAttributes\":[{\"key\":\"fk\",\"value\":{\"stringValue\":\"f" +
+         n + "\"}}]}]";
+}
+
+// Type 0..4: gauge, sum, histogram, exponential histogram, summary.
+std::string AnyMetricJson(int i, int type) {
+  const std::string common = CommonPoint(i);
+  switch (type % kMetricTypeCount) {
+    case 0:
+      return "{\"name\":\"m" + std::to_string(i) + "\",\"gauge\":{\"dataPoints\":[{" + common +
+             ",\"asDouble\":1.5}]}}";
+    case 1:
+      return "{\"name\":\"m" + std::to_string(i) +
+             "\",\"sum\":{\"aggregationTemporality\":2,\"isMonotonic\":true,\"dataPoints\":[{" +
+             common + ",\"asInt\":\"9\"}]}}";
+    case 2:
+      return "{\"name\":\"m" + std::to_string(i) +
+             "\",\"histogram\":{\"aggregationTemporality\":1,\"dataPoints\":[{" + common +
+             ",\"count\":\"6\",\"sum\":10.5,\"min\":1.0,\"max\":5.0,\"bucketCounts\":[1,2,3],"
+             "\"explicitBounds\":[1.0,5.0]}]}}";
+    case 3:
+      return "{\"name\":\"m" + std::to_string(i) +
+             "\",\"exponentialHistogram\":{\"aggregationTemporality\":2,\"dataPoints\":[{" +
+             common +
+             ",\"count\":\"9\",\"sum\":20.5,\"min\":0.5,\"max\":8.0,\"scale\":2,"
+             "\"zeroCount\":\"1\",\"positive\":{\"offset\":3,\"bucketCounts\":[1,2,3]},"
+             "\"negative\":{\"offset\":-1,\"bucketCounts\":[4,5]}}]}}";
+    default:
+      return "{\"name\":\"m" + std::to_string(i) + "\",\"summary\":{\"dataPoints\":[{" + common +
+             ",\"count\":\"4\",\"sum\":12.5,\"quantileValues\":[{\"quantile\":0.5,\"value\":2.0},"
+             "{\"quantile\":0.99,\"value\":4.0}]}]}}";
+  }
+}
+
+// `resources` resources, each with one scope and `records` metrics of cycling type, one data
+// point each. Resource r starts the cycle at type 2r, so even a 2 x 3 payload holds all five.
+std::string AnyMetricsJson(int resources, int records) {
+  std::string out = "{\"resourceMetrics\":[";
+  for (int r = 0; r < resources; ++r) {
+    if (r > 0) out += ',';
+    out +=
+        "{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":"
+        "\"svc-" +
+        std::to_string(r) + "\"}}]},\"scopeMetrics\":[{\"scope\":{\"name\":\"scope-" +
+        std::to_string(r) + "\"},\"metrics\":[";
+    for (int i = 0; i < records; ++i) {
+      if (i > 0) out += ',';
+      out += AnyMetricJson(i, i + 2 * r);
+    }
+    out += "]}]}";
+  }
+  return out + "]}";
+}
+
+std::string AnyMetricsLua(int resources, int records) {
+  return JsonToLua(AnyMetricsJson(resources, records));
+}
+
 // ---- per-signal description -------------------------------------------------------------------
 
 struct Sig {
@@ -157,6 +316,8 @@ struct Sig {
   std::vector<const char*> empty_lua;
   extractors::ExtractionResult (*compat_json)(lua_State*, std::string_view, int);
   extractors::ExtractionResult (*compat_table)(lua_State*, int, int);
+  // Optional: true when a delivered row's dump holds everything its type requires.
+  bool (*row_complete)(const std::string& dump);
 };
 
 const Sig kLogsSig{
@@ -172,7 +333,8 @@ const Sig kLogsSig{
      "return {resourceLogs={{scopeLogs={{}}}}}",
      "return {resourceLogs={{scopeLogs={{logRecords={}}}}}}"},
     extractors::ProcessLogs,
-    extractors::ProcessLogsTable};
+    extractors::ProcessLogsTable,
+    nullptr};
 
 const Sig kTracesSig{
     "traces",
@@ -188,7 +350,59 @@ const Sig kTracesSig{
      "return {resourceSpans={{scopeSpans={{}}}}}",
      "return {resourceSpans={{scopeSpans={{spans={}}}}}}"},
     extractors::ProcessTraces,
-    extractors::ProcessTracesTable};
+    extractors::ProcessTracesTable,
+    nullptr};
+
+const Sig kMetricsSig{
+    "metrics",
+    MetricsJson,
+    MetricsLua,
+    true,
+    {"\"MetricName\":\"m\"", "\"MetricType\":\"gauge\"", "\"ServiceName\":\"svc-0\"",
+     "\"MetricUnit\":\"1\"", "\"Attributes\":{\"k\":\"v0\"}",
+     "\"FilteredAttributes\":{\"fk\":\"f0\"}"},
+    {"{}", "{\"resourceMetrics\":[]}", "{\"resourceMetrics\":[{}]}",
+     "{\"resourceMetrics\":[{\"scopeMetrics\":[]}]}",
+     "{\"resourceMetrics\":[{\"scopeMetrics\":[{}]}]}",
+     "{\"resourceMetrics\":[{\"scopeMetrics\":[{\"metrics\":[]}]}]}",
+     "{\"resourceMetrics\":[{\"scopeMetrics\":[{\"metrics\":[{\"name\":\"m\"}]}]}]}",
+     "{\"resourceMetrics\":[{\"scopeMetrics\":[{\"metrics\":[{\"gauge\":{\"dataPoints\":[]}}]}]}]"
+     "}"},
+    {"return {}", "return {resourceMetrics={}}", "return {resourceMetrics={{}}}",
+     "return {resourceMetrics={{scopeMetrics={{}}}}}",
+     "return {resourceMetrics={{scopeMetrics={{metrics={}}}}}}",
+     "return {resourceMetrics={{scopeMetrics={{metrics={{name=\"m\"}}}}}}}",
+     "return {resourceMetrics={{scopeMetrics={{metrics={{gauge={dataPoints={}}}}}}}}}"},
+    extractors::ProcessMetrics,
+    extractors::ProcessMetricsTable,
+    nullptr};
+
+// A delivered row must carry every shared array its type needs (an unanchored array would be a
+// silently damaged row).
+bool AnyMetricRowComplete(const std::string& dump) {
+  auto has = [&](const char* needle) { return dump.find(needle) != std::string::npos; };
+  if (has("\"MetricType\":\"histogram\"")) {
+    return has("\"bucketCounts\":[1,2,3]") && has("\"explicitBounds\":[");
+  }
+  if (has("\"MetricType\":\"exponential_histogram\"")) {
+    return has("\"bucketCounts\":[1,2,3]") && has("\"bucketCounts\":[4,5]");
+  }
+  if (has("\"MetricType\":\"summary\"")) return has("\"quantileValues\":[");
+  return has("\"Exemplars\":[");
+}
+
+const Sig kAnyMetricsSig{
+    "metrics",
+    AnyMetricsJson,
+    AnyMetricsLua,
+    true,
+    {"\"MetricName\":\"m0\"", "\"MetricType\":\"gauge\"", "\"ServiceName\":\"svc-0\"",
+     "\"Attributes\":{\"k\":\"v0\"}", "\"FilteredAttributes\":{\"fk\":\"f0\"}"},
+    {"{}", "{\"resourceMetrics\":[]}"},
+    {"return {}", "return {resourceMetrics={}}"},
+    extractors::ProcessMetrics,
+    extractors::ProcessMetricsTable,
+    AnyMetricRowComplete};
 
 const Sig* g_sig = &kLogsSig;  // the signal under test (set by the fixture)
 
@@ -206,6 +420,13 @@ void ExpectAnchorsReleased(lua_State* L) {
   for (int i = 0; i < kInvocationSlotCount; ++i) {
     EXPECT_EQ(AnchorSlotType(L, ModuleKind::Otel, static_cast<AnchorSlot>(i)), LUA_TBOOLEAN)
         << "anchor slot " << i << " still holds a value";
+  }
+}
+
+void ExpectRowsComplete(const ProcRecorder& rec) {
+  if (g_sig->row_complete == nullptr) return;
+  for (const std::string& event : rec.events) {
+    EXPECT_TRUE(g_sig->row_complete(event)) << "a delivered row is missing data: " << event;
   }
 }
 
@@ -433,6 +654,7 @@ void SweepLuaAllocations(bool table, int resources, int records) {
     });
     ASSERT_EQ(r.status, LUA_OK) << "an error escaped the dispatcher frame";
     ExpectAnchorsReleased(s.L());
+    ExpectRowsComplete(rec);
     for (const void* p : rec.resource_ptrs) {
       EXPECT_NE(p, nullptr) << "a delivered row lost its shared ResourceAttributes table";
     }
@@ -496,6 +718,7 @@ void SweepLuaWindows(bool table) {
     });
     ASSERT_EQ(r.status, LUA_OK) << "an error escaped the dispatcher frame";
     ExpectAnchorsReleased(s.L());
+    ExpectRowsComplete(rec);
     for (const void* p : rec.resource_ptrs) {
       EXPECT_NE(p, nullptr) << "a delivered row lost its shared ResourceAttributes table";
     }
@@ -672,10 +895,163 @@ TEST(FailureSafetyTraces, SpansWithoutEventsOrLinksEmitEmptyArrays) {
   }
 }
 
+// The 2048 limit counts data points: not metrics, not bucket or quantile entries.
+std::string GaugeMetricJson(int points) {
+  std::string out = "{\"name\":\"g\",\"gauge\":{\"dataPoints\":[";
+  for (int i = 0; i < points; ++i) {
+    if (i > 0) out += ',';
+    out += "{\"asInt\":\"1\"}";
+  }
+  return out + "]}}";
+}
+
+std::string MetricsSplitJson(const std::vector<std::vector<int>>& resources) {
+  std::string out = "{\"resourceMetrics\":[";
+  for (std::size_t r = 0; r < resources.size(); ++r) {
+    if (r > 0) out += ',';
+    out += "{\"scopeMetrics\":[";
+    for (std::size_t sc = 0; sc < 2; ++sc) {
+      if (sc > 0) out += ',';
+      out += "{\"metrics\":[" + GaugeMetricJson(resources[r][sc]) + "]}";
+    }
+    out += "]}";
+  }
+  return out + "]}";
+}
+
+TEST(FailureSafetyMetrics, DataPointLimitCountsAcrossResourcesScopesAndMetrics) {
+  struct Case {
+    std::vector<std::vector<int>> split;
+    bool ok;
+  };
+  const Case cases[] = {
+      {{{1024, 1024}}, true},           // 2048 in one resource, two scopes
+      {{{1024, 1023}, {1, 0}}, true},   // 2048 over two resources
+      {{{1024, 1024}, {1, 0}}, false},  // 2049 over two resources
+      {{{2047, 0}}, true},              // 2047
+      {{{2048, 1}}, false},             // 2049 over two scopes
+  };
+  for (const Case& c : cases) {
+    RawState s;
+    ProcRecorder rec;
+    const ProcResult r =
+        CallProcess(s, false, "metrics", JsonPayload(MetricsSplitJson(c.split)), rec);
+    ASSERT_EQ(r.status, LUA_OK);
+    if (c.ok) {
+      ASSERT_EQ(r.nresults, 2) << r.error;
+      EXPECT_GE(r.count, 2047);
+    } else {
+      ASSERT_EQ(r.nresults, 3);
+      EXPECT_TRUE(r.first_nil);
+      EXPECT_EQ(r.error, "event exceeds 2048-record limit");
+      EXPECT_EQ(rec.calls, 0) << "nothing may be emitted once the limit is exceeded";
+    }
+  }
+}
+
+TEST(FailureSafetyMetrics, LargeBucketAndQuantileArraysAreNotRecords) {
+  std::string counts;
+  std::string bounds;
+  std::string quantiles;
+  for (int i = 0; i < 5000; ++i) {
+    if (i > 0) {
+      counts += ',';
+      bounds += ',';
+      quantiles += ',';
+    }
+    counts += "1";
+    bounds += std::to_string(i) + ".5";
+    quantiles += "{\"quantile\":0.5,\"value\":1.0}";
+  }
+  const std::string json =
+      "{\"resourceMetrics\":[{\"scopeMetrics\":[{\"metrics\":[{\"name\":\"h\",\"histogram\":{"
+      "\"dataPoints\":[{\"count\":\"5000\",\"bucketCounts\":[" +
+      counts + "],\"explicitBounds\":[" + bounds +
+      "]}]}},{\"name\":\"s\",\"summary\":{\"dataPoints\":[{\"count\":\"1\",\"quantileValues\":[" +
+      quantiles + "]}]}}]}]}]}";
+  RawState s;
+  ProcRecorder rec;
+  const ProcResult r = CallProcess(s, false, "metrics", JsonPayload(json), rec);
+  ASSERT_EQ(r.status, LUA_OK);
+  ASSERT_EQ(r.nresults, 2) << r.error;
+  EXPECT_EQ(r.count, 2);
+  EXPECT_EQ(rec.rows, 2);
+}
+
+// One dump per delivered row: a batched event ({"log":{"records":[row,...]}}) is split into its
+// rows (the fixtures hold no braces inside strings), a single-row event is its own row.
+std::vector<std::string> RowDumps(const std::vector<std::string>& events) {
+  std::vector<std::string> rows;
+  for (const std::string& event : events) {
+    const std::size_t at = event.find("\"records\":[");
+    if (at == std::string::npos) {
+      rows.push_back(event);
+      continue;
+    }
+    int depth = 0;
+    std::size_t start = 0;
+    for (std::size_t i = at + 11; i < event.size() && !(depth == 0 && event[i] == ']'); ++i) {
+      if (event[i] == '{') {
+        if (depth++ == 0) start = i;
+      } else if (event[i] == '}') {
+        if (--depth == 0) rows.push_back(event.substr(start, i - start + 1));
+      }
+    }
+  }
+  return rows;
+}
+
+// Per-data-point state never leaks into the next data point: a point without arrays or attributes
+// gets empty ones, not its predecessor's.
+TEST(FailureSafetyMetrics, ArraysAndAttributesNeverLeakAcrossDataPoints) {
+  const std::string json =
+      "{\"resourceMetrics\":[{\"scopeMetrics\":[{\"metrics\":["
+      "{\"name\":\"h\",\"histogram\":{\"dataPoints\":[{\"count\":\"3\",\"bucketCounts\":[4,5,6],"
+      "\"explicitBounds\":[1.5,2.5],\"attributes\":[{\"key\":\"k\",\"value\":{\"stringValue\":"
+      "\"v\"}}]},{\"count\":\"1\"}]}},"
+      "{\"name\":\"e\",\"exponentialHistogram\":{\"dataPoints\":[{\"count\":\"3\",\"positive\":"
+      "{\"offset\":2,\"bucketCounts\":[7,8]},\"negative\":{\"offset\":1,\"bucketCounts\":[9]}},"
+      "{\"count\":\"1\"}]}},"
+      "{\"name\":\"s\",\"summary\":{\"dataPoints\":[{\"count\":\"2\",\"quantileValues\":"
+      "[{\"quantile\":0.5,\"value\":3.5}]},{\"count\":\"1\"}]}}]}]}]}";
+  for (const bool table : {false, true}) {
+    SCOPED_TRACE(table ? "table" : "json");
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    const ProcResult r = CallProcess(
+        s, false, "metrics", table ? TablePayload(JsonToLua(json)) : JsonPayload(json), rec);
+    ASSERT_EQ(r.status, LUA_OK);
+    ASSERT_EQ(r.count, 6) << r.error;
+    const std::vector<std::string> rows = RowDumps(rec.events);
+    ASSERT_EQ(rows.size(), 6u);
+    auto has = [&](int event, const char* needle) {
+      return rows[event].find(needle) != std::string::npos;
+    };
+    // First points carry their arrays and attributes.
+    EXPECT_TRUE(has(0, "\"bucketCounts\":[4,5,6]")) << rows[0];
+    EXPECT_TRUE(has(0, "\"Attributes\":{\"k\":\"v\"}")) << rows[0];
+    EXPECT_TRUE(has(2, "\"bucketCounts\":[7,8]")) << rows[2];
+    EXPECT_TRUE(has(4, "\"quantileValues\":[{")) << rows[4];
+    // Second points have none of them, and an empty Attributes map.
+    EXPECT_FALSE(has(1, "[4,5,6]")) << rows[1];
+    EXPECT_FALSE(has(1, "1.500000f")) << "stale explicitBounds: " << rows[1];
+    EXPECT_FALSE(has(1, "\"k\":\"v\"")) << "stale attributes: " << rows[1];
+    EXPECT_TRUE(has(1, "\"Attributes\":{}")) << rows[1];
+    EXPECT_FALSE(has(3, "[7,8]")) << rows[3];
+    EXPECT_FALSE(has(3, "[9]")) << rows[3];
+    EXPECT_TRUE(has(3, "\"Attributes\":{}")) << rows[3];
+    EXPECT_FALSE(has(5, "3.500000f")) << "stale quantiles: " << rows[5];
+    EXPECT_TRUE(has(5, "\"Attributes\":{}")) << rows[5];
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
-                         testing::Values(&kLogsSig, &kTracesSig),
+                         testing::Values(&kLogsSig, &kTracesSig, &kMetricsSig, &kAnyMetricsSig),
                          [](const testing::TestParamInfo<const Sig*>& info) {
-                           return std::string(info.param->name);
+                           // `name` is the process() signal; the all-types variant shares it.
+                           return info.param == &kAnyMetricsSig ? std::string("metrics_all_types")
+                                                                : std::string(info.param->name);
                          });
 
 }  // namespace

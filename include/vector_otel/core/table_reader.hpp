@@ -176,9 +176,11 @@ void SerializeTableSpanEventsToJson(lua_State* L, int events_idx, FastJsonWriter
 // with normalized hex IDs and without calling writer.Reset().
 void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& writer);
 
-// Pushes a new normalized array table of metric exemplars onto the Lua stack,
-// matching ParseExemplars ClickHouse schema (FilteredAttributes, TimeUnix, Value, SpanId, TraceId).
-void PushTableExemplars(lua_State* L, int exemplars_idx, FastJsonWriter& writer);
+// Stages a normalized array of metric exemplars under `key` (FilteredAttributes, TimeUnix, Value,
+// SpanId, TraceId per exemplar; non-table entries are skipped, a non-table input stages an empty
+// array). Reads are raw and allocation-free; the Lua stack is restored on return.
+void StageTableExemplars(StagedRow& row, Key key, lua_State* L, int exemplars_idx,
+                         FastJsonWriter& writer);
 
 // Pushes an array of Events table for traces onto the Lua stack.
 void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer);

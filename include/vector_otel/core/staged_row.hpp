@@ -98,8 +98,11 @@ class StagedRow {
   StagedRow(const StagedRow&) = delete;
   StagedRow& operator=(const StagedRow&) = delete;
 
-  // Starts a new row: clears the tape, keeps capacity.
-  void Reset() noexcept;
+  // Starts a new row: clears the tape, keeps capacity. With `root_array` the root children are
+  // unkeyed and materialise as the elements of a Lua array instead of the fields of a map (used
+  // by tapes for bucket counts, bounds and quantiles that are shared through anchors).
+  void Reset(bool root_array = false) noexcept;
+  bool root_array() const noexcept { return root_array_; }
 
   void Str(Key key, std::string_view value);
   void Int(Key key, std::int64_t value);
@@ -135,6 +138,7 @@ class StagedRow {
   std::vector<Node> nodes_;
   std::string arena_;
   std::uint32_t root_children_ = 0;
+  bool root_array_ = false;
   std::uint32_t open_node_[kMaxDepth] = {};
   std::uint32_t open_children_[kMaxDepth] = {};
   int depth_ = 0;

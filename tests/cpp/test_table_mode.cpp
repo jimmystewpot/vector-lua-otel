@@ -12,6 +12,7 @@ extern "C" {
 #include "vector_otel/core/fast_json_writer.hpp"
 #include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
+#include "vector_otel/core/staged_row.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
@@ -34,6 +35,37 @@ static int MockEmit(lua_State* L) {
     lua_pop(L, 1);
   }
   return 0;
+}
+
+// Exemplars are staged straight into the emitted row now, so there is no standalone "push" helper.
+// Runs a one-point gauge carrying `raw_idx` as its exemplars through ProcessMetricsTable and leaves
+// the emitted row's Exemplars table on top of the stack.
+void PushExemplarsViaMetrics(lua_State* L, int raw_idx) {
+  lua_pushvalue(L, raw_idx);
+  lua_setglobal(L, "__ex_input");
+  ASSERT_EQ(luaL_dostring(L, R"(
+    __ex_row = nil
+    function __ex_cb(ev)
+      local log = ev.log
+      __ex_row = log.records and log.records[1] or log
+    end
+    __ex_payload = { resourceMetrics = { { scopeMetrics = { { metrics = { {
+      name = "m",
+      gauge = { dataPoints = { { timeUnixNano = 1, asDouble = 1.0, exemplars = __ex_input } } }
+    } } } } } } }
+  )"),
+            LUA_OK);
+  lua_getglobal(L, "__ex_payload");
+  const int payload_idx = lua_gettop(L);
+  lua_getglobal(L, "__ex_cb");
+  const int cb_idx = lua_gettop(L);
+  auto res = extractors::ProcessMetricsTable(L, payload_idx, cb_idx);
+  ASSERT_TRUE(res.success) << res.error;
+  lua_pop(L, 2);
+  lua_getglobal(L, "__ex_row");
+  ASSERT_TRUE(lua_istable(L, -1));
+  lua_getfield(L, -1, "Exemplars");
+  lua_remove(L, -2);
 }
 
 class TableModeTest : public ::testing::Test {
@@ -2449,8 +2481,7 @@ TEST_F(TableModeTest, PushTableExemplarsNormalization) {
   lua_getglobal(L_, "raw_exemplars");
   int raw_idx = lua_gettop(L_);
 
-  core::FastJsonWriter writer;
-  core::PushTableExemplars(L_, raw_idx, writer);
+  PushExemplarsViaMetrics(L_, raw_idx);
   int norm_idx = lua_gettop(L_);
 
   // Verify result is a table of 3 elements
@@ -2551,13 +2582,18 @@ TEST_F(TableModeTest, StackSafetyCheck) {
   lua_pop(L_, 1);
   EXPECT_EQ(lua_gettop(L_), before_links);
 
-  // PushTableExemplars: pushes exactly 1 table
-  int before_ex = lua_gettop(L_);
-  EXPECT_TRUE(core::GetTableField(L_, t_idx, "exemplars"));
-  core::PushTableExemplars(L_, -1, writer);
-  EXPECT_EQ(lua_gettop(L_), before_ex + 2);  // [exemplars input, new table]
-  lua_pop(L_, 2);
-  EXPECT_EQ(lua_gettop(L_), before_ex);
+  // StageTableExemplars: leaves the stack unchanged
+  {
+    core::StagedRow ex_row;
+    ex_row.Reset();
+    int before_ex = lua_gettop(L_);
+    EXPECT_TRUE(core::GetTableField(L_, t_idx, "exemplars"));
+    const int ex_idx = lua_gettop(L_);
+    core::StageTableExemplars(ex_row, "exemplars", L_, ex_idx, writer);
+    EXPECT_EQ(lua_gettop(L_), ex_idx);
+    lua_pop(L_, 1);
+    EXPECT_EQ(lua_gettop(L_), before_ex);
+  }
 
   lua_pop(L_, 2);  // pop table_sample and dummy_emit
 }
@@ -2648,7 +2684,7 @@ TEST_F(TableModeTest, UintValueDenseArraysAndJsonParity) {
     return { "skip1", { asInt = "10" }, "skip2", { asDouble = "2.5" }, { asInt = "bad_int" } }
   )"),
             LUA_OK);
-  core::PushTableExemplars(L_, -1, writer);
+  PushExemplarsViaMetrics(L_, lua_gettop(L_));
   EXPECT_EQ(lua_rawlen(L_, -1), 3U);
   lua_pop(L_, 2);
 

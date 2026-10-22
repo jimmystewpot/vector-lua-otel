@@ -26,7 +26,8 @@ int ProcessTraces(lua_State* L) {
 }
 
 int ProcessMetrics(lua_State* L) {
-  return core::ProcessDispatcher<extractors::ProcessMetrics, extractors::ProcessMetricsTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Otel, core::Signal::Metrics,
+                               extractors::MetricsExtractors());
 }
 
 const luaL_Reg kLogsFuncs[] = {

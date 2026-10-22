@@ -292,6 +292,17 @@ void CopyTableIdFieldToTable(lua_State* L, int src_idx, ReadKey name1, ReadKey n
   lua_setfield(L, dst_idx, dst_field);
 }
 
+void StageTableIdField(StagedRow& row, Key dst_key, lua_State* L, int src_idx, ReadKey name1,
+                       ReadKey name2, ReadKey name3, size_t expected_binary_len) {
+  IdHexBuffer id_buf{};
+  if (GetTableField(L, src_idx, name1, name2, name3)) {
+    row.Str(dst_key, NormalizeIdOnStack(L, -1, expected_binary_len, id_buf));
+    lua_pop(L, 1);
+    return;
+  }
+  row.Str(dst_key, "");
+}
+
 }  // namespace
 
 template <typename Emitter>
@@ -1481,125 +1492,98 @@ void SerializeTableSpanLinksToJson(lua_State* L, int links_idx, FastJsonWriter& 
   writer.EndArray();
 }
 
-void PushTableExemplars(lua_State* L, int exemplars_idx, FastJsonWriter& writer) {
-  if (!lua_checkstack(L, 10)) {
-    throw std::runtime_error("Lua stack overflow in PushTableExemplars");
+// One exemplar map: FilteredAttributes, TimeUnix, Value (when parseable), SpanId, TraceId.
+void StageTableExemplar(StagedRow& row, lua_State* L, int item_idx, FastJsonWriter& writer) {
+  row.BeginMap(Key());
+
+  if (GetTableField(L, item_idx, "filteredAttributes", "filtered_attributes",
+                    "FilteredAttributes")) {
+    StageTableAttributes(row, "FilteredAttributes", L, -1, writer);
+    lua_pop(L, 1);
+  } else {
+    row.BeginMap("FilteredAttributes");
+    row.End();
   }
-  int abs_idx = lua_absindex(L, exemplars_idx);
-  lua_newtable(L);
-  int out_arr_idx = lua_absindex(L, -1);
 
-  if (!lua_istable(L, abs_idx)) {
-    return;
+  const uint64_t t_ns = ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
+  if (t_ns > 0) {
+    std::array<char, 32> ts_buf;
+    FormatIso8601Nano(t_ns, ts_buf.data());
+    row.Str("TimeUnix", std::string_view(ts_buf.data(), 30));
+  } else if (GetTableField(L, item_idx, "TimeUnix", "timeUnix", "time_unix")) {
+    if (lua_type(L, -1) == LUA_TSTRING) {
+      size_t len = 0;
+      const char* text = lua_tolstring(L, -1, &len);
+      row.Str("TimeUnix", std::string_view(text, len));
+    } else {
+      row.Str("TimeUnix", "");
+    }
+    lua_pop(L, 1);
+  } else {
+    row.Str("TimeUnix", "");
   }
 
-  lua_Integer len = static_cast<lua_Integer>(lua_rawlen(L, abs_idx));
-  lua_Integer out_idx = 1;
-  for (lua_Integer i = 1; i <= len; ++i) {
-    lua_rawgeti(L, abs_idx, i);
-    if (lua_istable(L, -1)) {
-      int item_idx = lua_absindex(L, -1);
-      lua_newtable(L);
-      int ex_obj_idx = lua_absindex(L, -1);
-
-      // FilteredAttributes
-      if (GetTableField(L, item_idx, "filteredAttributes", "filtered_attributes",
-                        "FilteredAttributes")) {
-        PushTableAttributes(L, -1, writer);
-        lua_setfield(L, ex_obj_idx, "FilteredAttributes");
-        lua_pop(L, 1);
+  bool value_set = false;
+  if (GetTableField(L, item_idx, "asDouble", "as_double", "as_double_value")) {
+    double d = 0.0;
+    value_set = TryParseTableDoubleAt(L, -1, d);
+    lua_pop(L, 1);
+    if (value_set) {
+      row.Dbl("Value", d);
+    }
+  }
+  if (!value_set && GetTableField(L, item_idx, "asInt", "as_int", "as_int_value")) {
+    int64_t v = 0;
+    value_set = TryParseTableInt64At(L, -1, v);
+    lua_pop(L, 1);
+    if (value_set) {
+      row.Int("Value", v);
+    }
+  }
+  if (!value_set && GetTableField(L, item_idx, "value", "Value")) {
+    if (lua_type(L, -1) == LUA_TNUMBER) {
+      if (lua_isinteger(L, -1)) {
+        row.Int("Value", lua_tointeger(L, -1));
       } else {
-        lua_newtable(L);
-        lua_setfield(L, ex_obj_idx, "FilteredAttributes");
-      }
-
-      // TimeUnix
-      uint64_t t_ns = ReadTableUint64(L, item_idx, "timeUnixNano", "time_unix_nano", 0);
-      if (t_ns > 0) {
-        std::array<char, 32> ts_buf;
-        FormatIso8601Nano(t_ns, ts_buf.data());
-        constexpr size_t kIsoLen = 30;
-        lua_pushlstring(L, ts_buf.data(), kIsoLen);
-        lua_setfield(L, ex_obj_idx, "TimeUnix");
-      } else if (GetTableField(L, item_idx, "TimeUnix", "timeUnix", "time_unix")) {
-        if (lua_type(L, -1) == LUA_TSTRING) {
-          lua_setfield(L, ex_obj_idx, "TimeUnix");
-        } else {
-          lua_pop(L, 1);
-          lua_pushliteral(L, "");
-          lua_setfield(L, ex_obj_idx, "TimeUnix");
-        }
-      } else {
-        lua_pushliteral(L, "");
-        lua_setfield(L, ex_obj_idx, "TimeUnix");
-      }
-
-      // Value
-      bool value_set = false;
-      if (GetTableField(L, item_idx, "asDouble", "as_double", "as_double_value")) {
-        double d = 0.0;
-        if (TryParseTableDoubleAt(L, -1, d)) {
-          value_set = true;
-        }
-        lua_pop(L, 1);
-        if (value_set) {
-          lua_pushnumber(L, d);
-          lua_setfield(L, ex_obj_idx, "Value");
+        const double num = lua_tonumber(L, -1);
+        if (std::isfinite(num)) {
+          row.Dbl("Value", num);
         }
       }
-      if (!value_set && GetTableField(L, item_idx, "asInt", "as_int", "as_int_value")) {
-        int64_t v = 0;
-        if (TryParseTableInt64At(L, -1, v)) {
-          value_set = true;
-        }
-        lua_pop(L, 1);
-        if (value_set) {
-          lua_pushinteger(L, v);
-          lua_setfield(L, ex_obj_idx, "Value");
-        }
+    } else if (lua_type(L, -1) == LUA_TSTRING) {
+      int64_t iv = 0;
+      double d = 0.0;
+      if (ParseLuaStringInt64(L, -1, iv)) {
+        row.Int("Value", iv);
+      } else if (ParseLuaStringDouble(L, -1, d)) {
+        row.Dbl("Value", d);
       }
-      if (!value_set && GetTableField(L, item_idx, "value", "Value")) {
-        if (lua_type(L, -1) == LUA_TNUMBER) {
-          if (lua_isinteger(L, -1)) {
-            lua_pushinteger(L, lua_tointeger(L, -1));
-            lua_setfield(L, ex_obj_idx, "Value");
-            value_set = true;
-          } else {
-            double num = lua_tonumber(L, -1);
-            if (std::isfinite(num)) {
-              lua_pushnumber(L, num);
-              lua_setfield(L, ex_obj_idx, "Value");
-              value_set = true;
-            }
-          }
-        } else if (lua_type(L, -1) == LUA_TSTRING) {
-          int64_t iv = 0;
-          double d = 0.0;
-          if (ParseLuaStringInt64(L, -1, iv)) {
-            lua_pushinteger(L, iv);
-            lua_setfield(L, ex_obj_idx, "Value");
-            value_set = true;
-          } else if (ParseLuaStringDouble(L, -1, d)) {
-            lua_pushnumber(L, d);
-            lua_setfield(L, ex_obj_idx, "Value");
-            value_set = true;
-          }
-        }
-        lua_pop(L, 1);
-      }
-
-      // SpanId
-      CopyTableIdFieldToTable(L, item_idx, "spanId", "span_id", "SpanId", kSpanIdBinaryLen,
-                              ex_obj_idx, "SpanId");
-
-      // TraceId
-      CopyTableIdFieldToTable(L, item_idx, "traceId", "trace_id", "TraceId", kTraceIdBinaryLen,
-                              ex_obj_idx, "TraceId");
-
-      lua_rawseti(L, out_arr_idx, out_idx++);
     }
     lua_pop(L, 1);
   }
+
+  StageTableIdField(row, "SpanId", L, item_idx, "spanId", "span_id", "SpanId", kSpanIdBinaryLen);
+  StageTableIdField(row, "TraceId", L, item_idx, "traceId", "trace_id", "TraceId",
+                    kTraceIdBinaryLen);
+  row.End();
+}
+
+void StageTableExemplars(StagedRow& row, Key key, lua_State* L, int exemplars_idx,
+                         FastJsonWriter& writer) {
+  const int abs_idx = lua_absindex(L, exemplars_idx);
+  row.BeginArray(key);
+  if (lua_istable(L, abs_idx)) {
+    const int top = lua_gettop(L);
+    const lua_Integer len = static_cast<lua_Integer>(lua_rawlen(L, abs_idx));
+    for (lua_Integer i = 1; i <= len; ++i) {
+      lua_rawgeti(L, abs_idx, i);
+      if (lua_istable(L, -1)) {
+        StageTableExemplar(row, L, lua_absindex(L, -1), writer);
+      }
+      lua_settop(L, top);
+    }
+  }
+  row.End();
 }
 
 void PushTableSpanEvents(lua_State* L, int events_idx, FastJsonWriter& writer) {
