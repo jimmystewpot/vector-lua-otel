@@ -52,4 +52,8 @@ std::string_view ExtractStringField(simdjson::ondemand::object& obj, std::string
 // Must be called at the end of each batch to ensure the string_view is invalidated.
 void ResetServiceNameScratch() noexcept;
 
+std::string_view TrimJsonWhitespace(std::string_view sv) noexcept;
+bool EqualsIgnoreCaseAscii(std::string_view a, std::string_view b) noexcept;
+bool ParseJsonTimestamp(simdjson::ondemand::value& fv, uint64_t& out_ns) noexcept;
+
 }  // namespace vector_otel::core

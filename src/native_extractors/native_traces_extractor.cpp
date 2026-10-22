@@ -29,37 +29,7 @@ namespace {
 using core::ScopedLuaRef;
 using extractors::ExtractionResult;
 
-std::string_view TrimJsonWhitespace(std::string_view sv) noexcept {
-  while (!sv.empty() &&
-         (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
-    sv.remove_prefix(1);
-  }
-  while (!sv.empty() &&
-         (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
-    sv.remove_suffix(1);
-  }
-  return sv;
-}
-
-bool EqualsIgnoreCaseAscii(std::string_view a, std::string_view b) noexcept {
-  if (a.size() != b.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < a.size(); ++i) {
-    char ca = a[i];
-    char cb = b[i];
-    if (ca >= 'a' && ca <= 'z') {
-      ca = static_cast<char>(ca - 'a' + 'A');
-    }
-    if (cb >= 'a' && cb <= 'z') {
-      cb = static_cast<char>(cb - 'a' + 'A');
-    }
-    if (ca != cb) {
-      return false;
-    }
-  }
-  return true;
-}
+constexpr int kMaxJsonDepth = 16;
 
 std::string_view SpanKindFromInt(int64_t k) noexcept {
   switch (k) {
@@ -79,28 +49,28 @@ std::string_view SpanKindFromInt(int64_t k) noexcept {
 }
 
 std::string_view NormalizeSpanKindString(std::string_view sv) noexcept {
-  sv = TrimJsonWhitespace(sv);
+  sv = core::TrimJsonWhitespace(sv);
   if (sv.empty()) {
     return "SPAN_KIND_UNSPECIFIED";
   }
-  if (EqualsIgnoreCaseAscii(sv, "INTERNAL") || EqualsIgnoreCaseAscii(sv, "SPAN_KIND_INTERNAL") ||
-      sv == "1") {
+  if (core::EqualsIgnoreCaseAscii(sv, "INTERNAL") ||
+      core::EqualsIgnoreCaseAscii(sv, "SPAN_KIND_INTERNAL") || sv == "1") {
     return "SPAN_KIND_INTERNAL";
   }
-  if (EqualsIgnoreCaseAscii(sv, "SERVER") || EqualsIgnoreCaseAscii(sv, "SPAN_KIND_SERVER") ||
-      sv == "2") {
+  if (core::EqualsIgnoreCaseAscii(sv, "SERVER") ||
+      core::EqualsIgnoreCaseAscii(sv, "SPAN_KIND_SERVER") || sv == "2") {
     return "SPAN_KIND_SERVER";
   }
-  if (EqualsIgnoreCaseAscii(sv, "CLIENT") || EqualsIgnoreCaseAscii(sv, "SPAN_KIND_CLIENT") ||
-      sv == "3") {
+  if (core::EqualsIgnoreCaseAscii(sv, "CLIENT") ||
+      core::EqualsIgnoreCaseAscii(sv, "SPAN_KIND_CLIENT") || sv == "3") {
     return "SPAN_KIND_CLIENT";
   }
-  if (EqualsIgnoreCaseAscii(sv, "PRODUCER") || EqualsIgnoreCaseAscii(sv, "SPAN_KIND_PRODUCER") ||
-      sv == "4") {
+  if (core::EqualsIgnoreCaseAscii(sv, "PRODUCER") ||
+      core::EqualsIgnoreCaseAscii(sv, "SPAN_KIND_PRODUCER") || sv == "4") {
     return "SPAN_KIND_PRODUCER";
   }
-  if (EqualsIgnoreCaseAscii(sv, "CONSUMER") || EqualsIgnoreCaseAscii(sv, "SPAN_KIND_CONSUMER") ||
-      sv == "5") {
+  if (core::EqualsIgnoreCaseAscii(sv, "CONSUMER") ||
+      core::EqualsIgnoreCaseAscii(sv, "SPAN_KIND_CONSUMER") || sv == "5") {
     return "SPAN_KIND_CONSUMER";
   }
   return "SPAN_KIND_UNSPECIFIED";
@@ -118,122 +88,19 @@ std::string_view StatusCodeFromInt(int64_t c) noexcept {
 }
 
 std::string_view NormalizeStatusCodeString(std::string_view sv) noexcept {
-  sv = TrimJsonWhitespace(sv);
+  sv = core::TrimJsonWhitespace(sv);
   if (sv.empty()) {
     return "STATUS_CODE_UNSET";
   }
-  if (EqualsIgnoreCaseAscii(sv, "OK") || EqualsIgnoreCaseAscii(sv, "STATUS_CODE_OK") || sv == "1") {
+  if (core::EqualsIgnoreCaseAscii(sv, "OK") || core::EqualsIgnoreCaseAscii(sv, "STATUS_CODE_OK") ||
+      sv == "1") {
     return "STATUS_CODE_OK";
   }
-  if (EqualsIgnoreCaseAscii(sv, "ERROR") || EqualsIgnoreCaseAscii(sv, "STATUS_CODE_ERROR") ||
-      sv == "2") {
+  if (core::EqualsIgnoreCaseAscii(sv, "ERROR") ||
+      core::EqualsIgnoreCaseAscii(sv, "STATUS_CODE_ERROR") || sv == "2") {
     return "STATUS_CODE_ERROR";
   }
   return "STATUS_CODE_UNSET";
-}
-
-bool ParseJsonTimestamp(simdjson::ondemand::value& fv, uint64_t& out_ns) noexcept {
-  auto type_res = fv.type();
-  if (type_res.error() != simdjson::SUCCESS) {
-    return false;
-  }
-  const auto type = type_res.value();
-  if (type == simdjson::ondemand::json_type::string) {
-    auto s_res = fv.get_string();
-    if (s_res.error() != simdjson::SUCCESS) {
-      return false;
-    }
-    std::string_view sv = s_res.value();
-    if (core::ParseIso8601ToUnixNano(sv, out_ns)) {
-      return true;
-    }
-    sv = TrimJsonWhitespace(sv);
-    if (sv.empty()) {
-      return false;
-    }
-    uint64_t uval = 0;
-    auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), uval);
-    if (ec == std::errc() && ptr == sv.data() + sv.size()) {
-      out_ns = uval;
-      return true;
-    }
-    return false;
-  }
-  if (type == simdjson::ondemand::json_type::number) {
-    auto num_res = fv.get_number();
-    if (num_res.error() != simdjson::SUCCESS) {
-      return false;
-    }
-    const auto num = num_res.value();
-    if (num.is_uint64()) {
-      out_ns = num.get_uint64();
-      return true;
-    }
-    if (num.is_int64()) {
-      const int64_t iv = num.get_int64();
-      if (iv < 0) {
-        return false;
-      }
-      out_ns = static_cast<uint64_t>(iv);
-      return true;
-    }
-    if (num.is_double()) {
-      const double d = num.get_double();
-      if (d >= 0.0 && d < 18446744073709551616.0) {
-        out_ns = static_cast<uint64_t>(d);
-        return true;
-      }
-    }
-    return false;
-  }
-  if (type == simdjson::ondemand::json_type::object) {
-    auto obj_res = fv.get_object();
-    if (obj_res.error() != simdjson::SUCCESS) {
-      return false;
-    }
-    int64_t year = 0;
-    int64_t month = 0;
-    int64_t day = 0;
-    int64_t hour = 0;
-    int64_t min = 0;
-    int64_t sec = 0;
-    int64_t nanosec = 0;
-    bool has_year = false;
-    bool has_month = false;
-    bool has_day = false;
-    for (auto field_res : obj_res.value()) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
-      auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
-      std::string_view k = k_res.value();
-      auto v_res = field_res.value();
-      if (v_res.error() != simdjson::SUCCESS) continue;
-      auto v = v_res.value();
-      if (k == "year") {
-        year = core::ParseInt64(v);
-        has_year = true;
-      } else if (k == "month") {
-        month = core::ParseInt64(v);
-        has_month = true;
-      } else if (k == "day") {
-        day = core::ParseInt64(v);
-        has_day = true;
-      } else if (k == "hour") {
-        hour = core::ParseInt64(v);
-      } else if (k == "min") {
-        min = core::ParseInt64(v);
-      } else if (k == "sec") {
-        sec = core::ParseInt64(v);
-      } else if (k == "nanosec" || k == "nanosecond" || k == "nsec") {
-        nanosec = core::ParseInt64(v);
-      }
-    }
-    if (!has_year || !has_month || !has_day) {
-      return false;
-    }
-    return core::CivilToUnixNano(year, month, day, hour, min, sec, nanosec, out_ns);
-  }
-  return false;
 }
 
 std::string_view ParseJsonSpanKind(simdjson::ondemand::value& kval) {
@@ -270,7 +137,12 @@ std::string_view ParseJsonStatusCode(simdjson::ondemand::value& code_val) {
   return "STATUS_CODE_UNSET";
 }
 
-void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& val) {
+void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& val,
+                       int depth = 0) {
+  if (depth >= kMaxJsonDepth) {
+    writer.String("[max_depth_exceeded]");
+    return;
+  }
   auto type_res = val.type();
   if (type_res.error() != simdjson::SUCCESS) {
     writer.Null();
@@ -324,7 +196,7 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
                    k == "kvlist_value" || k == "bytesValue" || k == "bytes_value") {
           auto raw_res = fv.raw_json();
           if (raw_res.error() == simdjson::SUCCESS) {
-            writer.RawJson(TrimJsonWhitespace(raw_res.value()));
+            writer.RawJson(core::TrimJsonWhitespace(raw_res.value()));
           } else {
             writer.Null();
           }
@@ -338,7 +210,7 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
         has_plain_fields = true;
       }
       writer.Key(k);
-      WriteAnyValueJson(writer, fv);
+      WriteAnyValueJson(writer, fv, depth + 1);
     }
     if (!matched) {
       if (!has_plain_fields) {
@@ -349,7 +221,7 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
   } else if (type == simdjson::ondemand::json_type::array) {
     auto raw_res = val.raw_json();
     if (raw_res.error() == simdjson::SUCCESS) {
-      writer.RawJson(TrimJsonWhitespace(raw_res.value()));
+      writer.RawJson(core::TrimJsonWhitespace(raw_res.value()));
     } else {
       writer.Null();
     }
@@ -461,7 +333,7 @@ void SerializeNativeSpanEventsJson(simdjson::ondemand::value& events_val,
 
           if (k == "time_unix_nano" || k == "timeUnixNano" || k == "timestamp") {
             uint64_t parsed = 0;
-            if (ParseJsonTimestamp(fv, parsed)) {
+            if (core::ParseJsonTimestamp(fv, parsed)) {
               time_nanos = parsed;
             }
           } else if (k == "name") {
@@ -632,36 +504,46 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
 
     if ((k == "log" || k == "trace") && depth == 0) {
       auto t_res = fv.type();
-      if (t_res.error() == simdjson::SUCCESS) {
-        if (t_res.value() == simdjson::ondemand::json_type::object) {
-          auto inner_obj_res = fv.get_object();
-          if (inner_obj_res.error() == simdjson::SUCCESS) {
-            auto inner_obj = inner_obj_res.value();
-            return ExtractNativeTraceObjectJson(L, inner_obj, processed_at, events_writer,
-                                                links_writer, attr_writer, emitter, err_out,
-                                                depth + 1);
+      if (t_res.error() != simdjson::SUCCESS) {
+        err_out = std::string(simdjson::error_message(t_res.error()));
+        return false;
+      }
+      if (t_res.value() == simdjson::ondemand::json_type::object) {
+        auto inner_obj_res = fv.get_object();
+        if (inner_obj_res.error() != simdjson::SUCCESS) {
+          err_out = std::string(simdjson::error_message(inner_obj_res.error()));
+          return false;
+        }
+        res_attrs_scoped.reset();
+        span_attrs_scoped.reset();
+        auto inner_obj = inner_obj_res.value();
+        return ExtractNativeTraceObjectJson(L, inner_obj, processed_at, events_writer, links_writer,
+                                            attr_writer, emitter, err_out, depth + 1);
+      } else if (t_res.value() == simdjson::ondemand::json_type::array) {
+        auto inner_arr_res = fv.get_array();
+        if (inner_arr_res.error() != simdjson::SUCCESS) {
+          err_out = std::string(simdjson::error_message(inner_arr_res.error()));
+          return false;
+        }
+        res_attrs_scoped.reset();
+        span_attrs_scoped.reset();
+        for (auto elem_res : inner_arr_res.value()) {
+          if (elem_res.error() != simdjson::SUCCESS) {
+            err_out = std::string(simdjson::error_message(elem_res.error()));
+            return false;
           }
-        } else if (t_res.value() == simdjson::ondemand::json_type::array) {
-          auto inner_arr_res = fv.get_array();
-          if (inner_arr_res.error() == simdjson::SUCCESS) {
-            for (auto elem_res : inner_arr_res.value()) {
-              if (elem_res.error() != simdjson::SUCCESS) {
-                err_out = std::string(simdjson::error_message(elem_res.error()));
-                return false;
-              }
-              auto elem_obj_res = elem_res.value().get_object();
-              if (elem_obj_res.error() == simdjson::SUCCESS) {
-                auto elem_obj = elem_obj_res.value();
-                if (!ExtractNativeTraceObjectJson(L, elem_obj, processed_at, events_writer,
-                                                  links_writer, attr_writer, emitter, err_out,
-                                                  depth + 1)) {
-                  return false;
-                }
-              }
-            }
-            return true;
+          auto elem_obj_res = elem_res.value().get_object();
+          if (elem_obj_res.error() != simdjson::SUCCESS) {
+            err_out = std::string(simdjson::error_message(elem_obj_res.error()));
+            return false;
+          }
+          auto elem_obj = elem_obj_res.value();
+          if (!ExtractNativeTraceObjectJson(L, elem_obj, processed_at, events_writer, links_writer,
+                                            attr_writer, emitter, err_out, depth + 1)) {
+            return false;
           }
         }
+        return true;
       }
       continue;
     }
@@ -670,21 +552,21 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
         k == "timestamp") {
       has_recognized_field = true;
       uint64_t parsed = 0;
-      if (ParseJsonTimestamp(fv, parsed)) {
+      if (core::ParseJsonTimestamp(fv, parsed)) {
         start_ns = parsed;
         has_start = true;
       }
     } else if (k == "end_time_unix_nano" || k == "endTimeUnixNano" || k == "end_timestamp") {
       has_recognized_field = true;
       uint64_t parsed = 0;
-      if (ParseJsonTimestamp(fv, parsed)) {
+      if (core::ParseJsonTimestamp(fv, parsed)) {
         end_ns = parsed;
         has_end = true;
       }
     } else if (k == "ingest_timestamp" || k == "ingestTimestamp") {
       has_recognized_field = true;
       uint64_t parsed = 0;
-      if (ParseJsonTimestamp(fv, parsed)) {
+      if (core::ParseJsonTimestamp(fv, parsed)) {
         ingest_ns = parsed;
         has_ingest = true;
       }
@@ -918,7 +800,7 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
 
 bool HasNativeTraceFields(lua_State* L, int table_idx) {
   int abs_idx = lua_absindex(L, table_idx);
-  if (!lua_istable(L, abs_idx)) {
+  if (!lua_istable(L, abs_idx) || core::IsLuaTableEmpty(L, abs_idx)) {
     return false;
   }
   static constexpr const char* kKeys[] = {
@@ -974,22 +856,6 @@ bool HasNativeTraceFields(lua_State* L, int table_idx) {
     }
   }
   return false;
-}
-
-void CopyStringFieldAlways(lua_State* L, int table_idx, const char* name1, const char* name2,
-                           core::LuaEmitter& emitter, std::string_view dst_key,
-                           std::string_view default_val = "") {
-  if (core::GetTableFieldRaw(L, table_idx, name1, name2)) {
-    if (lua_isstring(L, -1)) {
-      size_t len = 0;
-      const char* s = lua_tolstring(L, -1, &len);
-      emitter.SetString(dst_key, std::string_view(s, len));
-      lua_pop(L, 1);
-      return;
-    }
-    lua_pop(L, 1);
-  }
-  emitter.SetString(dst_key, default_val);
 }
 
 std::string_view ParseLuaSpanKindValue(lua_State* L, int val_idx) {
@@ -1192,7 +1058,12 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
                                    std::string& tls_scope_name_scratch,
                                    std::string& tls_scope_ver_scratch,
                                    std::string& tls_status_msg_scratch,
-                                   std::string& tls_item_scratch, core::LuaEmitter& emitter) {
+                                   std::string& tls_item_scratch, core::LuaEmitter& emitter,
+                                   std::string& err_out) {
+  if (!lua_checkstack(L, 16)) {
+    err_out = "Lua stack overflow during native trace extraction";
+    return false;
+  }
   int abs_rec_idx = lua_absindex(L, rec_idx);
 
   // 1. Timestamps & Duration
@@ -1265,10 +1136,6 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
     }
     lua_pop(L, 1);
   }
-  if (res_attrs_scoped.get() == LUA_NOREF) {
-    lua_newtable(L);
-    res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-  }
   if (service_name.empty() || service_name == "unknown_service") {
     std::string_view top_svc =
         core::ReadTableStringView(L, abs_rec_idx, "service_name", "service", tls_service_scratch);
@@ -1335,10 +1202,11 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
   // 5. Emit all 18 columns of traces.schema
   emitter.StartRecord();
   emitter.SetString("Timestamp", timestamp_sv);
-  CopyStringFieldAlways(L, abs_rec_idx, "trace_id", "traceId", emitter, "TraceId");
-  CopyStringFieldAlways(L, abs_rec_idx, "span_id", "spanId", emitter, "SpanId");
-  CopyStringFieldAlways(L, abs_rec_idx, "parent_span_id", "parentSpanId", emitter, "ParentSpanId");
-  CopyStringFieldAlways(L, abs_rec_idx, "trace_state", "traceState", emitter, "TraceState");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "trace_id", "traceId", emitter, "TraceId");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "span_id", "spanId", emitter, "SpanId");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "parent_span_id", "parentSpanId", emitter,
+                              "ParentSpanId");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "trace_state", "traceState", emitter, "TraceState");
 
   if (core::GetTableFieldRaw(L, abs_rec_idx, "name", "span_name")) {
     if (lua_isstring(L, -1)) {
@@ -1350,7 +1218,7 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
     }
     lua_pop(L, 1);
   } else {
-    CopyStringFieldAlways(L, abs_rec_idx, "spanName", nullptr, emitter, "SpanName");
+    core::CopyStringFieldAlways(L, abs_rec_idx, "spanName", nullptr, emitter, "SpanName");
   }
 
   emitter.SetString("SpanKind", span_kind);
@@ -1359,8 +1227,10 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
   if (res_attrs_scoped.get() != LUA_NOREF) {
     lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_scoped.get());
     res_attrs_scoped.reset();
-    emitter.SetTableFromStack("ResourceAttributes");
+  } else {
+    lua_newtable(L);
   }
+  emitter.SetTableFromStack("ResourceAttributes");
 
   emitter.SetString("ScopeName", scope_name);
   emitter.SetString("ScopeVersion", scope_version);
@@ -1405,13 +1275,20 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
   emitter.SetString("processed_at", processed_at);
 
   emitter.EndRecord();
-  return !emitter.HasError();
+  if (emitter.HasError()) {
+    err_out = std::string(emitter.ErrorMessage());
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
 
 extractors::ExtractionResult ProcessNativeTraces(lua_State* L, std::string_view raw_json,
                                                  int emit_idx) {
+  if (raw_json.empty()) {
+    return ExtractionResult{false, "Empty JSON input", 0};
+  }
   core::LuaEmitter emitter(L, emit_idx);
   try {
     auto& parser = core::OtelParser::Instance();
@@ -1479,7 +1356,8 @@ extractors::ExtractionResult ProcessNativeTraces(lua_State* L, std::string_view 
         }
         auto elem_obj_res = elem_res.value().get_object();
         if (elem_obj_res.error() != simdjson::SUCCESS) {
-          continue;
+          return ExtractionResult{false, std::string(simdjson::error_message(elem_obj_res.error())),
+                                  emitter.EmittedCount()};
         }
         auto elem_obj = elem_obj_res.value();
         if (!ExtractNativeTraceObjectJson(L, elem_obj, processed_at, events_writer, links_writer,
@@ -1552,6 +1430,7 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
     std::array<char, 32> proc_buf;
     core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
     std::string_view processed_at(proc_buf.data(), 30);
+    std::string err_out;
 
     auto extract_array = [&](int arr_idx, size_t len) -> bool {
       for (size_t i = 1; i <= len; ++i) {
@@ -1559,9 +1438,10 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
         if (lua_istable(L, -1)) {
           int item_idx = lua_absindex(L, -1);
           if (HasNativeTraceFields(L, item_idx)) {
-            if (!ExtractSingleNativeTraceTable(
-                    L, item_idx, processed_at, writer, tls_service_scratch, tls_scope_name_scratch,
-                    tls_scope_ver_scratch, tls_status_msg_scratch, tls_item_scratch, emitter)) {
+            if (!ExtractSingleNativeTraceTable(L, item_idx, processed_at, writer,
+                                               tls_service_scratch, tls_scope_name_scratch,
+                                               tls_scope_ver_scratch, tls_status_msg_scratch,
+                                               tls_item_scratch, emitter, err_out)) {
               lua_pop(L, 1);
               return false;
             }
@@ -1575,7 +1455,7 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
     const size_t raw_len = lua_rawlen(L, abs_idx);
     if (raw_len > 0) {
       if (!extract_array(abs_idx, raw_len)) {
-        return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+        return ExtractionResult{false, err_out, emitter.EmittedCount()};
       }
     } else {
       bool handled_wrapper = false;
@@ -1587,16 +1467,15 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
           if (inner_len > 0) {
             if (!extract_array(inner_idx, inner_len)) {
               lua_pop(L, 1);
-              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                      emitter.EmittedCount()};
+              return ExtractionResult{false, err_out, emitter.EmittedCount()};
             }
           } else if (HasNativeTraceFields(L, inner_idx)) {
-            if (!ExtractSingleNativeTraceTable(
-                    L, inner_idx, processed_at, writer, tls_service_scratch, tls_scope_name_scratch,
-                    tls_scope_ver_scratch, tls_status_msg_scratch, tls_item_scratch, emitter)) {
+            if (!ExtractSingleNativeTraceTable(L, inner_idx, processed_at, writer,
+                                               tls_service_scratch, tls_scope_name_scratch,
+                                               tls_scope_ver_scratch, tls_status_msg_scratch,
+                                               tls_item_scratch, emitter, err_out)) {
               lua_pop(L, 1);
-              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                      emitter.EmittedCount()};
+              return ExtractionResult{false, err_out, emitter.EmittedCount()};
             }
           }
         }
@@ -1605,9 +1484,9 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
       if (!handled_wrapper && HasNativeTraceFields(L, abs_idx)) {
         if (!ExtractSingleNativeTraceTable(L, abs_idx, processed_at, writer, tls_service_scratch,
                                            tls_scope_name_scratch, tls_scope_ver_scratch,
-                                           tls_status_msg_scratch, tls_item_scratch, emitter)) {
-          return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                  emitter.EmittedCount()};
+                                           tls_status_msg_scratch, tls_item_scratch, emitter,
+                                           err_out)) {
+          return ExtractionResult{false, err_out, emitter.EmittedCount()};
         }
       }
     }

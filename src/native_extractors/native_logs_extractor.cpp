@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <string_view>
 
@@ -23,18 +24,6 @@ namespace {
 
 using core::ScopedLuaRef;
 using extractors::ExtractionResult;
-
-std::string_view TrimJsonWhitespace(std::string_view sv) noexcept {
-  while (!sv.empty() &&
-         (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
-    sv.remove_prefix(1);
-  }
-  while (!sv.empty() &&
-         (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
-    sv.remove_suffix(1);
-  }
-  return sv;
-}
 
 std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
                                  core::FastJsonWriter& writer) {
@@ -69,7 +58,7 @@ std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
       writer.Key(k);
       auto raw_res = fv.raw_json();
       if (raw_res.error() == simdjson::SUCCESS) {
-        writer.RawJson(TrimJsonWhitespace(raw_res.value()));
+        writer.RawJson(core::TrimJsonWhitespace(raw_res.value()));
       } else {
         writer.Null();
       }
@@ -87,100 +76,10 @@ std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
   } else {
     auto raw_res = body_val.raw_json();
     if (raw_res.error() == simdjson::SUCCESS) {
-      return TrimJsonWhitespace(raw_res.value());
+      return core::TrimJsonWhitespace(raw_res.value());
     }
     return "";
   }
-}
-
-bool ParseJsonTimestamp(simdjson::ondemand::value& fv, uint64_t& out_ns) noexcept {
-  auto type_res = fv.type();
-  if (type_res.error() != simdjson::SUCCESS) {
-    return false;
-  }
-  const auto type = type_res.value();
-  if (type == simdjson::ondemand::json_type::string) {
-    auto s_res = fv.get_string();
-    if (s_res.error() != simdjson::SUCCESS) {
-      return false;
-    }
-    return core::ParseIso8601ToUnixNano(s_res.value(), out_ns);
-  }
-  if (type == simdjson::ondemand::json_type::number) {
-    auto num_res = fv.get_number();
-    if (num_res.error() != simdjson::SUCCESS) {
-      return false;
-    }
-    const auto num = num_res.value();
-    if (num.is_uint64()) {
-      out_ns = num.get_uint64();
-      return true;
-    }
-    if (num.is_int64()) {
-      const int64_t iv = num.get_int64();
-      if (iv < 0) {
-        return false;
-      }
-      out_ns = static_cast<uint64_t>(iv);
-      return true;
-    }
-    if (num.is_double()) {
-      const double d = num.get_double();
-      if (d >= 0.0 && d < 18446744073709551616.0) {
-        out_ns = static_cast<uint64_t>(d);
-        return true;
-      }
-    }
-    return false;
-  }
-  if (type == simdjson::ondemand::json_type::object) {
-    auto obj_res = fv.get_object();
-    if (obj_res.error() != simdjson::SUCCESS) {
-      return false;
-    }
-    int64_t year = 0;
-    int64_t month = 0;
-    int64_t day = 0;
-    int64_t hour = 0;
-    int64_t min = 0;
-    int64_t sec = 0;
-    int64_t nanosec = 0;
-    bool has_year = false;
-    bool has_month = false;
-    bool has_day = false;
-    for (auto field_res : obj_res.value()) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
-      auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
-      std::string_view k = k_res.value();
-      auto v_res = field_res.value();
-      if (v_res.error() != simdjson::SUCCESS) continue;
-      auto v = v_res.value();
-      if (k == "year") {
-        year = core::ParseInt64(v);
-        has_year = true;
-      } else if (k == "month") {
-        month = core::ParseInt64(v);
-        has_month = true;
-      } else if (k == "day") {
-        day = core::ParseInt64(v);
-        has_day = true;
-      } else if (k == "hour") {
-        hour = core::ParseInt64(v);
-      } else if (k == "min") {
-        min = core::ParseInt64(v);
-      } else if (k == "sec") {
-        sec = core::ParseInt64(v);
-      } else if (k == "nanosec" || k == "nanosecond" || k == "nsec") {
-        nanosec = core::ParseInt64(v);
-      }
-    }
-    if (!has_year || !has_month || !has_day) {
-      return false;
-    }
-    return core::CivilToUnixNano(year, month, day, hour, min, sec, nanosec, out_ns);
-  }
-  return false;
 }
 
 int64_t ParseJsonSeverityNumber(simdjson::ondemand::value& fv) {
@@ -266,34 +165,48 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
 
     if (k == "log" && depth == 0) {
       auto t_res = fv.type();
-      if (t_res.error() == simdjson::SUCCESS) {
-        if (t_res.value() == simdjson::ondemand::json_type::object) {
-          auto inner_obj_res = fv.get_object();
-          if (inner_obj_res.error() == simdjson::SUCCESS) {
-            auto inner_obj = inner_obj_res.value();
-            return ExtractNativeLogObjectJson(L, inner_obj, processed_at, writer, body_writer,
-                                              emitter, err_out, depth + 1);
+      if (t_res.error() != simdjson::SUCCESS) {
+        err_out = std::string(simdjson::error_message(t_res.error()));
+        return false;
+      }
+      if (t_res.value() == simdjson::ondemand::json_type::object) {
+        auto inner_obj_res = fv.get_object();
+        if (inner_obj_res.error() != simdjson::SUCCESS) {
+          err_out = std::string(simdjson::error_message(inner_obj_res.error()));
+          return false;
+        }
+        res_attrs_scoped.reset();
+        scope_attrs_scoped.reset();
+        log_attrs_scoped.reset();
+        auto inner_obj = inner_obj_res.value();
+        return ExtractNativeLogObjectJson(L, inner_obj, processed_at, writer, body_writer, emitter,
+                                          err_out, depth + 1);
+      } else if (t_res.value() == simdjson::ondemand::json_type::array) {
+        auto inner_arr_res = fv.get_array();
+        if (inner_arr_res.error() != simdjson::SUCCESS) {
+          err_out = std::string(simdjson::error_message(inner_arr_res.error()));
+          return false;
+        }
+        res_attrs_scoped.reset();
+        scope_attrs_scoped.reset();
+        log_attrs_scoped.reset();
+        for (auto elem_res : inner_arr_res.value()) {
+          if (elem_res.error() != simdjson::SUCCESS) {
+            err_out = std::string(simdjson::error_message(elem_res.error()));
+            return false;
           }
-        } else if (t_res.value() == simdjson::ondemand::json_type::array) {
-          auto inner_arr_res = fv.get_array();
-          if (inner_arr_res.error() == simdjson::SUCCESS) {
-            for (auto elem_res : inner_arr_res.value()) {
-              if (elem_res.error() != simdjson::SUCCESS) {
-                err_out = std::string(simdjson::error_message(elem_res.error()));
-                return false;
-              }
-              auto elem_obj_res = elem_res.value().get_object();
-              if (elem_obj_res.error() == simdjson::SUCCESS) {
-                auto elem_obj = elem_obj_res.value();
-                if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, writer, body_writer,
-                                                emitter, err_out, depth + 1)) {
-                  return false;
-                }
-              }
-            }
-            return true;
+          auto elem_obj_res = elem_res.value().get_object();
+          if (elem_obj_res.error() != simdjson::SUCCESS) {
+            err_out = std::string(simdjson::error_message(elem_obj_res.error()));
+            return false;
+          }
+          auto elem_obj = elem_obj_res.value();
+          if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, writer, body_writer, emitter,
+                                          err_out, depth + 1)) {
+            return false;
           }
         }
+        return true;
       }
       continue;
     }
@@ -301,7 +214,7 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
     if (k == "timestamp" || k == "timeUnixNano" || k == "time_unix_nano") {
       has_recognized_field = true;
       uint64_t parsed = 0;
-      if (ParseJsonTimestamp(fv, parsed)) {
+      if (core::ParseJsonTimestamp(fv, parsed)) {
         t_ns = parsed;
         has_ts = true;
       }
@@ -309,7 +222,7 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
                k == "observed_time_unix_nano") {
       has_recognized_field = true;
       uint64_t parsed = 0;
-      if (ParseJsonTimestamp(fv, parsed)) {
+      if (core::ParseJsonTimestamp(fv, parsed)) {
         obs_t_ns = parsed;
         has_obs_ts = true;
       }
@@ -526,13 +439,13 @@ bool ExtractNativeLogObjectJson(lua_State* L, simdjson::ondemand::object& rec_ob
 
 bool HasNativeLogFields(lua_State* L, int table_idx) {
   int abs_idx = lua_absindex(L, table_idx);
-  if (!lua_istable(L, abs_idx)) {
+  if (core::IsLuaTableEmpty(L, abs_idx)) {
     return false;
   }
   static constexpr const char* kKeys[] = {
       "message",
-      "body",
       "timestamp",
+      "body",
       "observed_timestamp",
       "timeUnixNano",
       "time_unix_nano",
@@ -584,22 +497,6 @@ bool HasNativeLogFields(lua_State* L, int table_idx) {
   return false;
 }
 
-void CopyStringFieldAlways(lua_State* L, int table_idx, const char* name1, const char* name2,
-                           core::LuaEmitter& emitter, std::string_view dst_key,
-                           std::string_view default_val = "") {
-  if (core::GetTableFieldRaw(L, table_idx, name1, name2)) {
-    if (lua_isstring(L, -1)) {
-      size_t len = 0;
-      const char* s = lua_tolstring(L, -1, &len);
-      emitter.SetString(dst_key, std::string_view(s, len));
-      lua_pop(L, 1);
-      return;
-    }
-    lua_pop(L, 1);
-  }
-  emitter.SetString(dst_key, default_val);
-}
-
 void CopyNativeTableBody(lua_State* L, int rec_idx, core::FastJsonWriter& writer,
                          core::LuaEmitter& emitter) {
   if (core::GetTableFieldRaw(L, rec_idx, "message", "body")) {
@@ -648,7 +545,12 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
                                  std::string& tls_service_scratch,
                                  std::string& tls_scope_schema_scratch,
                                  std::string& tls_scope_name_scratch,
-                                 std::string& tls_scope_ver_scratch, core::LuaEmitter& emitter) {
+                                 std::string& tls_scope_ver_scratch, core::LuaEmitter& emitter,
+                                 std::string& err_out) {
+  if (!lua_checkstack(L, 16)) {
+    err_out = "Lua stack overflow during native log extraction";
+    return false;
+  }
   int abs_rec_idx = lua_absindex(L, rec_idx);
 
   // 1. Timestamp: timestamp -> observed_timestamp -> processed_at (now())
@@ -721,10 +623,6 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
     }
     lua_pop(L, 1);
   }
-  if (res_attrs_scoped.get() == LUA_NOREF) {
-    lua_newtable(L);
-    res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-  }
   if (service_name.empty() || service_name == "unknown_service") {
     std::string_view top_svc =
         core::ReadTableStringView(L, abs_rec_idx, "service_name", "service", tls_service_scratch);
@@ -772,16 +670,12 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
     scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
     lua_pop(L, 1);
   }
-  if (scope_attrs_scoped.get() == LUA_NOREF) {
-    lua_newtable(L);
-    scope_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
-  }
 
   // 4. Emit all 17 columns of logs.schema
   emitter.StartRecord();
   emitter.SetString("Timestamp", timestamp_sv);
-  CopyStringFieldAlways(L, abs_rec_idx, "trace_id", "traceId", emitter, "TraceId");
-  CopyStringFieldAlways(L, abs_rec_idx, "span_id", "spanId", emitter, "SpanId");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "trace_id", "traceId", emitter, "TraceId");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "span_id", "spanId", emitter, "SpanId");
 
   int64_t flags = core::ReadTableInt64(L, abs_rec_idx, "flags", "trace_flags", 0);
   if (flags == 0) {
@@ -789,7 +683,8 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
   }
   emitter.SetInt64("TraceFlags", flags);
 
-  CopyStringFieldAlways(L, abs_rec_idx, "severity_text", "severityText", emitter, "SeverityText");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "severity_text", "severityText", emitter,
+                              "SeverityText");
 
   int64_t sev_num = 0;
   if (core::GetTableFieldRaw(L, abs_rec_idx, "severity_number", "severityNumber")) {
@@ -805,8 +700,10 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
   if (res_attrs_scoped.get() != LUA_NOREF) {
     lua_rawgeti(L, LUA_REGISTRYINDEX, res_attrs_scoped.get());
     res_attrs_scoped.reset();
-    emitter.SetTableFromStack("ResourceAttributes");
+  } else {
+    lua_newtable(L);
   }
+  emitter.SetTableFromStack("ResourceAttributes");
 
   emitter.SetString("ScopeSchemaUrl", scope_schema_url);
   emitter.SetString("ScopeName", scope_name);
@@ -815,8 +712,10 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
   if (scope_attrs_scoped.get() != LUA_NOREF) {
     lua_rawgeti(L, LUA_REGISTRYINDEX, scope_attrs_scoped.get());
     scope_attrs_scoped.reset();
-    emitter.SetTableFromStack("ScopeAttributes");
+  } else {
+    lua_newtable(L);
   }
+  emitter.SetTableFromStack("ScopeAttributes");
 
   bool has_log_attrs = core::GetTableFieldRaw(L, abs_rec_idx, "attributes", "log_attributes");
   if (!has_log_attrs) {
@@ -831,93 +730,110 @@ bool ExtractSingleNativeLogTable(lua_State* L, int rec_idx, std::string_view pro
     emitter.SetTableFromStack("LogAttributes");
   }
 
-  CopyStringFieldAlways(L, abs_rec_idx, "event_name", "eventName", emitter, "EventName");
+  core::CopyStringFieldAlways(L, abs_rec_idx, "event_name", "eventName", emitter, "EventName");
   emitter.SetString("processed_at", processed_at);
 
   emitter.EndRecord();
-  return !emitter.HasError();
+  if (emitter.HasError()) {
+    err_out = std::string(emitter.ErrorMessage());
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
 
 extractors::ExtractionResult ProcessNativeLogs(lua_State* L, std::string_view raw_json,
                                                int emit_idx) {
-  auto& parser = core::OtelParser::Instance();
-  static thread_local core::FastJsonWriter writer;
-  static thread_local core::FastJsonWriter body_writer;
-
-  writer.Reset();
-  body_writer.Reset();
-  struct WriterTrimGuard {
-    explicit WriterTrimGuard(core::FastJsonWriter& writer1, core::FastJsonWriter& writer2)
-        : w1(writer1), w2(writer2) {}
-    WriterTrimGuard(const WriterTrimGuard&) = delete;
-    WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
-    ~WriterTrimGuard() noexcept {
-      w1.Trim();
-      w2.Trim();
-    }
-    core::FastJsonWriter& w1;
-    core::FastJsonWriter& w2;
-  } trim_guard{writer, body_writer};
-
-  auto doc_res = parser.Iterate(raw_json);
-  if (doc_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
+  if (raw_json.empty()) {
+    return ExtractionResult{false, "Empty JSON input", 0};
   }
-
-  auto doc = std::move(doc_res.value());
-  auto type_res = doc.type();
-  if (type_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(type_res.error())), 0};
-  }
-
-  std::array<char, 32> proc_buf;
-  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-  std::string_view processed_at(proc_buf.data(), 30);
   core::LuaEmitter emitter(L, emit_idx);
-  std::string err_out;
+  try {
+    auto& parser = core::OtelParser::Instance();
+    static thread_local core::FastJsonWriter writer;
+    static thread_local core::FastJsonWriter body_writer;
 
-  const auto root_type = type_res.value();
-  if (root_type == simdjson::ondemand::json_type::object) {
-    auto doc_obj_res = doc.get_object();
-    if (doc_obj_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
-    }
-    auto doc_obj = doc_obj_res.value();
-    if (!ExtractNativeLogObjectJson(L, doc_obj, processed_at, writer, body_writer, emitter,
-                                    err_out)) {
-      return ExtractionResult{false, err_out, emitter.EmittedCount()};
-    }
-  } else if (root_type == simdjson::ondemand::json_type::array) {
-    auto doc_arr_res = doc.get_array();
-    if (doc_arr_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(doc_arr_res.error())), 0};
-    }
-    for (auto elem_res : doc_arr_res.value()) {
-      if (elem_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(elem_res.error())),
-                                emitter.EmittedCount()};
+    writer.Reset();
+    body_writer.Reset();
+    struct WriterTrimGuard {
+      explicit WriterTrimGuard(core::FastJsonWriter& writer1, core::FastJsonWriter& writer2)
+          : w1(writer1), w2(writer2) {}
+      WriterTrimGuard(const WriterTrimGuard&) = delete;
+      WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
+      ~WriterTrimGuard() noexcept {
+        w1.Trim();
+        w2.Trim();
       }
-      auto elem_obj_res = elem_res.value().get_object();
-      if (elem_obj_res.error() != simdjson::SUCCESS) {
-        continue;
+      core::FastJsonWriter& w1;
+      core::FastJsonWriter& w2;
+    } trim_guard{writer, body_writer};
+
+    auto doc_res = parser.Iterate(raw_json);
+    if (doc_res.error() != simdjson::SUCCESS) {
+      return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
+    }
+
+    auto doc = std::move(doc_res.value());
+    auto type_res = doc.type();
+    if (type_res.error() != simdjson::SUCCESS) {
+      return ExtractionResult{false, std::string(simdjson::error_message(type_res.error())), 0};
+    }
+
+    std::array<char, 32> proc_buf;
+    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+    std::string_view processed_at(proc_buf.data(), 30);
+    std::string err_out;
+
+    const auto root_type = type_res.value();
+    if (root_type == simdjson::ondemand::json_type::object) {
+      auto doc_obj_res = doc.get_object();
+      if (doc_obj_res.error() != simdjson::SUCCESS) {
+        return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())),
+                                0};
       }
-      auto elem_obj = elem_obj_res.value();
-      if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, writer, body_writer, emitter,
+      auto doc_obj = doc_obj_res.value();
+      if (!ExtractNativeLogObjectJson(L, doc_obj, processed_at, writer, body_writer, emitter,
                                       err_out)) {
         return ExtractionResult{false, err_out, emitter.EmittedCount()};
       }
+    } else if (root_type == simdjson::ondemand::json_type::array) {
+      auto doc_arr_res = doc.get_array();
+      if (doc_arr_res.error() != simdjson::SUCCESS) {
+        return ExtractionResult{false, std::string(simdjson::error_message(doc_arr_res.error())),
+                                0};
+      }
+      for (auto elem_res : doc_arr_res.value()) {
+        if (elem_res.error() != simdjson::SUCCESS) {
+          return ExtractionResult{false, std::string(simdjson::error_message(elem_res.error())),
+                                  emitter.EmittedCount()};
+        }
+        auto elem_obj_res = elem_res.value().get_object();
+        if (elem_obj_res.error() != simdjson::SUCCESS) {
+          return ExtractionResult{false, std::string(simdjson::error_message(elem_obj_res.error())),
+                                  emitter.EmittedCount()};
+        }
+        auto elem_obj = elem_obj_res.value();
+        if (!ExtractNativeLogObjectJson(L, elem_obj, processed_at, writer, body_writer, emitter,
+                                        err_out)) {
+          return ExtractionResult{false, err_out, emitter.EmittedCount()};
+        }
+      }
+    } else {
+      return ExtractionResult{false, "root JSON value must be an object or array", 0};
     }
-  } else {
-    return ExtractionResult{false, "root JSON value must be an object or array", 0};
-  }
 
-  emitter.Flush();
-  if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    emitter.Flush();
+    if (emitter.HasError()) {
+      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    }
+    return ExtractionResult{true, "", emitter.EmittedCount()};
+  } catch (const std::exception& ex) {
+    return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
+  } catch (...) {
+    return ExtractionResult{false, "Unknown C++ exception during native logs processing",
+                            emitter.EmittedCount()};
   }
-  return ExtractionResult{true, "", emitter.EmittedCount()};
 }
 
 extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx, int emit_idx) {
@@ -963,76 +879,83 @@ extractors::ExtractionResult ProcessNativeLogsTable(lua_State* L, int table_idx,
     core::FastJsonWriter& writer;
   } scope_guard{L, entry_top, writer};
 
-  std::array<char, 32> proc_buf;
-  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-  std::string_view processed_at(proc_buf.data(), 30);
   core::LuaEmitter emitter(L, abs_emit_idx);
+  try {
+    std::array<char, 32> proc_buf;
+    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+    std::string_view processed_at(proc_buf.data(), 30);
+    std::string err_out;
 
-  auto extract_array = [&](int arr_idx, size_t len) -> bool {
-    for (size_t i = 1; i <= len; ++i) {
-      lua_rawgeti(L, arr_idx, static_cast<lua_Integer>(i));
-      if (lua_istable(L, -1)) {
-        int item_idx = lua_absindex(L, -1);
-        if (HasNativeLogFields(L, item_idx)) {
-          if (!ExtractSingleNativeLogTable(L, item_idx, processed_at, writer,
-                                           tls_res_schema_scratch, tls_service_scratch,
-                                           tls_scope_schema_scratch, tls_scope_name_scratch,
-                                           tls_scope_ver_scratch, emitter)) {
-            lua_pop(L, 1);
-            return false;
+    auto extract_array = [&](int arr_idx, size_t len) -> bool {
+      for (size_t i = 1; i <= len; ++i) {
+        lua_rawgeti(L, arr_idx, static_cast<lua_Integer>(i));
+        if (lua_istable(L, -1)) {
+          int item_idx = lua_absindex(L, -1);
+          if (HasNativeLogFields(L, item_idx)) {
+            if (!ExtractSingleNativeLogTable(L, item_idx, processed_at, writer,
+                                             tls_res_schema_scratch, tls_service_scratch,
+                                             tls_scope_schema_scratch, tls_scope_name_scratch,
+                                             tls_scope_ver_scratch, emitter, err_out)) {
+              lua_pop(L, 1);
+              return false;
+            }
           }
         }
+        lua_pop(L, 1);
       }
-      lua_pop(L, 1);
-    }
-    return true;
-  };
+      return true;
+    };
 
-  const size_t raw_len = lua_rawlen(L, abs_idx);
-  if (raw_len > 0) {
-    if (!extract_array(abs_idx, raw_len)) {
+    const size_t raw_len = lua_rawlen(L, abs_idx);
+    if (raw_len > 0) {
+      if (!extract_array(abs_idx, raw_len)) {
+        return ExtractionResult{false, err_out, emitter.EmittedCount()};
+      }
+    } else {
+      bool handled_log_wrapper = false;
+      if (core::GetTableFieldRaw(L, abs_idx, "log")) {
+        int log_idx = lua_absindex(L, -1);
+        if (lua_istable(L, log_idx)) {
+          handled_log_wrapper = true;
+          const size_t inner_len = lua_rawlen(L, log_idx);
+          if (inner_len > 0) {
+            if (!extract_array(log_idx, inner_len)) {
+              lua_pop(L, 1);
+              return ExtractionResult{false, err_out, emitter.EmittedCount()};
+            }
+          } else if (HasNativeLogFields(L, log_idx)) {
+            if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, writer,
+                                             tls_res_schema_scratch, tls_service_scratch,
+                                             tls_scope_schema_scratch, tls_scope_name_scratch,
+                                             tls_scope_ver_scratch, emitter, err_out)) {
+              lua_pop(L, 1);
+              return ExtractionResult{false, err_out, emitter.EmittedCount()};
+            }
+          }
+        }
+        lua_pop(L, 1);
+      }
+      if (!handled_log_wrapper && HasNativeLogFields(L, abs_idx)) {
+        if (!ExtractSingleNativeLogTable(L, abs_idx, processed_at, writer, tls_res_schema_scratch,
+                                         tls_service_scratch, tls_scope_schema_scratch,
+                                         tls_scope_name_scratch, tls_scope_ver_scratch, emitter,
+                                         err_out)) {
+          return ExtractionResult{false, err_out, emitter.EmittedCount()};
+        }
+      }
+    }
+
+    emitter.Flush();
+    if (emitter.HasError()) {
       return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
     }
-  } else {
-    bool handled_log_wrapper = false;
-    if (core::GetTableFieldRaw(L, abs_idx, "log")) {
-      int log_idx = lua_absindex(L, -1);
-      if (lua_istable(L, log_idx)) {
-        handled_log_wrapper = true;
-        const size_t inner_len = lua_rawlen(L, log_idx);
-        if (inner_len > 0) {
-          if (!extract_array(log_idx, inner_len)) {
-            lua_pop(L, 1);
-            return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                    emitter.EmittedCount()};
-          }
-        } else if (HasNativeLogFields(L, log_idx)) {
-          if (!ExtractSingleNativeLogTable(L, log_idx, processed_at, writer, tls_res_schema_scratch,
-                                           tls_service_scratch, tls_scope_schema_scratch,
-                                           tls_scope_name_scratch, tls_scope_ver_scratch,
-                                           emitter)) {
-            lua_pop(L, 1);
-            return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                    emitter.EmittedCount()};
-          }
-        }
-      }
-      lua_pop(L, 1);
-    }
-    if (!handled_log_wrapper && HasNativeLogFields(L, abs_idx)) {
-      if (!ExtractSingleNativeLogTable(L, abs_idx, processed_at, writer, tls_res_schema_scratch,
-                                       tls_service_scratch, tls_scope_schema_scratch,
-                                       tls_scope_name_scratch, tls_scope_ver_scratch, emitter)) {
-        return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-      }
-    }
+    return ExtractionResult{true, "", emitter.EmittedCount()};
+  } catch (const std::exception& ex) {
+    return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
+  } catch (...) {
+    return ExtractionResult{false, "Unknown C++ exception during native logs table processing",
+                            emitter.EmittedCount()};
   }
-
-  emitter.Flush();
-  if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-  }
-  return ExtractionResult{true, "", emitter.EmittedCount()};
 }
 
 }  // namespace vector_otel::native_extractors
