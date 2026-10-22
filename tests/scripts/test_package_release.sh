@@ -163,4 +163,22 @@ if [[ "$SKIP_TARBALL_BUILD" != "true" ]]; then
   echo "   Standalone build and test from unpacked tarball passed."
 fi
 
+# 9. GitHub Actions release workflow structure & security invariants
+echo ">> Testing .github/workflows/release.yml structure..."
+RELEASE_WORKFLOW="$REPO_ROOT/.github/workflows/release.yml"
+[[ -f "$RELEASE_WORKFLOW" ]] || fail "Missing $RELEASE_WORKFLOW"
+
+grep -qE "tags:\s*\['v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+\*'\]" "$RELEASE_WORKFLOW" || fail "release.yml missing SemVer tag trigger"
+grep -q "git merge-base --is-ancestor" "$RELEASE_WORKFLOW" || fail "release.yml missing main branch lineage check"
+grep -q "scripts/package_release.sh" "$RELEASE_WORKFLOW" || fail "release.yml does not invoke scripts/package_release.sh"
+grep -q "verify-and-package:" "$RELEASE_WORKFLOW" || fail "release.yml missing verify-and-package job"
+grep -q "publish-release:" "$RELEASE_WORKFLOW" || fail "release.yml missing publish-release job"
+grep -q "id-token: write" "$RELEASE_WORKFLOW" || fail "release.yml missing id-token: write permission for keyless Cosign"
+grep -q "attestations: write" "$RELEASE_WORKFLOW" || fail "release.yml missing attestations: write permission for SLSA provenance"
+grep -q "cosign sign-blob" "$RELEASE_WORKFLOW" || fail "release.yml missing cosign sign-blob step"
+grep -q "cosign verify-blob" "$RELEASE_WORKFLOW" || fail "release.yml missing cosign verify-blob self-check step"
+grep -q "actions/attest-build-provenance" "$RELEASE_WORKFLOW" || fail "release.yml missing SLSA build provenance step"
+grep -q "gh release create" "$RELEASE_WORKFLOW" || fail "release.yml missing gh release create step"
+echo "   .github/workflows/release.yml structure passed."
+
 echo "ALL RELEASE PACKAGING TESTS PASSED"
