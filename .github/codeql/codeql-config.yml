@@ -1,0 +1,10 @@
+name: "vector-lua-otel CodeQL config"
+
+# tests/support/fault_new.cpp intentionally replaces the global operator new/delete family with a
+# malloc/free-backed fault-injecting allocator, and tests/cpp/test_fault_harness.cpp exercises
+# that replacement directly. cpp/new-free-mismatch cannot see that both sides are replaced
+# together and reports every `delete` in the harness as a malloc/delete mismatch. Both files are
+# test-only and are never part of the shipped vector_otel.so / vector_native.so modules.
+paths-ignore:
+  - tests/support/fault_new.cpp
+  - tests/cpp/test_fault_harness.cpp

@@ -25,9 +25,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.log or event
-        local count, err = native_logs.process(payload, emit)
+        local count, err, partial = native_logs.process(payload, emit)
         if not count then
-          error("Vector native logs extraction failed: " .. tostring(err))
+          error("Vector native logs extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:
@@ -44,9 +44,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.log or event
-        local count, err = native_traces.process(payload, emit)
+        local count, err, partial = native_traces.process(payload, emit)
         if not count then
-          error("Vector native traces extraction failed: " .. tostring(err))
+          error("Vector native traces extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:
@@ -63,9 +63,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.metric or event
-        local count, err = native_metrics.process(payload, emit)
+        local count, err, partial = native_metrics.process(payload, emit)
         if not count then
-          error("Vector native metrics extraction failed: " .. tostring(err))
+          error("Vector native metrics extraction failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:

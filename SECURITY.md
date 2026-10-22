@@ -47,7 +47,7 @@ gpg --keyserver keys.openpgp.org --recv-keys B1C1B81F673D8DC7B38D109C6FC5AA97834
 
 To facilitate rapid triage and validation, please provide:
 1. **Description & Vulnerability Class**: (e.g. out-of-bounds read/write, buffer over-read, use-after-free, memory leak, unhandled C++ exception across FFI boundary, undefined behaviour).
-2. **Component Affected**: Specific extractor (`logs_extractor`, `traces_extractor`, `metrics_extractor`) or core module (`parser`, `fast_json_writer`, `lua_bridge`, `table_reader`).
+2. **Component Affected**: Specific extractor (`logs_extractor`, `traces_extractor`, `metrics_extractor`) or core module (`parser`, `fast_json_writer`, `process_runner`, `table_reader`).
 3. **Proof of Concept (PoC)**: Minimal JSON payload, Lua reproduction script, or unit test demonstrating the flaw.
 4. **Environment**: Compiler (GCC/Clang), architecture (`x86_64`, `aarch64`), operating system, and Lua 5.4 version.
 5. **Impact Assessment**: Evaluation of potential consequences (e.g. process crash/DoS, host Vector memory disclosure, remote code execution).

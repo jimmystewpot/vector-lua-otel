@@ -5,6 +5,8 @@
 #include <string>
 
 #include "vector_otel/core/module_runner.hpp"
+#include "vector_otel/core/module_state.hpp"
+#include "vector_otel/core/process_runner.hpp"
 
 extern "C" {
 #include <lauxlib.h>
@@ -613,62 +615,77 @@ TEST_F(ModuleExportsTest, InvalidPayloadTypeReturnsErrorContract) {
 }
 
 namespace {
-vector_otel::extractors::ExtractionResult ThrowingStdExtractor(lua_State*, std::string_view, int) {
+using vector_otel::core::ModuleKind;
+using vector_otel::core::OperationContext;
+using vector_otel::core::OtelParser;
+using vector_otel::core::Signal;
+using vector_otel::core::SignalExtractors;
+
+bool ThrowingStdExtractor(OperationContext&, OtelParser&, simdjson::padded_string_view) {
   throw std::runtime_error("simulated std::exception");
 }
-vector_otel::extractors::ExtractionResult ThrowingNonStdExtractor(lua_State*, std::string_view,
-                                                                  int) {
+bool ThrowingNonStdExtractor(OperationContext&, OtelParser&, simdjson::padded_string_view) {
   throw 42;
 }
-vector_otel::extractors::ExtractionResult EmptyErrorExtractor(lua_State*, std::string_view, int) {
-  return vector_otel::extractors::ExtractionResult{
-      .success = false, .error = "", .emitted_count = 0};
+// Returns failure without recording an error code: a contract violation the runner must still
+// report as a generic extraction error.
+bool SilentFailureExtractor(OperationContext&, OtelParser&, simdjson::padded_string_view) {
+  return false;
 }
-vector_otel::extractors::ExtractionResult DummyTableExtractor(lua_State*, int, int) {
-  return vector_otel::extractors::ExtractionResult{
-      .success = true, .error = "", .emitted_count = 0};
+bool DummyTableExtractor(OperationContext&) { return true; }
+
+int ProcessWithStdThrow(lua_State* L) {
+  return vector_otel::core::DispatchProcess(
+      L, ModuleKind::Otel, Signal::Logs,
+      SignalExtractors{ThrowingStdExtractor, DummyTableExtractor});
 }
+int ProcessWithNonStdThrow(lua_State* L) {
+  return vector_otel::core::DispatchProcess(
+      L, ModuleKind::Otel, Signal::Logs,
+      SignalExtractors{ThrowingNonStdExtractor, DummyTableExtractor});
+}
+int ProcessWithSilentFailure(lua_State* L) {
+  return vector_otel::core::DispatchProcess(
+      L, ModuleKind::Otel, Signal::Logs,
+      SignalExtractors{SilentFailureExtractor, DummyTableExtractor});
+}
+const luaL_Reg kDispatchTestFuncs[] = {
+    {"std_throw", ProcessWithStdThrow},
+    {"non_std_throw", ProcessWithNonStdThrow},
+    {"silent_failure", ProcessWithSilentFailure},
+    {nullptr, nullptr},
+};
 }  // namespace
 
-TEST_F(ModuleExportsTest, ProcessDispatcherExceptionHandlingAndEmptyError) {
-  lua_pushcfunction(
-      L_, (vector_otel::core::ProcessDispatcher<ThrowingStdExtractor, DummyTableExtractor>));
-  lua_setglobal(L_, "test_std_throw");
-
-  lua_pushcfunction(
-      L_, (vector_otel::core::ProcessDispatcher<ThrowingNonStdExtractor, DummyTableExtractor>));
-  lua_setglobal(L_, "test_non_std_throw");
-
-  lua_pushcfunction(
-      L_, (vector_otel::core::ProcessDispatcher<EmptyErrorExtractor, DummyTableExtractor>));
-  lua_setglobal(L_, "test_empty_err");
+// Exceptions thrown by an extractor (std::exception, non-std, or a silent failure) never escape
+// DispatchProcess: each becomes (nil, message, 0) and the state keeps working.
+TEST_F(ModuleExportsTest, DispatchProcessExceptionHandlingAndSilentFailure) {
+  ASSERT_EQ(vector_otel::core::OpenSignalTable(L_, ModuleKind::Otel, kDispatchTestFuncs), 1);
+  lua_setglobal(L_, "dispatch_test");
 
   const char* script = R"(
     local noop = function() end
-    local c1, e1, p1 = test_std_throw("{}", noop)
-    local c2, e2, p2 = test_non_std_throw("{}", noop)
-    local c3, e3, p3 = test_empty_err("{}", noop)
+    local c1, e1, p1 = dispatch_test.std_throw("{}", noop)
+    local c2, e2, p2 = dispatch_test.non_std_throw("{}", noop)
+    local c3, e3, p3 = dispatch_test.silent_failure("{}", noop)
     return c1, e1, p1, c2, e2, p2, c3, e3, p3
   )";
   ASSERT_EQ(luaL_dostring(L_, script), LUA_OK) << lua_tostring(L_, -1);
   EXPECT_EQ(lua_gettop(L_), 9);
 
-  // std::exception
   EXPECT_TRUE(lua_isnil(L_, 1));
-  EXPECT_TRUE(lua_isstring(L_, 2));
-  EXPECT_STREQ(lua_tostring(L_, 2), "simulated std::exception");
+  ASSERT_TRUE(lua_isstring(L_, 2));
+  EXPECT_STREQ(lua_tostring(L_, 2), "C++ exception: simulated std::exception");
   EXPECT_EQ(lua_tointeger(L_, 3), 0);
 
-  // non-std exception
   EXPECT_TRUE(lua_isnil(L_, 4));
-  EXPECT_TRUE(lua_isstring(L_, 5));
-  EXPECT_STREQ(lua_tostring(L_, 5), "unknown C++ exception");
+  ASSERT_TRUE(lua_isstring(L_, 5));
+  EXPECT_STREQ(lua_tostring(L_, 5), "Unknown C++ exception");
   EXPECT_EQ(lua_tointeger(L_, 6), 0);
 
-  // empty error string -> "unknown extraction error"
   EXPECT_TRUE(lua_isnil(L_, 7));
-  EXPECT_TRUE(lua_isstring(L_, 8));
-  EXPECT_STREQ(lua_tostring(L_, 8), "unknown extraction error");
+  ASSERT_TRUE(lua_isstring(L_, 8));
+  EXPECT_STREQ(lua_tostring(L_, 8), "extraction failed");
   EXPECT_EQ(lua_tointeger(L_, 9), 0);
 
   lua_pop(L_, 9);

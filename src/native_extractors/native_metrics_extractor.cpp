@@ -19,10 +19,12 @@ extern "C" {
 }
 
 #include "vector_otel/core/fast_json_writer.hpp"
-#include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/parser.hpp"
+#include "vector_otel/core/process_runner.hpp"
+#include "vector_otel/core/row_emitter.hpp"
 #include "vector_otel/core/scratch.hpp"
+#include "vector_otel/core/staged_row.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
@@ -30,6 +32,8 @@ namespace vector_otel::native_extractors {
 
 namespace {
 
+using core::ErrorCode;
+using core::OperationContext;
 using extractors::ExtractionResult;
 
 constexpr uint64_t kMaxLuaInt = static_cast<uint64_t>(std::numeric_limits<lua_Integer>::max());
@@ -700,8 +704,86 @@ struct DeferredJsonTag {
   bool bool_val = false;
 };
 
-static thread_local std::vector<DeferredJsonTag> tls_deferred_tags;
-static thread_local std::string tls_tag_arena;
+// Reusable per-thread staging buffers (capacity retained between invocations). A `metric` / `log`
+// wrapper nests at most one level (`depth == 0` only), and the enclosing object has already parsed
+// part of its state into its buffers when the wrapper is reached, so level 1 gets its own set:
+// an unmatched wrapper must not clobber the enclosing object's staged fields.
+struct NativeMetricsScratch {
+  core::FastJsonWriter res_attrs_writer;
+  core::FastJsonWriter scope_attrs_writer;
+  core::FastJsonWriter dp_attrs_writer;
+  core::FastJsonWriter exemplars_writer;
+  core::FastJsonWriter payload_writer;
+  std::string metric_name;
+  std::string service;
+  std::string scope_name;
+  std::string scope_ver;
+  std::string metric_desc;
+  std::string metric_unit;
+  std::vector<uint64_t> bucket_counts;
+  std::vector<double> explicit_bounds;
+  std::vector<uint64_t> pos_bucket_counts;
+  std::vector<uint64_t> neg_bucket_counts;
+  std::vector<SummaryQuantile> summary_quantiles;
+  std::vector<DeferredJsonTag> deferred_tags;
+  std::string tag_arena;
+};
+
+constexpr int kScratchLevels = 2;
+
+NativeMetricsScratch& ScratchLevel(int level) {
+  static thread_local NativeMetricsScratch levels[kScratchLevels];
+  return levels[level];
+}
+
+void ResetScratch(NativeMetricsScratch& s) {
+  s.res_attrs_writer.Reset();
+  s.scope_attrs_writer.Reset();
+  s.dp_attrs_writer.Reset();
+  s.exemplars_writer.Reset();
+  s.payload_writer.Reset();
+  core::ReserveScratchString(s.metric_name);
+  core::ReserveScratchString(s.service);
+  core::ReserveScratchString(s.scope_name);
+  core::ReserveScratchString(s.scope_ver);
+  core::ReserveScratchString(s.metric_desc);
+  core::ReserveScratchString(s.metric_unit);
+  core::ReserveScratchVector(s.bucket_counts);
+  core::ReserveScratchVector(s.explicit_bounds);
+  core::ReserveScratchVector(s.pos_bucket_counts);
+  core::ReserveScratchVector(s.neg_bucket_counts);
+  core::ReserveScratchVector(s.summary_quantiles);
+  core::ReserveScratchVector(s.deferred_tags);
+  core::ReserveScratchString(s.tag_arena);
+}
+
+void TrimScratch(NativeMetricsScratch& s) noexcept {
+  s.res_attrs_writer.Trim();
+  s.scope_attrs_writer.Trim();
+  s.dp_attrs_writer.Trim();
+  s.exemplars_writer.Trim();
+  s.payload_writer.Trim();
+  core::ResetScratchVector(s.bucket_counts);
+  core::ResetScratchVector(s.explicit_bounds);
+  core::ResetScratchVector(s.pos_bucket_counts);
+  core::ResetScratchVector(s.neg_bucket_counts);
+  core::ResetScratchVector(s.summary_quantiles);
+  core::ResetScratchVector(s.deferred_tags);
+  core::TrimScratchString(s.tag_arena);
+  core::TrimScratchString(s.metric_name);
+  core::TrimScratchString(s.service);
+  core::TrimScratchString(s.scope_name);
+  core::TrimScratchString(s.scope_ver);
+  core::TrimScratchString(s.metric_desc);
+  core::TrimScratchString(s.metric_unit);
+}
+
+void TrimAllScratch() noexcept {
+  for (int i = 0; i < kScratchLevels; ++i) {
+    TrimScratch(ScratchLevel(i));
+  }
+  core::ResetServiceNameScratch();
+}
 
 void ReadSingleJsonTagElement(simdjson::ondemand::value& v, core::FastJsonWriter& scratch_writer,
                               JsonTagValue& out) {
@@ -793,8 +875,21 @@ bool ExtractNativeMetricObjectJson(
     std::string& tls_metric_unit_scratch, std::vector<uint64_t>& tls_bucket_counts,
     std::vector<double>& tls_explicit_bounds, std::vector<uint64_t>& tls_pos_bucket_counts,
     std::vector<uint64_t>& tls_neg_bucket_counts,
-    std::vector<SummaryQuantile>& tls_summary_quantiles, core::LuaEmitter& emitter,
+    std::vector<SummaryQuantile>& tls_summary_quantiles, core::RowEmitter& emitter,
     std::string& err_out, int depth = 0, bool* out_matched = nullptr) {
+  NativeMetricsScratch& level = ScratchLevel(depth);
+  std::vector<DeferredJsonTag>& tls_deferred_tags = level.deferred_tags;
+  std::string& tls_tag_arena = level.tag_arena;
+  // Recurses into a wrapper's object with the next level's buffers.
+  auto extract_wrapped = [&](simdjson::ondemand::object& inner, bool* matched) -> bool {
+    NativeMetricsScratch& n = ScratchLevel(depth + 1);
+    ResetScratch(n);
+    return ExtractNativeMetricObjectJson(
+        L, inner, processed_at, n.res_attrs_writer, n.scope_attrs_writer, n.dp_attrs_writer,
+        n.exemplars_writer, n.payload_writer, n.metric_name, n.service, n.scope_name, n.scope_ver,
+        n.metric_desc, n.metric_unit, n.bucket_counts, n.explicit_bounds, n.pos_bucket_counts,
+        n.neg_bucket_counts, n.summary_quantiles, emitter, err_out, depth + 1, matched);
+  };
   uint64_t t_ns = 0;
   uint64_t start_ns = 0;
   uint64_t interval_ms = 0;
@@ -862,7 +957,7 @@ bool ExtractNativeMetricObjectJson(
   size_t tag_desc_off = 0, tag_desc_len = 0;
   bool has_tag_desc = false;
 
-  auto append_to_arena = [](std::string_view sv, size_t& out_off, size_t& out_len) {
+  auto append_to_arena = [&tls_tag_arena](std::string_view sv, size_t& out_off, size_t& out_len) {
     out_off = tls_tag_arena.size();
     out_len = sv.size();
     tls_tag_arena.append(sv.data(), sv.size());
@@ -944,13 +1039,7 @@ bool ExtractNativeMetricObjectJson(
         }
         auto inner_obj = inner_obj_res.value();
         bool inner_matched = false;
-        if (!ExtractNativeMetricObjectJson(
-                L, inner_obj, processed_at, res_attrs_writer, scope_attrs_writer, dp_attrs_writer,
-                exemplars_writer, payload_writer, tls_metric_name_scratch, tls_service_scratch,
-                tls_scope_name_scratch, tls_scope_ver_scratch, tls_metric_desc_scratch,
-                tls_metric_unit_scratch, tls_bucket_counts, tls_explicit_bounds,
-                tls_pos_bucket_counts, tls_neg_bucket_counts, tls_summary_quantiles, emitter,
-                err_out, depth + 1, &inner_matched)) {
+        if (!extract_wrapped(inner_obj, &inner_matched)) {
           return false;
         }
         if (inner_matched) {
@@ -977,13 +1066,7 @@ bool ExtractNativeMetricObjectJson(
           }
           auto elem_obj = elem_obj_res.value();
           bool elem_matched = false;
-          if (!ExtractNativeMetricObjectJson(
-                  L, elem_obj, processed_at, res_attrs_writer, scope_attrs_writer, dp_attrs_writer,
-                  exemplars_writer, payload_writer, tls_metric_name_scratch, tls_service_scratch,
-                  tls_scope_name_scratch, tls_scope_ver_scratch, tls_metric_desc_scratch,
-                  tls_metric_unit_scratch, tls_bucket_counts, tls_explicit_bounds,
-                  tls_pos_bucket_counts, tls_neg_bucket_counts, tls_summary_quantiles, emitter,
-                  err_out, depth + 1, &elem_matched)) {
+          if (!extract_wrapped(elem_obj, &elem_matched)) {
             return false;
           }
           any_matched = any_matched || elem_matched;
@@ -1478,7 +1561,7 @@ bool HasNativeMetricFields(lua_State* L, int table_idx) {
   if (!lua_istable(L, abs_idx) || core::IsLuaTableEmpty(L, abs_idx)) {
     return false;
   }
-  static constexpr const char* kKeys[] = {
+  static constexpr core::ReadKey kKeys[] = {
       "name",
       "namespace",
       "counter",
@@ -1500,7 +1583,7 @@ bool HasNativeMetricFields(lua_State* L, int table_idx) {
       "tags",
       "kind",
   };
-  for (const char* k : kKeys) {
+  for (const core::ReadKey& k : kKeys) {
     if (core::GetTableFieldRaw(L, abs_idx, k)) {
       lua_pop(L, 1);
       return true;
@@ -1509,29 +1592,15 @@ bool HasNativeMetricFields(lua_State* L, int table_idx) {
   return false;
 }
 
+// Text of a scalar (string or number) tag value without converting the Lua value in place.
 std::string_view ReadLuaScalarStringView(lua_State* L, int val_idx, std::string& scratch) {
-  int abs_idx = lua_absindex(L, val_idx);
-  int t = lua_type(L, abs_idx);
-  if (t == LUA_TSTRING) {
-    size_t len = 0;
-    const char* s = lua_tolstring(L, abs_idx, &len);
-    if (s != nullptr) {
-      scratch.assign(s, len);
-      return std::string_view(scratch);
-    }
-  } else if (t == LUA_TNUMBER) {
-    lua_pushvalue(L, abs_idx);
-    size_t len = 0;
-    const char* s = lua_tolstring(L, -1, &len);
-    if (s != nullptr) {
-      scratch.assign(s, len);
-    } else {
-      scratch.clear();
-    }
-    lua_pop(L, 1);
-    return std::string_view(scratch);
+  char buffer[core::kScalarTextBuffer];
+  std::string_view text;
+  if (!core::ScalarText(L, val_idx, buffer, text)) {
+    return "";
   }
-  return "";
+  scratch.assign(text);
+  return std::string_view(scratch);
 }
 
 void ReadLuaBucketCountsArray(lua_State* L, int arr_idx, std::vector<uint64_t>& out) {
@@ -1723,7 +1792,7 @@ void ReadLuaHistogram(lua_State* L, int hist_idx, int64_t& agg_temporality, uint
   }
 }
 
-void ReadLuaExpBucketsSubTable(lua_State* L, int parent_idx, const char* k1, const char* k2,
+void ReadLuaExpBucketsSubTable(lua_State* L, int parent_idx, core::ReadKey k1, core::ReadKey k2,
                                int64_t& out_offset, std::vector<uint64_t>& out_buckets) {
   out_offset = 0;
   out_buckets.clear();
@@ -1889,7 +1958,7 @@ bool ExtractSingleNativeMetricTable(
     std::string& tls_metric_unit_scratch, std::vector<uint64_t>& tls_bucket_counts,
     std::vector<double>& tls_explicit_bounds, std::vector<uint64_t>& tls_pos_bucket_counts,
     std::vector<uint64_t>& tls_neg_bucket_counts,
-    std::vector<SummaryQuantile>& tls_summary_quantiles, core::LuaEmitter& emitter,
+    std::vector<SummaryQuantile>& tls_summary_quantiles, core::RowEmitter& emitter,
     std::string& err_out) {
   if (!lua_checkstack(L, 16)) {
     err_out = "Lua stack overflow during native metric extraction";
@@ -1898,11 +1967,11 @@ bool ExtractSingleNativeMetricTable(
   int abs_rec_idx = lua_absindex(L, rec_idx);
 
   // 1. Check for unsupported non-OTLP metric variants first
-  static constexpr const char* kUnsupportedVariants[] = {"distribution", "set", "sketch"};
-  for (const char* v : kUnsupportedVariants) {
+  static constexpr core::ReadKey kUnsupportedVariants[] = {"distribution", "set", "sketch"};
+  for (const core::ReadKey& v : kUnsupportedVariants) {
     if (core::GetTableFieldRaw(L, abs_rec_idx, v)) {
       lua_pop(L, 1);
-      err_out = UnsupportedMetricVariantError(v);
+      err_out = UnsupportedMetricVariantError(v.c_str());
       return false;
     }
   }
@@ -2288,318 +2357,210 @@ bool ExtractSingleNativeMetricTable(
   return true;
 }
 
+// The row staged for emission (one record at a time).
+core::StagedRow& RowBuffer() {
+  static thread_local core::StagedRow row;
+  return row;
+}
+
+struct ScratchGuard {
+  ScratchGuard() = default;
+  ScratchGuard(const ScratchGuard&) = delete;
+  ScratchGuard& operator=(const ScratchGuard&) = delete;
+  ~ScratchGuard() noexcept { TrimAllScratch(); }
+};
+
+// Records a failed extraction on the context (unless the emitter already did).
+bool FailExtraction(OperationContext& ctx, const core::RowEmitter& emitter, ErrorCode code,
+                    std::string_view message) {
+  if (!emitter.HasError()) {
+    ctx.error.Set(code, message);
+  }
+  return false;
+}
+
+bool FailMetric(OperationContext& ctx, const core::RowEmitter& emitter,
+                const std::string& message) {
+  const bool unsupported = message.rfind("Unsupported non-OTLP metric variant", 0) == 0;
+  return FailExtraction(ctx, emitter, unsupported ? ErrorCode::Schema : ErrorCode::Json, message);
+}
+
+bool FailJson(OperationContext& ctx, simdjson::error_code code) {
+  ctx.error.Set(ErrorCode::Json, simdjson::error_message(code));
+  return false;
+}
+
 }  // namespace
 
-extractors::ExtractionResult ProcessNativeMetrics(lua_State* L, std::string_view raw_json,
-                                                  int emit_idx) {
-  if (raw_json.empty()) {
-    return ExtractionResult{false, "Empty JSON input", 0};
+bool ExtractNativeMetricsJson(OperationContext& ctx, core::OtelParser& parser,
+                              simdjson::padded_string_view admitted) {
+  NativeMetricsScratch& s = ScratchLevel(0);
+  ResetScratch(s);
+  ScratchGuard guard;
+  core::RowEmitter emitter(ctx, RowBuffer());
+
+  auto doc_res = parser.IteratePrepared(admitted);
+  if (doc_res.error() != simdjson::SUCCESS) {
+    return FailJson(ctx, doc_res.error());
+  }
+  auto doc = std::move(doc_res.value());
+  auto type_res = doc.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return FailJson(ctx, type_res.error());
   }
 
-  core::LuaEmitter emitter(L, emit_idx);
-  try {
-    auto& parser = core::OtelParser::Instance();
-    static thread_local core::FastJsonWriter res_attrs_writer;
-    static thread_local core::FastJsonWriter scope_attrs_writer;
-    static thread_local core::FastJsonWriter dp_attrs_writer;
-    static thread_local core::FastJsonWriter exemplars_writer;
-    static thread_local core::FastJsonWriter payload_writer;
-    static thread_local std::string tls_metric_name_scratch;
-    static thread_local std::string tls_service_scratch;
-    static thread_local std::string tls_scope_name_scratch;
-    static thread_local std::string tls_scope_ver_scratch;
-    static thread_local std::string tls_metric_desc_scratch;
-    static thread_local std::string tls_metric_unit_scratch;
-    static thread_local std::vector<uint64_t> tls_bucket_counts;
-    static thread_local std::vector<double> tls_explicit_bounds;
-    static thread_local std::vector<uint64_t> tls_pos_bucket_counts;
-    static thread_local std::vector<uint64_t> tls_neg_bucket_counts;
-    static thread_local std::vector<SummaryQuantile> tls_summary_quantiles;
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
+  std::string err_out;
 
-    res_attrs_writer.Reset();
-    scope_attrs_writer.Reset();
-    dp_attrs_writer.Reset();
-    exemplars_writer.Reset();
-    payload_writer.Reset();
-    core::ReserveScratchString(tls_metric_name_scratch);
-    core::ReserveScratchString(tls_service_scratch);
-    core::ReserveScratchString(tls_scope_name_scratch);
-    core::ReserveScratchString(tls_scope_ver_scratch);
-    core::ReserveScratchString(tls_metric_desc_scratch);
-    core::ReserveScratchString(tls_metric_unit_scratch);
-    core::ReserveScratchVector(tls_bucket_counts);
-    core::ReserveScratchVector(tls_explicit_bounds);
-    core::ReserveScratchVector(tls_pos_bucket_counts);
-    core::ReserveScratchVector(tls_neg_bucket_counts);
-    core::ReserveScratchVector(tls_summary_quantiles);
-    core::ReserveScratchVector(tls_deferred_tags);
-    core::ReserveScratchString(tls_tag_arena);
+  auto extract_object = [&](simdjson::ondemand::object& obj) -> bool {
+    return ExtractNativeMetricObjectJson(
+        ctx.L, obj, processed_at, s.res_attrs_writer, s.scope_attrs_writer, s.dp_attrs_writer,
+        s.exemplars_writer, s.payload_writer, s.metric_name, s.service, s.scope_name, s.scope_ver,
+        s.metric_desc, s.metric_unit, s.bucket_counts, s.explicit_bounds, s.pos_bucket_counts,
+        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out);
+  };
 
-    struct WriterTrimGuard {
-      WriterTrimGuard() = default;
-      WriterTrimGuard(const WriterTrimGuard&) = delete;
-      WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
-      ~WriterTrimGuard() noexcept {
-        res_attrs_writer.Trim();
-        scope_attrs_writer.Trim();
-        dp_attrs_writer.Trim();
-        exemplars_writer.Trim();
-        payload_writer.Trim();
-        core::ResetScratchVector(tls_bucket_counts);
-        core::ResetScratchVector(tls_explicit_bounds);
-        core::ResetScratchVector(tls_pos_bucket_counts);
-        core::ResetScratchVector(tls_neg_bucket_counts);
-        core::ResetScratchVector(tls_summary_quantiles);
-        core::ResetScratchVector(tls_deferred_tags);
-        core::TrimScratchString(tls_tag_arena);
-        core::TrimScratchString(tls_metric_name_scratch);
-        core::TrimScratchString(tls_service_scratch);
-        core::TrimScratchString(tls_scope_name_scratch);
-        core::TrimScratchString(tls_scope_ver_scratch);
-        core::TrimScratchString(tls_metric_desc_scratch);
-        core::TrimScratchString(tls_metric_unit_scratch);
-        core::ResetServiceNameScratch();
-      }
-    } trim_guard;
-
-    auto doc_res = parser.Iterate(raw_json);
-    if (doc_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
+  const auto root_type = type_res.value();
+  if (root_type == simdjson::ondemand::json_type::object) {
+    auto doc_obj_res = doc.get_object();
+    if (doc_obj_res.error() != simdjson::SUCCESS) {
+      return FailJson(ctx, doc_obj_res.error());
     }
-
-    auto doc = std::move(doc_res.value());
-    auto type_res = doc.type();
-    if (type_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(type_res.error())), 0};
+    auto doc_obj = doc_obj_res.value();
+    if (!extract_object(doc_obj)) {
+      return FailMetric(ctx, emitter, err_out);
     }
-
-    std::array<char, 32> proc_buf;
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-    std::string_view processed_at(proc_buf.data(), 30);
-    std::string err_out;
-
-    const auto root_type = type_res.value();
-    if (root_type == simdjson::ondemand::json_type::object) {
-      auto doc_obj_res = doc.get_object();
-      if (doc_obj_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())),
-                                0};
-      }
-      auto doc_obj = doc_obj_res.value();
-      if (!ExtractNativeMetricObjectJson(
-              L, doc_obj, processed_at, res_attrs_writer, scope_attrs_writer, dp_attrs_writer,
-              exemplars_writer, payload_writer, tls_metric_name_scratch, tls_service_scratch,
-              tls_scope_name_scratch, tls_scope_ver_scratch, tls_metric_desc_scratch,
-              tls_metric_unit_scratch, tls_bucket_counts, tls_explicit_bounds,
-              tls_pos_bucket_counts, tls_neg_bucket_counts, tls_summary_quantiles, emitter,
-              err_out)) {
-        return ExtractionResult{false, err_out, emitter.EmittedCount()};
-      }
-    } else if (root_type == simdjson::ondemand::json_type::array) {
-      auto doc_arr_res = doc.get_array();
-      if (doc_arr_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(doc_arr_res.error())),
-                                0};
-      }
-      for (auto elem_res : doc_arr_res.value()) {
-        if (elem_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(elem_res.error())),
-                                  emitter.EmittedCount()};
-        }
-        auto elem_obj_res = elem_res.value().get_object();
-        if (elem_obj_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(elem_obj_res.error())),
-                                  emitter.EmittedCount()};
-        }
-        auto elem_obj = elem_obj_res.value();
-        if (!ExtractNativeMetricObjectJson(
-                L, elem_obj, processed_at, res_attrs_writer, scope_attrs_writer, dp_attrs_writer,
-                exemplars_writer, payload_writer, tls_metric_name_scratch, tls_service_scratch,
-                tls_scope_name_scratch, tls_scope_ver_scratch, tls_metric_desc_scratch,
-                tls_metric_unit_scratch, tls_bucket_counts, tls_explicit_bounds,
-                tls_pos_bucket_counts, tls_neg_bucket_counts, tls_summary_quantiles, emitter,
-                err_out)) {
-          return ExtractionResult{false, err_out, emitter.EmittedCount()};
-        }
-      }
-    } else {
-      return ExtractionResult{false, "root JSON value must be an object or array", 0};
+  } else if (root_type == simdjson::ondemand::json_type::array) {
+    auto doc_arr_res = doc.get_array();
+    if (doc_arr_res.error() != simdjson::SUCCESS) {
+      return FailJson(ctx, doc_arr_res.error());
     }
-
-    emitter.Flush();
-    if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
+    for (auto elem_res : doc_arr_res.value()) {
+      if (elem_res.error() != simdjson::SUCCESS) {
+        return FailJson(ctx, elem_res.error());
+      }
+      auto elem_obj_res = elem_res.value().get_object();
+      if (elem_obj_res.error() != simdjson::SUCCESS) {
+        return FailJson(ctx, elem_obj_res.error());
+      }
+      auto elem_obj = elem_obj_res.value();
+      if (!extract_object(elem_obj)) {
+        return FailMetric(ctx, emitter, err_out);
+      }
     }
-    return ExtractionResult{true, "", emitter.EmittedCount()};
-  } catch (const std::exception& ex) {
-    return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
-  } catch (...) {
-    return ExtractionResult{false, "Unknown C++ exception during native metrics processing",
-                            emitter.EmittedCount()};
+  } else {
+    ctx.error.Set(ErrorCode::Json, "root JSON value must be an object or array");
+    return false;
   }
+
+  emitter.Flush();
+  return !emitter.HasError();
 }
 
-extractors::ExtractionResult ProcessNativeMetricsTable(lua_State* L, int table_idx, int emit_idx) {
-  if (L == nullptr) {
-    return ExtractionResult{false, "lua_State must not be null", 0};
-  }
-  const int entry_top = lua_gettop(L);
-  int abs_idx = lua_absindex(L, table_idx);
-  int abs_emit_idx = lua_absindex(L, emit_idx);
-  if (!lua_istable(L, abs_idx)) {
-    return ExtractionResult{false, "payload must be a table", 0};
-  }
-
-  static thread_local core::FastJsonWriter res_attrs_writer;
-  static thread_local core::FastJsonWriter scope_attrs_writer;
-  static thread_local core::FastJsonWriter dp_attrs_writer;
-  static thread_local core::FastJsonWriter exemplars_writer;
-  static thread_local core::FastJsonWriter payload_writer;
-  static thread_local std::string tls_metric_name_scratch;
-  static thread_local std::string tls_service_scratch;
-  static thread_local std::string tls_scope_name_scratch;
-  static thread_local std::string tls_scope_ver_scratch;
-  static thread_local std::string tls_metric_desc_scratch;
-  static thread_local std::string tls_metric_unit_scratch;
-  static thread_local std::vector<uint64_t> tls_bucket_counts;
-  static thread_local std::vector<double> tls_explicit_bounds;
-  static thread_local std::vector<uint64_t> tls_pos_bucket_counts;
-  static thread_local std::vector<uint64_t> tls_neg_bucket_counts;
-  static thread_local std::vector<SummaryQuantile> tls_summary_quantiles;
-
-  res_attrs_writer.Reset();
-  scope_attrs_writer.Reset();
-  dp_attrs_writer.Reset();
-  exemplars_writer.Reset();
-  payload_writer.Reset();
-  core::ReserveScratchString(tls_metric_name_scratch);
-  core::ReserveScratchString(tls_service_scratch);
-  core::ReserveScratchString(tls_scope_name_scratch);
-  core::ReserveScratchString(tls_scope_ver_scratch);
-  core::ReserveScratchString(tls_metric_desc_scratch);
-  core::ReserveScratchString(tls_metric_unit_scratch);
-  core::ReserveScratchVector(tls_bucket_counts);
-  core::ReserveScratchVector(tls_explicit_bounds);
-  core::ReserveScratchVector(tls_pos_bucket_counts);
-  core::ReserveScratchVector(tls_neg_bucket_counts);
-  core::ReserveScratchVector(tls_summary_quantiles);
-
-  struct TableScopeGuard {
-    TableScopeGuard(lua_State* l, int t) : L(l), top(t) {}
-    TableScopeGuard(const TableScopeGuard&) = delete;
-    TableScopeGuard& operator=(const TableScopeGuard&) = delete;
-    ~TableScopeGuard() noexcept {
-      if (L != nullptr) {
-        lua_settop(L, top);
-      }
-      res_attrs_writer.Trim();
-      scope_attrs_writer.Trim();
-      dp_attrs_writer.Trim();
-      exemplars_writer.Trim();
-      payload_writer.Trim();
-      core::ResetScratchVector(tls_bucket_counts);
-      core::ResetScratchVector(tls_explicit_bounds);
-      core::ResetScratchVector(tls_pos_bucket_counts);
-      core::ResetScratchVector(tls_neg_bucket_counts);
-      core::ResetScratchVector(tls_summary_quantiles);
-      core::TrimScratchString(tls_metric_name_scratch);
-      core::TrimScratchString(tls_service_scratch);
-      core::TrimScratchString(tls_scope_name_scratch);
-      core::TrimScratchString(tls_scope_ver_scratch);
-      core::TrimScratchString(tls_metric_desc_scratch);
-      core::TrimScratchString(tls_metric_unit_scratch);
+bool ExtractNativeMetricsTable(OperationContext& ctx) {
+  NativeMetricsScratch& s = ScratchLevel(0);
+  ResetScratch(s);
+  struct Guard {
+    Guard(lua_State* l, int top) : L(l), entry_top(top) {}
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+    ~Guard() noexcept {
+      lua_settop(L, entry_top);
+      TrimAllScratch();
     }
     lua_State* L;
-    int top;
-  } scope_guard{L, entry_top};
+    int entry_top;
+  } guard{ctx.L, lua_gettop(ctx.L)};
 
-  core::LuaEmitter emitter(L, abs_emit_idx);
-  try {
-    std::array<char, 32> proc_buf;
-    core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-    std::string_view processed_at(proc_buf.data(), 30);
-    std::string err_out;
+  lua_State* L = ctx.L;
+  core::RowEmitter emitter(ctx, RowBuffer());
+  std::array<char, 32> proc_buf;
+  core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
+  std::string_view processed_at(proc_buf.data(), 30);
+  std::string err_out;
 
-    auto extract_array = [&](int arr_idx, size_t len) -> bool {
-      for (size_t i = 1; i <= len; ++i) {
-        lua_rawgeti(L, arr_idx, static_cast<lua_Integer>(i));
-        if (lua_istable(L, -1)) {
-          int item_idx = lua_absindex(L, -1);
-          if (HasNativeMetricFields(L, item_idx)) {
-            if (!ExtractSingleNativeMetricTable(
-                    L, item_idx, processed_at, res_attrs_writer, scope_attrs_writer,
-                    dp_attrs_writer, exemplars_writer, payload_writer, tls_metric_name_scratch,
-                    tls_service_scratch, tls_scope_name_scratch, tls_scope_ver_scratch,
-                    tls_metric_desc_scratch, tls_metric_unit_scratch, tls_bucket_counts,
-                    tls_explicit_bounds, tls_pos_bucket_counts, tls_neg_bucket_counts,
-                    tls_summary_quantiles, emitter, err_out)) {
-              lua_pop(L, 1);
-              return false;
-            }
+  const int abs_idx = lua_absindex(L, ctx.input_index);
+
+  auto extract_one = [&](int idx) -> bool {
+    return ExtractSingleNativeMetricTable(
+        L, idx, processed_at, s.res_attrs_writer, s.scope_attrs_writer, s.dp_attrs_writer,
+        s.exemplars_writer, s.payload_writer, s.metric_name, s.service, s.scope_name, s.scope_ver,
+        s.metric_desc, s.metric_unit, s.bucket_counts, s.explicit_bounds, s.pos_bucket_counts,
+        s.neg_bucket_counts, s.summary_quantiles, emitter, err_out);
+  };
+
+  auto extract_array = [&](int arr_idx, size_t len) -> bool {
+    for (size_t i = 1; i <= len; ++i) {
+      lua_rawgeti(L, arr_idx, static_cast<lua_Integer>(i));
+      if (lua_istable(L, -1)) {
+        int item_idx = lua_absindex(L, -1);
+        if (HasNativeMetricFields(L, item_idx)) {
+          if (!extract_one(item_idx)) {
+            lua_pop(L, 1);
+            return false;
           }
         }
-        lua_pop(L, 1);
       }
-      return true;
-    };
+      lua_pop(L, 1);
+    }
+    return true;
+  };
 
-    const size_t raw_len = lua_rawlen(L, abs_idx);
-    if (raw_len > 0) {
-      if (!extract_array(abs_idx, raw_len)) {
-        return ExtractionResult{false, err_out, emitter.EmittedCount()};
-      }
-    } else {
-      bool handled_wrapper = false;
-      if (core::GetTableFieldRaw(L, abs_idx, "metric", "log")) {
-        int inner_idx = lua_absindex(L, -1);
-        if (lua_istable(L, inner_idx)) {
-          const size_t inner_len = lua_rawlen(L, inner_idx);
-          if (inner_len > 0) {
-            handled_wrapper = true;
-            if (!extract_array(inner_idx, inner_len)) {
-              lua_pop(L, 1);
-              return ExtractionResult{false, err_out, emitter.EmittedCount()};
-            }
-          } else if (HasNativeMetricFields(L, inner_idx)) {
-            handled_wrapper = true;
-            if (!ExtractSingleNativeMetricTable(
-                    L, inner_idx, processed_at, res_attrs_writer, scope_attrs_writer,
-                    dp_attrs_writer, exemplars_writer, payload_writer, tls_metric_name_scratch,
-                    tls_service_scratch, tls_scope_name_scratch, tls_scope_ver_scratch,
-                    tls_metric_desc_scratch, tls_metric_unit_scratch, tls_bucket_counts,
-                    tls_explicit_bounds, tls_pos_bucket_counts, tls_neg_bucket_counts,
-                    tls_summary_quantiles, emitter, err_out)) {
-              lua_pop(L, 1);
-              return ExtractionResult{false, err_out, emitter.EmittedCount()};
-            }
+  const size_t raw_len = lua_rawlen(L, abs_idx);
+  if (raw_len > 0) {
+    if (!extract_array(abs_idx, raw_len)) {
+      return FailMetric(ctx, emitter, err_out);
+    }
+  } else {
+    bool handled_wrapper = false;
+    if (core::GetTableFieldRaw(L, abs_idx, "metric", "log")) {
+      int inner_idx = lua_absindex(L, -1);
+      if (lua_istable(L, inner_idx)) {
+        const size_t inner_len = lua_rawlen(L, inner_idx);
+        if (inner_len > 0) {
+          handled_wrapper = true;
+          if (!extract_array(inner_idx, inner_len)) {
+            lua_pop(L, 1);
+            return FailMetric(ctx, emitter, err_out);
+          }
+        } else if (HasNativeMetricFields(L, inner_idx)) {
+          handled_wrapper = true;
+          if (!extract_one(inner_idx)) {
+            lua_pop(L, 1);
+            return FailMetric(ctx, emitter, err_out);
           }
         }
-        lua_pop(L, 1);
       }
-      if (!handled_wrapper && HasNativeMetricFields(L, abs_idx)) {
-        if (!ExtractSingleNativeMetricTable(
-                L, abs_idx, processed_at, res_attrs_writer, scope_attrs_writer, dp_attrs_writer,
-                exemplars_writer, payload_writer, tls_metric_name_scratch, tls_service_scratch,
-                tls_scope_name_scratch, tls_scope_ver_scratch, tls_metric_desc_scratch,
-                tls_metric_unit_scratch, tls_bucket_counts, tls_explicit_bounds,
-                tls_pos_bucket_counts, tls_neg_bucket_counts, tls_summary_quantiles, emitter,
-                err_out)) {
-          return ExtractionResult{false, err_out, emitter.EmittedCount()};
-        }
+      lua_pop(L, 1);
+    }
+    if (!handled_wrapper && HasNativeMetricFields(L, abs_idx)) {
+      if (!extract_one(abs_idx)) {
+        return FailMetric(ctx, emitter, err_out);
       }
     }
-
-    emitter.Flush();
-    if (emitter.HasError()) {
-      return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-    }
-    return ExtractionResult{true, "", emitter.EmittedCount()};
-  } catch (const std::exception& ex) {
-    return ExtractionResult{false, ex.what(), emitter.EmittedCount()};
-  } catch (...) {
-    return ExtractionResult{false, "Unknown C++ exception during native metrics table processing",
-                            emitter.EmittedCount()};
   }
+
+  emitter.Flush();
+  return !emitter.HasError();
 }
+
+namespace {
+constexpr core::SignalExtractors kNativeMetricsExtractors{ExtractNativeMetricsJson,
+                                                          ExtractNativeMetricsTable};
+}
+
+ExtractionResult ProcessNativeMetrics(lua_State* L, std::string_view raw_json, int emit_idx) {
+  return core::RunCompatJson(L, core::ModuleKind::Native, core::Signal::Metrics,
+                             kNativeMetricsExtractors, raw_json, emit_idx);
+}
+
+ExtractionResult ProcessNativeMetricsTable(lua_State* L, int table_idx, int emit_idx) {
+  return core::RunCompatTable(L, core::ModuleKind::Native, core::Signal::Metrics,
+                              kNativeMetricsExtractors, table_idx, emit_idx);
+}
+
+const core::SignalExtractors& NativeMetricsExtractors() { return kNativeMetricsExtractors; }
 
 }  // namespace vector_otel::native_extractors

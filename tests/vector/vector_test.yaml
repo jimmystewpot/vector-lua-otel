@@ -21,9 +21,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.log.resourceLogs or event.log.message or event.log
-        local count, err = otel_logs.process(payload, emit)
+        local count, err, partial = otel_logs.process(payload, emit)
         if not count then
-          error("OTLP Logs parsing failed: " .. tostring(err))
+          error("OTLP Logs parsing failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:
@@ -40,9 +40,9 @@ transforms:
 
       function process(event, emit)
         local payload = event.log.resourceMetrics or event.log.message or event.log
-        local count, err = otel_metrics.process(payload, emit)
+        local count, err, partial = otel_metrics.process(payload, emit)
         if not count then
-          error("OTLP Metrics parsing failed: " .. tostring(err))
+          error("OTLP Metrics parsing failed: " .. tostring(err) .. " (rows already delivered: " .. tostring(partial) .. ")")
         end
       end
     hooks:

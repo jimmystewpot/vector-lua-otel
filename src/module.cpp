@@ -4,6 +4,8 @@ extern "C" {
 }
 
 #include "vector_otel/core/module_runner.hpp"
+#include "vector_otel/core/module_state.hpp"
+#include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
 #include "vector_otel/extractors/traces_extractor.hpp"
@@ -14,15 +16,18 @@ namespace core = vector_otel::core;
 namespace extractors = vector_otel::extractors;
 
 int ProcessLogs(lua_State* L) {
-  return core::ProcessDispatcher<extractors::ProcessLogs, extractors::ProcessLogsTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Otel, core::Signal::Logs,
+                               extractors::LogsExtractors());
 }
 
 int ProcessTraces(lua_State* L) {
-  return core::ProcessDispatcher<extractors::ProcessTraces, extractors::ProcessTracesTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Otel, core::Signal::Traces,
+                               extractors::TracesExtractors());
 }
 
 int ProcessMetrics(lua_State* L) {
-  return core::ProcessDispatcher<extractors::ProcessMetrics, extractors::ProcessMetricsTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Otel, core::Signal::Metrics,
+                               extractors::MetricsExtractors());
 }
 
 const luaL_Reg kLogsFuncs[] = {
@@ -45,22 +50,19 @@ const luaL_Reg kMetricsFuncs[] = {
 extern "C" {
 
 int luaopen_vector_otel_logs(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kLogsFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Otel, kLogsFuncs);
   core::RegisterInPackageLoaded(L, "vector_otel.logs", -1);
   return 1;
 }
 
 int luaopen_vector_otel_traces(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kTracesFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Otel, kTracesFuncs);
   core::RegisterInPackageLoaded(L, "vector_otel.traces", -1);
   return 1;
 }
 
 int luaopen_vector_otel_metrics(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kMetricsFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Otel, kMetricsFuncs);
   core::RegisterInPackageLoaded(L, "vector_otel.metrics", -1);
   return 1;
 }

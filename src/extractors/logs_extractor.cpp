@@ -11,16 +11,21 @@ extern "C" {
 }
 
 #include "vector_otel/core/fast_json_writer.hpp"
-#include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/parser.hpp"
+#include "vector_otel/core/process_runner.hpp"
+#include "vector_otel/core/row_emitter.hpp"
 #include "vector_otel/core/scratch.hpp"
+#include "vector_otel/core/staged_row.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
 namespace vector_otel::extractors {
 
 namespace {
+
+using core::ErrorCode;
+using core::OperationContext;
 
 std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
                                  core::FastJsonWriter& writer) {
@@ -79,22 +84,59 @@ std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
   }
 }
 
+// Reusable per-thread staging buffers: capacity is retained between invocations, so the steady
+// state performs no C++ allocation per record.
+struct LogsScratch {
+  core::FastJsonWriter res_attrs_writer;    // ResourceAttributes JSON, built once per resource
+  core::FastJsonWriter scope_attrs_writer;  // ScopeAttributes JSON, built once per scope
+  core::FastJsonWriter log_attrs_writer;    // LogAttributes JSON, rebuilt per record
+  core::FastJsonWriter body_writer;         // structured body serialisation
+  core::StagedRow row;                      // the record being built
+};
+
+LogsScratch& Scratch() {
+  static thread_local LogsScratch scratch;
+  return scratch;
+}
+
+bool FailJson(OperationContext& ctx, simdjson::error_code code) {
+  ctx.error.Set(ErrorCode::Json, simdjson::error_message(code));
+  return false;
+}
+
 }  // namespace
 
-ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::OtelParser& parser,
-                                 core::FastJsonWriter& res_attrs_writer,
-                                 core::FastJsonWriter& scope_attrs_writer,
-                                 core::FastJsonWriter& log_attrs_writer,
-                                 core::FastJsonWriter& body_writer, core::LuaEmitter& emitter) {
-  auto doc_res = parser.Iterate(raw_json);
-  if (doc_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(doc_res.error())), 0};
-  }
+bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
+                     simdjson::padded_string_view admitted) {
+  LogsScratch& s = Scratch();
+  s.res_attrs_writer.Reset();
+  s.scope_attrs_writer.Reset();
+  s.log_attrs_writer.Reset();
+  s.body_writer.Reset();
+  struct TrimGuard {
+    explicit TrimGuard(LogsScratch& scratch) : s(scratch) {}
+    TrimGuard(const TrimGuard&) = delete;
+    TrimGuard& operator=(const TrimGuard&) = delete;
+    ~TrimGuard() noexcept {
+      s.res_attrs_writer.Trim();
+      s.scope_attrs_writer.Trim();
+      s.log_attrs_writer.Trim();
+      s.body_writer.Trim();
+      core::ResetServiceNameScratch();
+    }
+    LogsScratch& s;
+  } trim_guard{s};
 
+  core::RowEmitter emitter(ctx, s.row);
+
+  auto doc_res = parser.IteratePrepared(admitted);
+  if (doc_res.error() != simdjson::SUCCESS) {
+    return FailJson(ctx, doc_res.error());
+  }
   auto doc = std::move(doc_res.value());
   auto doc_obj_res = doc.get_object();
   if (doc_obj_res.error() != simdjson::SUCCESS) {
-    return ExtractionResult{false, std::string(simdjson::error_message(doc_obj_res.error())), 0};
+    return FailJson(ctx, doc_obj_res.error());
   }
   auto doc_obj = doc_obj_res.value();
 
@@ -107,21 +149,17 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
     rl_res = doc_obj.find_field_unordered("resource_logs");
   }
   if (rl_res.error() != simdjson::SUCCESS) {
-    emitter.Flush();
-    return ExtractionResult{true, "", emitter.EmittedCount()};
+    return true;
   }
-
   auto rl_val = rl_res.value();
   auto rl_arr_res = rl_val.get_array();
   if (rl_arr_res.error() != simdjson::SUCCESS) {
-    emitter.Flush();
-    return ExtractionResult{true, "", emitter.EmittedCount()};
+    return true;
   }
 
   for (auto rl_elem_res : rl_arr_res.value()) {
     if (rl_elem_res.error() != simdjson::SUCCESS) {
-      return ExtractionResult{false, std::string(simdjson::error_message(rl_elem_res.error())),
-                              emitter.EmittedCount()};
+      return FailJson(ctx, rl_elem_res.error());
     }
     auto rl_val_item = rl_elem_res.value();
     auto rl_obj_res = rl_val_item.get_object();
@@ -143,11 +181,10 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
       }
     }
 
-    // 2. Resource service name and attributes
+    // 2. Resource service name and attributes (serialised once per resource)
     std::string_view service_name = "unknown_service";
-    res_attrs_writer.Reset();
+    s.res_attrs_writer.Reset();
     bool has_res_attrs = false;
-
     auto res_res = rl_obj.find_field_unordered("resource");
     if (res_res.error() == simdjson::SUCCESS) {
       auto r_val = res_res.value();
@@ -157,12 +194,12 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
         auto attrs_res = r_obj.find_field_unordered("attributes");
         if (attrs_res.error() == simdjson::SUCCESS) {
           auto attrs_val = attrs_res.value();
-          core::WriteAttributesJson(res_attrs_writer, attrs_val, &service_name);
+          core::WriteAttributesJson(s.res_attrs_writer, attrs_val, &service_name);
           has_res_attrs = true;
         }
       }
     }
-    const std::string_view res_attrs_json = has_res_attrs ? res_attrs_writer.Str() : "{}";
+    const std::string_view res_attrs_json = has_res_attrs ? s.res_attrs_writer.Str() : "{}";
 
     // 3. Iterate scopeLogs
     auto sl_res = rl_obj.find_field_unordered("scopeLogs");
@@ -172,7 +209,6 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
     if (sl_res.error() != simdjson::SUCCESS) {
       continue;
     }
-
     auto sl_val = sl_res.value();
     auto sl_arr_res = sl_val.get_array();
     if (sl_arr_res.error() != simdjson::SUCCESS) {
@@ -181,8 +217,7 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
 
     for (auto sl_elem_res : sl_arr_res.value()) {
       if (sl_elem_res.error() != simdjson::SUCCESS) {
-        return ExtractionResult{false, std::string(simdjson::error_message(sl_elem_res.error())),
-                                emitter.EmittedCount()};
+        return FailJson(ctx, sl_elem_res.error());
       }
       auto sl_val_item = sl_elem_res.value();
       auto sl_obj_res = sl_val_item.get_object();
@@ -204,12 +239,11 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
         }
       }
 
-      // Scope metadata
+      // Scope metadata and attributes
       std::string_view scope_name;
       std::string_view scope_version;
-      scope_attrs_writer.Reset();
+      s.scope_attrs_writer.Reset();
       bool has_scope_attrs = false;
-
       auto scope_res = sl_obj.find_field_unordered("scope");
       if (scope_res.error() == simdjson::SUCCESS) {
         auto scope_val = scope_res.value();
@@ -221,12 +255,12 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
           auto s_attrs_res = s_obj.find_field_unordered("attributes");
           if (s_attrs_res.error() == simdjson::SUCCESS) {
             auto s_attrs_val = s_attrs_res.value();
-            core::WriteAttributesJson(scope_attrs_writer, s_attrs_val);
+            core::WriteAttributesJson(s.scope_attrs_writer, s_attrs_val);
             has_scope_attrs = true;
           }
         }
       }
-      const std::string_view scope_attrs_json = has_scope_attrs ? scope_attrs_writer.Str() : "{}";
+      const std::string_view scope_attrs_json = has_scope_attrs ? s.scope_attrs_writer.Str() : "{}";
 
       // 4. Iterate logRecords
       auto recs_res = sl_obj.find_field_unordered("logRecords");
@@ -236,7 +270,6 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
       if (recs_res.error() != simdjson::SUCCESS) {
         continue;
       }
-
       auto recs_val = recs_res.value();
       auto recs_arr_res = recs_val.get_array();
       if (recs_arr_res.error() != simdjson::SUCCESS) {
@@ -245,8 +278,7 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
 
       for (auto rec_elem_res : recs_arr_res.value()) {
         if (rec_elem_res.error() != simdjson::SUCCESS) {
-          return ExtractionResult{false, std::string(simdjson::error_message(rec_elem_res.error())),
-                                  emitter.EmittedCount()};
+          return FailJson(ctx, rec_elem_res.error());
         }
         auto rec_val_item = rec_elem_res.value();
         auto rec_obj_res = rec_val_item.get_object();
@@ -264,27 +296,26 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
         int64_t sev_num = 0;
         std::string_view body_sv;
         std::string_view event_name;
-        log_attrs_writer.Reset();
+        s.log_attrs_writer.Reset();
         bool has_log_attrs = false;
 
         core::IdHexBuffer trace_id_buf;
         core::IdHexBuffer span_id_buf;
 
+        emitter.StartRecord();
+
         for (auto field_res : rec_obj) {
           if (field_res.error() != simdjson::SUCCESS) {
-            return ExtractionResult{false, std::string(simdjson::error_message(field_res.error())),
-                                    emitter.EmittedCount()};
+            return FailJson(ctx, field_res.error());
           }
           auto k_res = field_res.unescaped_key();
           if (k_res.error() != simdjson::SUCCESS) {
-            return ExtractionResult{false, std::string(simdjson::error_message(k_res.error())),
-                                    emitter.EmittedCount()};
+            return FailJson(ctx, k_res.error());
           }
           std::string_view k = k_res.value();
           auto fv_res = field_res.value();
           if (fv_res.error() != simdjson::SUCCESS) {
-            return ExtractionResult{false, std::string(simdjson::error_message(fv_res.error())),
-                                    emitter.EmittedCount()};
+            return FailJson(ctx, fv_res.error());
           }
           auto fv = fv_res.value();
 
@@ -312,15 +343,15 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
           } else if (k == "severityNumber" || k == "severity_number") {
             sev_num = core::ParseSeverityNumber(fv);
           } else if (k == "body") {
-            body_sv = ExtractBodyView(fv, body_writer);
+            body_sv = ExtractBodyView(fv, s.body_writer);
           } else if (k == "eventName" || k == "event_name") {
             auto s_res = fv.get_string();
             if (s_res.error() == simdjson::SUCCESS) {
               event_name = s_res.value();
             }
           } else if (k == "attributes") {
-            log_attrs_writer.Reset();
-            core::WriteAttributesJson(log_attrs_writer, fv);
+            s.log_attrs_writer.Reset();
+            core::WriteAttributesJson(s.log_attrs_writer, fv);
             has_log_attrs = true;
           }
         }
@@ -330,9 +361,9 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
         }
         std::array<char, 32> ts_buf;
         core::FormatIso8601Nano(t_ns, ts_buf.data());
-        const std::string_view log_attrs_json = has_log_attrs ? log_attrs_writer.Str() : "{}";
 
-        emitter.StartRecord();
+        const std::string_view log_attrs_json = has_log_attrs ? s.log_attrs_writer.Str() : "{}";
+
         emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
         emitter.SetString("TraceId", trace_id);
         emitter.SetString("SpanId", span_id);
@@ -353,73 +384,40 @@ ExtractionResult ProcessLogsImpl(lua_State* L, std::string_view raw_json, core::
 
         emitter.EndRecord();
         if (emitter.HasError()) {
-          return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                  emitter.EmittedCount()};
+          return false;
         }
       }
     }
   }
 
   emitter.Flush();
-  if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-  }
-  return ExtractionResult{true, "", emitter.EmittedCount()};
+  return !emitter.HasError();
 }
 
-ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_idx) {
-  if (L != nullptr && !lua_checkstack(L, 32)) {
-    return ExtractionResult{false, "Lua stack overflow in ProcessLogs", 0};
-  }
-  auto& parser = core::OtelParser::Instance();
-  static thread_local core::FastJsonWriter res_attrs_writer;
-  static thread_local core::FastJsonWriter scope_attrs_writer;
-  static thread_local core::FastJsonWriter log_attrs_writer;
-  static thread_local core::FastJsonWriter body_writer;
+namespace {
 
-  res_attrs_writer.Reset();
-  scope_attrs_writer.Reset();
-  log_attrs_writer.Reset();
-  body_writer.Reset();
-  struct WriterTrimGuard {
-    WriterTrimGuard(core::FastJsonWriter& writer1, core::FastJsonWriter& writer2,
-                    core::FastJsonWriter& writer3, core::FastJsonWriter& writer4)
-        : w1(writer1), w2(writer2), w3(writer3), w4(writer4) {}
-    WriterTrimGuard(const WriterTrimGuard&) = delete;
-    WriterTrimGuard& operator=(const WriterTrimGuard&) = delete;
-    ~WriterTrimGuard() noexcept {
-      w1.Trim();
-      w2.Trim();
-      w3.Trim();
-      w4.Trim();
-      core::ResetServiceNameScratch();
-    }
-    core::FastJsonWriter& w1;
-    core::FastJsonWriter& w2;
-    core::FastJsonWriter& w3;
-    core::FastJsonWriter& w4;
-  } trim_guard{res_attrs_writer, scope_attrs_writer, log_attrs_writer, body_writer};
+struct TableScratch {
+  std::string res_schema;
+  std::string scope_schema;
+  std::string scope_name;
+  std::string scope_version;
+};
 
-  core::LuaEmitter emitter(L, emit_idx);
-  try {
-    return ProcessLogsImpl(L, raw_json, parser, res_attrs_writer, scope_attrs_writer,
-                           log_attrs_writer, body_writer, emitter);
-  } catch (const std::exception& e) {
-    return ExtractionResult{false, std::string("C++ exception: ") + e.what(),
-                            emitter.EmittedCount()};
-  } catch (...) {
-    return ExtractionResult{false, "Unknown C++ exception", emitter.EmittedCount()};
-  }
+TableScratch& TScratch() {
+  static thread_local TableScratch scratch;
+  return scratch;
 }
 
-ExtractionResult ProcessLogsTableImpl(
-    lua_State* L, int abs_idx, core::LuaEmitter& emitter, core::FastJsonWriter& res_attrs_writer,
-    core::FastJsonWriter& scope_attrs_writer, core::FastJsonWriter& log_attrs_writer,
-    core::FastJsonWriter& body_writer, std::string& tls_res_schema_scratch,
-    std::string& tls_scope_schema_scratch, std::string& tls_scope_name_scratch,
-    std::string& tls_scope_ver_scratch, std::string_view processed_at) {
+// Table-mode extraction. Every Lua access here is a raw, allocation-free read (see read_keys.hpp):
+// this frame is the dispatcher's outer frame and must never see a Lua error. Rows are staged and
+// delivered by the protected emission leaves.
+bool ExtractLogsTableImpl(OperationContext& ctx, LogsScratch& s, TableScratch& t,
+                          std::string_view processed_at) {
+  lua_State* L = ctx.L;
+  core::RowEmitter emitter(ctx, s.row);
+
+  const int abs_idx = lua_absindex(L, ctx.input_index);
   int rl_arr_idx = 0;
-
   if (core::GetTableField(L, abs_idx, "resourceLogs", "resource_logs")) {
     rl_arr_idx = lua_absindex(L, -1);
   } else if (core::GetTableField(L, abs_idx, "log")) {
@@ -431,111 +429,105 @@ ExtractionResult ProcessLogsTableImpl(
       lua_pop(L, 1);
     }
   }
-
   if (rl_arr_idx == 0) {
     rl_arr_idx = abs_idx;
   }
-
   if (!lua_istable(L, rl_arr_idx)) {
-    return ExtractionResult{true, "", 0};
+    return true;
   }
 
-  lua_Integer rl_len = static_cast<lua_Integer>(lua_rawlen(L, rl_arr_idx));
+  const lua_Integer rl_len = static_cast<lua_Integer>(lua_rawlen(L, rl_arr_idx));
   for (lua_Integer i = 1; i <= rl_len; ++i) {
     lua_rawgeti(L, rl_arr_idx, i);
     if (!lua_istable(L, -1)) {
       lua_pop(L, 1);
       continue;
     }
-    int rl_obj_idx = lua_absindex(L, -1);
+    const int rl_obj_idx = lua_absindex(L, -1);
 
     // 1. Resource schema URL
     std::string_view resource_schema_url =
-        core::ReadTableStringView(L, rl_obj_idx, "schemaUrl", "schema_url", tls_res_schema_scratch);
+        core::ReadTableStringView(L, rl_obj_idx, "schemaUrl", "schema_url", t.res_schema);
 
-    // 2. Resource service name & attributes (single pass)
+    // 2. Resource service name & attributes (single pass, serialised once per resource)
     std::string_view service_name = "unknown_service";
-    res_attrs_writer.Reset();
+    s.res_attrs_writer.Reset();
     bool has_res_attrs = false;
-
     if (core::GetTableField(L, rl_obj_idx, "resource")) {
-      int res_idx = lua_absindex(L, -1);
+      const int res_idx = lua_absindex(L, -1);
       if (core::GetTableField(L, res_idx, "attributes")) {
-        core::WriteTableAttributesJson(L, -1, res_attrs_writer, &service_name);
+        core::WriteTableAttributesJson(L, -1, s.res_attrs_writer, &service_name);
         has_res_attrs = true;
         lua_pop(L, 1);  // pop attributes
       }
       lua_pop(L, 1);  // pop resource
     }
-    const std::string_view res_attrs_json = has_res_attrs ? res_attrs_writer.Str() : "{}";
+    const std::string_view res_attrs_json = has_res_attrs ? s.res_attrs_writer.Str() : "{}";
 
     // 3. Iterate scopeLogs
     if (!core::GetTableField(L, rl_obj_idx, "scopeLogs", "scope_logs")) {
       lua_pop(L, 1);  // pop rl_obj
       continue;
     }
-    int sl_arr_idx = lua_absindex(L, -1);
+    const int sl_arr_idx = lua_absindex(L, -1);
     if (!lua_istable(L, sl_arr_idx)) {
       lua_pop(L, 2);  // pop sl_arr and rl_obj
       continue;
     }
 
-    lua_Integer sl_len = static_cast<lua_Integer>(lua_rawlen(L, sl_arr_idx));
+    const lua_Integer sl_len = static_cast<lua_Integer>(lua_rawlen(L, sl_arr_idx));
     for (lua_Integer j = 1; j <= sl_len; ++j) {
       lua_rawgeti(L, sl_arr_idx, j);
       if (!lua_istable(L, -1)) {
         lua_pop(L, 1);
         continue;
       }
-      int sl_obj_idx = lua_absindex(L, -1);
+      const int sl_obj_idx = lua_absindex(L, -1);
 
-      std::string_view scope_schema_url = core::ReadTableStringView(
-          L, sl_obj_idx, "schemaUrl", "schema_url", tls_scope_schema_scratch);
+      std::string_view scope_schema_url =
+          core::ReadTableStringView(L, sl_obj_idx, "schemaUrl", "schema_url", t.scope_schema);
       std::string_view scope_name;
       std::string_view scope_version;
-      scope_attrs_writer.Reset();
+      s.scope_attrs_writer.Reset();
       bool has_scope_attrs = false;
 
       if (core::GetTableField(L, sl_obj_idx, "scope")) {
-        int s_idx = lua_absindex(L, -1);
-        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, tls_scope_name_scratch);
-        scope_version =
-            core::ReadTableStringView(L, s_idx, "version", nullptr, tls_scope_ver_scratch);
+        const int s_idx = lua_absindex(L, -1);
+        scope_name = core::ReadTableStringView(L, s_idx, "name", nullptr, t.scope_name);
+        scope_version = core::ReadTableStringView(L, s_idx, "version", nullptr, t.scope_version);
         if (core::GetTableField(L, s_idx, "attributes")) {
-          core::WriteTableAttributesJson(L, -1, scope_attrs_writer);
+          core::WriteTableAttributesJson(L, -1, s.scope_attrs_writer);
           has_scope_attrs = true;
           lua_pop(L, 1);  // pop attributes
         }
         lua_pop(L, 1);  // pop scope
       }
-      const std::string_view scope_attrs_json = has_scope_attrs ? scope_attrs_writer.Str() : "{}";
+      const std::string_view scope_attrs_json = has_scope_attrs ? s.scope_attrs_writer.Str() : "{}";
 
       // 4. Iterate logRecords
       if (core::GetTableField(L, sl_obj_idx, "logRecords", "log_records")) {
-        int recs_arr_idx = lua_absindex(L, -1);
+        const int recs_arr_idx = lua_absindex(L, -1);
         if (lua_istable(L, recs_arr_idx)) {
-          lua_Integer recs_len = static_cast<lua_Integer>(lua_rawlen(L, recs_arr_idx));
+          const lua_Integer recs_len = static_cast<lua_Integer>(lua_rawlen(L, recs_arr_idx));
           for (lua_Integer k = 1; k <= recs_len; ++k) {
             lua_rawgeti(L, recs_arr_idx, k);
             if (!lua_istable(L, -1)) {
               lua_pop(L, 1);
               continue;
             }
-            int rec_obj_idx = lua_absindex(L, -1);
+            const int rec_obj_idx = lua_absindex(L, -1);
 
             emitter.StartRecord();
 
             // 1. Timestamp
-            uint64_t t_ns = core::ReadTableTimestampNano(L, rec_obj_idx);
+            const uint64_t t_ns = core::ReadTableTimestampNano(L, rec_obj_idx);
             std::array<char, 32> ts_buf;
             core::FormatIso8601Nano(t_ns, ts_buf.data());
             emitter.SetString("Timestamp", std::string_view(ts_buf.data(), 30));
 
-            // 2. TraceId
+            // 2. TraceId, 3. SpanId
             core::CopyIdField(L, rec_obj_idx, "traceId", "trace_id", core::kTraceIdBinaryLen,
                               emitter, "TraceId", "TraceId");
-
-            // 3. SpanId
             core::CopyIdField(L, rec_obj_idx, "spanId", "span_id", core::kSpanIdBinaryLen, emitter,
                               "SpanId", "SpanId");
 
@@ -555,51 +547,36 @@ ExtractionResult ProcessLogsTableImpl(
             }
             emitter.SetInt64("SeverityNumber", sev_num);
 
-            // 7. ServiceName
+            // 7. ServiceName, 8. Body, 9. ResourceSchemaUrl
             emitter.SetString("ServiceName", service_name);
-
-            // 8. Body
-            core::CopyTableBody(L, rec_obj_idx, body_writer, emitter);
-
-            // 9. ResourceSchemaUrl
+            core::CopyTableBody(L, rec_obj_idx, s.body_writer, emitter);
             emitter.SetString("ResourceSchemaUrl", resource_schema_url);
 
-            // 10. ResourceAttributes
+            // 10-14. resource / scope attributes (JSON strings) and scope metadata
             emitter.SetString("ResourceAttributes", res_attrs_json);
-
-            // 11. ScopeSchemaUrl
             emitter.SetString("ScopeSchemaUrl", scope_schema_url);
-
-            // 12. ScopeName
             emitter.SetString("ScopeName", scope_name);
-
-            // 13. ScopeVersion
             emitter.SetString("ScopeVersion", scope_version);
-
-            // 14. ScopeAttributes
             emitter.SetString("ScopeAttributes", scope_attrs_json);
 
-            // 15. LogAttributes
-            log_attrs_writer.Reset();
+            // 15. LogAttributes (a JSON object string, "{}" when absent)
+            s.log_attrs_writer.Reset();
             bool has_log_attrs = false;
             if (core::GetTableField(L, rec_obj_idx, "attributes")) {
-              core::WriteTableAttributesJson(L, -1, log_attrs_writer);
+              core::WriteTableAttributesJson(L, -1, s.log_attrs_writer);
               has_log_attrs = true;
               lua_pop(L, 1);  // pop attributes
             }
-            emitter.SetString("LogAttributes", has_log_attrs ? log_attrs_writer.Str() : "{}");
+            emitter.SetString("LogAttributes", has_log_attrs ? s.log_attrs_writer.Str() : "{}");
 
-            // 16. EventName
+            // 16. EventName, 17. processed_at
             core::CopyStringField(L, rec_obj_idx, "eventName", "event_name", emitter, "EventName");
-
-            // 17. processed_at
             emitter.SetString("processed_at", processed_at);
 
             emitter.EndRecord();
             lua_pop(L, 1);  // pop rec_obj
             if (emitter.HasError()) {
-              return ExtractionResult{false, std::string(emitter.ErrorMessage()),
-                                      emitter.EmittedCount()};
+              return false;
             }
           }
         }
@@ -612,82 +589,66 @@ ExtractionResult ProcessLogsTableImpl(
   }
 
   emitter.Flush();
-  if (emitter.HasError()) {
-    return ExtractionResult{false, std::string(emitter.ErrorMessage()), emitter.EmittedCount()};
-  }
-  return ExtractionResult{true, "", emitter.EmittedCount()};
+  return !emitter.HasError();
 }
 
-ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
-  if (!lua_checkstack(L, 32)) {
-    return ExtractionResult{false, "Lua stack overflow in ProcessLogsTable", 0};
-  }
-  const int entry_top = lua_gettop(L);
-  int abs_idx = lua_absindex(L, table_idx);
-  int abs_emit_idx = lua_absindex(L, emit_idx);
-  if (!lua_istable(L, abs_idx)) {
-    return ExtractionResult{false, "payload must be a table", 0};
-  }
+}  // namespace
 
-  static thread_local core::FastJsonWriter res_attrs_writer;
-  static thread_local core::FastJsonWriter scope_attrs_writer;
-  static thread_local core::FastJsonWriter log_attrs_writer;
-  static thread_local core::FastJsonWriter body_writer;
-  static thread_local std::string tls_res_schema_scratch;
-  static thread_local std::string tls_scope_schema_scratch;
-  static thread_local std::string tls_scope_name_scratch;
-  static thread_local std::string tls_scope_ver_scratch;
-  res_attrs_writer.Reset();
-  scope_attrs_writer.Reset();
-  log_attrs_writer.Reset();
-  body_writer.Reset();
-  core::ReserveScratchString(tls_res_schema_scratch, 128);
-  core::ReserveScratchString(tls_scope_schema_scratch, 128);
-  core::ReserveScratchString(tls_scope_name_scratch, 128);
-  core::ReserveScratchString(tls_scope_ver_scratch, 64);
-  struct TableScopeGuard {
-    TableScopeGuard(lua_State* l, int t, core::FastJsonWriter& w1, core::FastJsonWriter& w2,
-                    core::FastJsonWriter& w3, core::FastJsonWriter& w4)
-        : L(l), top(t), writer1(w1), writer2(w2), writer3(w3), writer4(w4) {}
-    TableScopeGuard(const TableScopeGuard&) = delete;
-    TableScopeGuard& operator=(const TableScopeGuard&) = delete;
-    ~TableScopeGuard() noexcept {
-      if (L != nullptr) {
-        lua_settop(L, top);
-      }
-      writer1.Trim();
-      writer2.Trim();
-      writer3.Trim();
-      writer4.Trim();
-      core::ResetScratchString(tls_res_schema_scratch);
-      core::ResetScratchString(tls_scope_schema_scratch);
-      core::ResetScratchString(tls_scope_name_scratch);
-      core::ResetScratchString(tls_scope_ver_scratch);
+bool ExtractLogsTable(OperationContext& ctx) {
+  LogsScratch& s = Scratch();
+  TableScratch& t = TScratch();
+  s.res_attrs_writer.Reset();
+  s.scope_attrs_writer.Reset();
+  s.log_attrs_writer.Reset();
+  s.body_writer.Reset();
+  core::ReserveScratchString(t.res_schema, 128);
+  core::ReserveScratchString(t.scope_schema, 128);
+  core::ReserveScratchString(t.scope_name, 128);
+  core::ReserveScratchString(t.scope_version, 64);
+  struct Guard {
+    Guard(lua_State* l, int top, LogsScratch& scratch, TableScratch& table)
+        : L(l), entry_top(top), s(scratch), t(table) {}
+    Guard(const Guard&) = delete;
+    Guard& operator=(const Guard&) = delete;
+    ~Guard() noexcept {
+      lua_settop(L, entry_top);
+      s.res_attrs_writer.Trim();
+      s.scope_attrs_writer.Trim();
+      s.log_attrs_writer.Trim();
+      s.body_writer.Trim();
+      core::ResetServiceNameScratch();
+      core::ResetScratchString(t.res_schema);
+      core::ResetScratchString(t.scope_schema);
+      core::ResetScratchString(t.scope_name);
+      core::ResetScratchString(t.scope_version);
     }
     lua_State* L;
-    int top;
-    core::FastJsonWriter& writer1;
-    core::FastJsonWriter& writer2;
-    core::FastJsonWriter& writer3;
-    core::FastJsonWriter& writer4;
-  } scope_guard{L, entry_top, res_attrs_writer, scope_attrs_writer, log_attrs_writer, body_writer};
+    int entry_top;
+    LogsScratch& s;
+    TableScratch& t;
+  } guard{ctx.L, lua_gettop(ctx.L), s, t};
 
   std::array<char, 32> proc_buf;
   core::FormatIso8601Nano(core::CurrentTimeUnixNano(), proc_buf.data());
-  std::string_view processed_at(proc_buf.data(), 30);
-  core::LuaEmitter emitter(L, abs_emit_idx);
-
-  try {
-    return ProcessLogsTableImpl(L, abs_idx, emitter, res_attrs_writer, scope_attrs_writer,
-                                log_attrs_writer, body_writer, tls_res_schema_scratch,
-                                tls_scope_schema_scratch, tls_scope_name_scratch,
-                                tls_scope_ver_scratch, processed_at);
-  } catch (const std::exception& e) {
-    return ExtractionResult{false, std::string("C++ exception: ") + e.what(),
-                            emitter.EmittedCount()};
-  } catch (...) {
-    return ExtractionResult{false, "Unknown C++ exception", emitter.EmittedCount()};
-  }
+  return ExtractLogsTableImpl(ctx, s, t, std::string_view(proc_buf.data(), 30));
 }
+
+// ---- compatibility entry points ---------------------------------------------------------------
+
+namespace {
+constexpr core::SignalExtractors kLogsExtractors{ExtractLogsJson, ExtractLogsTable};
+}
+
+ExtractionResult ProcessLogs(lua_State* L, std::string_view raw_json, int emit_idx) {
+  return core::RunCompatJson(L, core::ModuleKind::Otel, core::Signal::Logs, kLogsExtractors,
+                             raw_json, emit_idx);
+}
+
+ExtractionResult ProcessLogsTable(lua_State* L, int table_idx, int emit_idx) {
+  return core::RunCompatTable(L, core::ModuleKind::Otel, core::Signal::Logs, kLogsExtractors,
+                              table_idx, emit_idx);
+}
+
+const core::SignalExtractors& LogsExtractors() { return kLogsExtractors; }
 
 }  // namespace vector_otel::extractors

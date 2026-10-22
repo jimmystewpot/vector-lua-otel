@@ -4,6 +4,8 @@ extern "C" {
 }
 
 #include "vector_otel/core/module_runner.hpp"
+#include "vector_otel/core/module_state.hpp"
+#include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/native_extractors/native_logs_extractor.hpp"
 #include "vector_otel/native_extractors/native_metrics_extractor.hpp"
 #include "vector_otel/native_extractors/native_traces_extractor.hpp"
@@ -14,18 +16,18 @@ namespace core = vector_otel::core;
 namespace native_extractors = vector_otel::native_extractors;
 
 int ProcessNativeLogsFn(lua_State* L) {
-  return core::ProcessDispatcher<native_extractors::ProcessNativeLogs,
-                                 native_extractors::ProcessNativeLogsTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Native, core::Signal::Logs,
+                               native_extractors::NativeLogsExtractors());
 }
 
 int ProcessNativeTracesFn(lua_State* L) {
-  return core::ProcessDispatcher<native_extractors::ProcessNativeTraces,
-                                 native_extractors::ProcessNativeTracesTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Native, core::Signal::Traces,
+                               native_extractors::NativeTracesExtractors());
 }
 
 int ProcessNativeMetricsFn(lua_State* L) {
-  return core::ProcessDispatcher<native_extractors::ProcessNativeMetrics,
-                                 native_extractors::ProcessNativeMetricsTable>(L);
+  return core::DispatchProcess(L, core::ModuleKind::Native, core::Signal::Metrics,
+                               native_extractors::NativeMetricsExtractors());
 }
 
 const luaL_Reg kLogsFuncs[] = {
@@ -48,22 +50,19 @@ const luaL_Reg kMetricsFuncs[] = {
 extern "C" {
 
 int luaopen_vector_native_logs(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kLogsFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Native, kLogsFuncs);
   core::RegisterInPackageLoaded(L, "vector_native.logs", -1);
   return 1;
 }
 
 int luaopen_vector_native_traces(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kTracesFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Native, kTracesFuncs);
   core::RegisterInPackageLoaded(L, "vector_native.traces", -1);
   return 1;
 }
 
 int luaopen_vector_native_metrics(lua_State* L) {
-  lua_newtable(L);
-  luaL_setfuncs(L, kMetricsFuncs, 0);
+  core::OpenSignalTable(L, core::ModuleKind::Native, kMetricsFuncs);
   core::RegisterInPackageLoaded(L, "vector_native.metrics", -1);
   return 1;
 }

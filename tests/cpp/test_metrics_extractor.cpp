@@ -4,7 +4,7 @@
 #include <sstream>
 #include <string>
 
-#include "vector_otel/core/lua_bridge.hpp"
+#include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/core/timestamp.hpp"
 #include "vector_otel/extractors/metrics_extractor.hpp"
 
@@ -1695,7 +1695,7 @@ TEST_F(MetricsExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResource
 // Batch mode only: when a later batch fails in emit, the result reports only the rows whose
 // emit call succeeded (the first full batch), not the rows queued for the failed batch.
 TEST_F(MetricsExtractorTest, BatchModeEmitFailureReportsOnlyDeliveredRows) {
-  if (::vector_otel::core::kCompileTimeBatchSize != 3) {
+  if (::vector_otel::core::kEmitBatchSize != 3) {
     GTEST_SKIP() << "requires VECTOR_OTEL_EMIT_BATCH_SIZE == 3";
   }
   ASSERT_EQ(luaL_dostring(L_, R"(

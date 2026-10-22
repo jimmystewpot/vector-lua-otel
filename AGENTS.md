@@ -29,7 +29,7 @@ Every modification to this repository **must** strictly adhere to the following 
 
 3. **Non-Throwing C API / FFI Boundary Contract**:
    - **Never allow C++ exceptions or Lua panics to escape** across the C API boundary.
-   - All `lua_CFunction` entry points (`ProcessDispatcher` in `include/vector_otel/core/module_runner.hpp`) must wrap processing in `try ... catch` blocks.
+   - All `lua_CFunction` entry points go through `DispatchProcess` (`include/vector_otel/core/process_runner.hpp`), which runs the whole extraction inside one protected region (C++ `try ... catch` plus `lua_pcall`-protected Lua operations) and converts every failure — allocation failure, Lua error, callback error, oversized input — into the error return below. No raising Lua API call may run outside a protected frame.
    - **Success return**: `(integer count, nil)` (pushes count, then `nil`).
    - **Failure return**: `(nil, string error_message, integer partial_count)` (pushes `nil`, error string, then partial count).
    - **Why `nil` first?** In Lua, `0` is truthy (`not 0 == false`). A return of `0` on error would bypass `if not count then` guards. Returning `nil` ensures Lua error checks work correctly.
@@ -116,16 +116,25 @@ Every modification to this repository **must** strictly adhere to the following 
 ├── scripts/
 │   ├── vendor_deps.sh                  # Fetch and vendor a dependency; verify checksums
 │   ├── verify_offline_build.sh         # Test offline build in Docker container
+│   ├── test_limit_builds.sh            # Payload-limit (VECTOR_OTEL_MAX_PAYLOAD_BYTES) build matrix
 │   └── offline/Dockerfile              # Ubuntu 22.04 verification environment
 ├── .gitattributes                      # Binary/text attributes for vendored trees
 ├── include/vector_otel/
 │   ├── core/
+│   │   ├── admission.hpp               # Input admission (2048-record / byte limits, preflight)
 │   │   ├── fast_json_writer.hpp        # Allocation-free JSON serialiser
-│   │   ├── lua_bridge.hpp              # Lua stack management & batch emitter
-│   │   ├── module_runner.hpp           # Shared ProcessDispatcher & package.loaded helper
+│   │   ├── module_runner.hpp           # Active-extraction guard & package.loaded helper
+│   │   ├── module_state.hpp            # Per-Lua-state module anchor (registry slots)
+│   │   ├── operation_context.hpp       # Per-call context: state, limits, error code
 │   │   ├── otlp_common.hpp             # Shared AnyValue decoding & attributes
 │   │   ├── parser.hpp                  # simdjson ondemand & padding manager
-│   │   ├── table_reader.hpp            # Lua table traversal & native timestamp parser
+│   │   ├── process_runner.hpp          # DispatchProcess: the single protected entry path
+│   │   ├── protected_lua.hpp           # lua_pcall-wrapped (non-raising) Lua operations
+│   │   ├── read_keys.hpp               # Compile-time table-read keys
+│   │   ├── row_emitter.hpp             # Row delivery to the emit callback (N=1 / N>1)
+│   │   ├── scratch.hpp                 # Reusable thread_local scratch strings
+│   │   ├── staged_row.hpp              # Allocation-free staged row -> Lua table materialiser
+│   │   ├── table_reader.hpp            # Non-raising Lua table reads & native timestamp parser
 │   │   └── timestamp.hpp               # ISO-8601 nanosecond UTC formatter & RFC-3339 parser
 │   ├── extractors/
 │   │   ├── logs_extractor.hpp          # OTLP logs -> ClickHouse columns
@@ -142,7 +151,8 @@ Every modification to this repository **must** strictly adhere to the following 
 │   ├── module.cpp                      # luaopen_vector_otel & submodule bindings
 │   └── native_module.cpp               # luaopen_vector_native & submodule bindings
 ├── tests/
-│   ├── cpp/                            # GoogleTest C++ test suite
+│   ├── cpp/                            # GoogleTest C++ test suites (unit, fault, worker isolation)
+│   ├── support/                        # Fault allocators, process fixtures, legacy reference oracle
 │   ├── lua/                            # Standalone Lua 5.4 test suite & GC checks
 │   │   ├── run_tests.sh                # Test runner script
 │   │   ├── test_vector_otel.lua        # OTLP functional & 50k-loop leak tests
@@ -151,6 +161,7 @@ Every modification to this repository **must** strictly adhere to the following 
 │       ├── vector_test.yaml            # Vector OTLP-decoded pipeline config
 │       └── vector_native_test.yaml     # Vector native event + trace_to_log pipeline config
 ├── bench/                              # Benchmark harness & comparative scripts
+│   ├── extraction_latency.cpp          # Opt-in per-call latency driver (BUILD_EXTRACTION_BENCHMARKS)
 │   ├── compare.sh                      # Automated VRL vs Lua comparison runner
 │   ├── gen_fixtures.py                 # OTLP test fixture generator
 │   └── run.sh                          # Single-configuration benchmark harness
@@ -189,6 +200,14 @@ vector validate --no-environment tests/vector/vector_test.yaml tests/vector/vect
 *(If `vector` is installed or available in `/tmp/vector-bench/`)*
 **Expected**: `Validated` (exit code 0).
 
+### Step 3b: Worker Isolation, Limits and Thread Safety
+```bash
+./build/vector_otel_worker_tests                 # 8 concurrent states; also run at VECTOR_OTEL_EMIT_BATCH_SIZE=3
+bash scripts/test_limit_builds.sh                # payload-limit matrix (default/8 MiB/32 MiB + configure-only)
+cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON && cmake --build build-tsan --target vector_otel_worker_tests && ./build-tsan/vector_otel_worker_tests
+```
+**Expected**: all pass; TSan reports nothing. Also run `./build/vector_otel_fault_tests` (allocator fault injection, un-sanitised builds only) at the default batch size 1 and again from a `-DVECTOR_OTEL_EMIT_BATCH_SIZE=3` build, plus `./build-n3/vector_otel_tests --gtest_filter='*BatchMode*'`.
+
 ### Step 4: Formatting Verification
 ```bash
 find include src tests/cpp -type f \( -name "*.h" -o -name "*.hpp" -o -name "*.c" -o -name "*.cpp" \) | xargs -r clang-format --dry-run --Werror
@@ -209,7 +228,7 @@ cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
 cmake --build build-asan -j$(nproc)
 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ctest --test-dir build-asan --output-on-failure
 ```
-**Expected**: 100% tests passing (`vector_otel_tests`) with 0 ASAN/UBSAN errors.
+**Expected**: 100% tests passing (`vector_otel_tests`, `vector_otel_worker_tests`) with 0 ASAN/UBSAN errors. `vector_otel_fault_tests` is not built when `ENABLE_SANITIZERS`/`ENABLE_TSAN` is on (it replaces global `operator new`).
 *(Note: `tests/lua/run_tests.sh` is not run under ASAN because loading an ASAN-instrumented `vector_otel.so` or `vector_native.so` into an uninstrumented system `lua5.4` binary requires `LD_PRELOAD` of the ASAN runtime.)*
 
 ---

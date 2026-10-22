@@ -5,7 +5,7 @@
 #include <string_view>
 #include <vector>
 
-#include "vector_otel/core/lua_bridge.hpp"
+#include "vector_otel/core/process_runner.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 
 extern "C" {
@@ -793,7 +793,7 @@ TEST_F(LogsExtractorTest, JsonModeServiceNameEmbeddedNulAndEmptyPreserved) {
 // Batch mode only: a parse error fails the whole call. Rows still queued (not yet passed to
 // emit) are discarded and must not be counted as emitted.
 TEST_F(LogsExtractorTest, BatchModeParseErrorDiscardsQueuedRows) {
-  if (::vector_otel::core::kCompileTimeBatchSize <= 1) {
+  if (::vector_otel::core::kEmitBatchSize <= 1) {
     GTEST_SKIP() << "requires VECTOR_OTEL_EMIT_BATCH_SIZE > 1";
   }
   ASSERT_EQ(luaL_dostring(L_, R"(

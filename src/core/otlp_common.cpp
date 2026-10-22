@@ -19,24 +19,6 @@ namespace {
 thread_local std::string tls_service_name_scratch;
 thread_local std::string tls_snake_service_name_scratch;
 
-// Helper to capture and safely copy service.name from Lua stack into scratch.
-// Returns string_view into tls_service_name_scratch if scalar string found,
-// otherwise returns "unknown_service".
-std::string_view CaptureServiceName(lua_State* L, bool is_scalar_str) noexcept {
-  if (!is_scalar_str) {
-    return "unknown_service";
-  }
-  size_t slen = 0;
-  const char* s = lua_tolstring(L, -1, &slen);
-  if (s == nullptr || slen == 0) {
-    return "unknown_service";
-  }
-  // Copy into thread-local scratch (preserves embedded NULs)
-  ReserveScratchString(tls_service_name_scratch, 128);
-  tls_service_name_scratch.assign(s, slen);
-  return std::string_view(tls_service_name_scratch);
-}
-
 constexpr char kHexDigits[] = "0123456789abcdef";
 
 inline void HexEncode(std::string_view raw, char* out) noexcept {
@@ -574,22 +556,22 @@ double ParseDouble(simdjson::ondemand::value& val) {
   return d;
 }
 
+// ---- staged attributes (no Lua) ---------------------------------------------------------------
+
 namespace {
 
-bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer) {
-  if (L == nullptr) {
-    return false;
-  }
+// Stages one AnyValue under `key`. Mirrors PushAnyValueScalar(): unsupported values stage nothing.
+// Returns true (and sets `*text`) when the value is a scalar string.
+bool StageAnyValueImpl(StagedRow& row, Key key, simdjson::ondemand::value& val,
+                       FastJsonWriter& json_writer, std::string_view* text) {
   auto type_res = val.type();
   if (type_res.error() != simdjson::SUCCESS) {
-    lua_pushnil(L);
     return false;
   }
   auto type = type_res.value();
   if (type == simdjson::ondemand::json_type::object) {
     auto obj_res = val.get_object();
     if (obj_res.error() != simdjson::SUCCESS) {
-      lua_pushnil(L);
       return false;
     }
     auto obj = obj_res.value();
@@ -610,37 +592,28 @@ bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWr
         if (k == "stringValue" || k == "string_value") {
           auto s_res = fv.get_string();
           if (s_res.error() == simdjson::SUCCESS) {
-            auto s = s_res.value();
-            lua_pushlstring(L, s.data(), s.size());
+            const std::string_view s = s_res.value();
+            row.Str(key, s);
+            if (text != nullptr) *text = s;
             matched = true;
             is_scalar_string = true;
             break;
           }
         } else if (k == "intValue" || k == "int_value") {
-          int64_t i = ParseInt64(fv);
-          lua_pushinteger(L, static_cast<lua_Integer>(i));
+          row.Int(key, ParseInt64(fv));
           matched = true;
           break;
         } else if (k == "uintValue" || k == "uint_value") {
-          uint64_t u = ParseUint64(fv);
-          lua_Integer clamped = u > static_cast<uint64_t>(INT64_MAX)
-                                    ? std::numeric_limits<lua_Integer>::max()
-                                    : static_cast<lua_Integer>(u);
-          lua_pushinteger(L, clamped);
+          row.Uint(key, ParseUint64(fv));  // clamped to INT64_MAX by the row
           matched = true;
           break;
         } else if (k == "doubleValue" || k == "double_value") {
-          lua_pushnumber(L, ParseDouble(fv));
+          row.Dbl(key, ParseDouble(fv));
           matched = true;
           break;
         } else if (k == "boolValue" || k == "bool_value") {
           auto b_res = fv.get_bool();
-          if (b_res.error() == simdjson::SUCCESS) {
-            lua_pushboolean(L, b_res.value() ? 1 : 0);
-            matched = true;
-            break;
-          }
-          lua_pushboolean(L, 0);
+          row.Bool(key, b_res.error() == simdjson::SUCCESS ? b_res.value() : false);
           matched = true;
           break;
         } else if (k == "arrayValue" || k == "array_value" || k == "kvlistValue" ||
@@ -660,9 +633,7 @@ bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWr
             json_writer.EndObject();
           }
           json_writer.EndObject();
-
-          std::string_view sv = json_writer.Str();
-          lua_pushlstring(L, sv.data(), sv.size());
+          row.Str(key, json_writer.Str());
           matched = true;
           break;
         }
@@ -686,51 +657,37 @@ bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWr
         json_writer.Null();
       }
     }
-    if (!matched) {
-      if (has_plain_fields) {
-        json_writer.EndObject();
-        std::string_view sv = json_writer.Str();
-        lua_pushlstring(L, sv.data(), sv.size());
-      } else {
-        lua_pushnil(L);
-      }
+    if (!matched && has_plain_fields) {
+      json_writer.EndObject();
+      row.Str(key, json_writer.Str());
     }
     return is_scalar_string;
   } else if (type == simdjson::ondemand::json_type::string) {
     auto s_res = val.get_string();
     if (s_res.error() == simdjson::SUCCESS) {
-      auto s = s_res.value();
-      lua_pushlstring(L, s.data(), s.size());
+      const std::string_view s = s_res.value();
+      row.Str(key, s);
+      if (text != nullptr) *text = s;
       return true;
-    } else {
-      lua_pushnil(L);
-      return false;
     }
+    return false;
   } else if (type == simdjson::ondemand::json_type::number) {
     auto num_res = val.get_number();
     if (num_res.error() == simdjson::SUCCESS) {
       auto num = num_res.value();
       if (num.is_int64()) {
-        lua_pushinteger(L, static_cast<lua_Integer>(num.get_int64()));
+        row.Int(key, num.get_int64());
       } else if (num.is_uint64()) {
-        uint64_t u = num.get_uint64();
-        lua_Integer clamped = u > static_cast<uint64_t>(INT64_MAX)
-                                  ? std::numeric_limits<lua_Integer>::max()
-                                  : static_cast<lua_Integer>(u);
-        lua_pushinteger(L, clamped);
+        row.Uint(key, num.get_uint64());
       } else {
-        lua_pushnumber(L, num.get_double());
+        row.Dbl(key, num.get_double());
       }
-    } else {
-      lua_pushnil(L);
     }
     return false;
   } else if (type == simdjson::ondemand::json_type::boolean) {
     auto b_res = val.get_bool();
     if (b_res.error() == simdjson::SUCCESS) {
-      lua_pushboolean(L, b_res.value() ? 1 : 0);
-    } else {
-      lua_pushnil(L);
+      row.Bool(key, b_res.value());
     }
     return false;
   } else if (type == simdjson::ondemand::json_type::array) {
@@ -746,31 +703,34 @@ bool PushAnyValueScalar(lua_State* L, simdjson::ondemand::value& val, FastJsonWr
       json_writer.StartArray();
       json_writer.EndArray();
     }
-    std::string_view sv = json_writer.Str();
-    lua_pushlstring(L, sv.data(), sv.size());
-    return false;
-  } else {
-    lua_pushnil(L);
+    row.Str(key, json_writer.Str());
     return false;
   }
+  return false;
+}
+
+// service.name capture: last matching key wins; anything but a non-empty scalar string resets to
+// "unknown_service" (exactly CaptureServiceName() above).
+void CaptureServiceNameText(bool is_scalar_str, std::string_view text,
+                            std::string_view* out_service_name) {
+  if (!is_scalar_str || text.empty()) {
+    *out_service_name = "unknown_service";
+    return;
+  }
+  ReserveScratchString(tls_service_name_scratch, 128);
+  tls_service_name_scratch.assign(text.data(), text.size());
+  *out_service_name = std::string_view(tls_service_name_scratch);
 }
 
 }  // namespace
 
-void PushAnyValue(lua_State* L, simdjson::ondemand::value& val, FastJsonWriter& json_writer) {
-  (void)PushAnyValueScalar(L, val, json_writer);
+bool StageAnyValue(StagedRow& row, Key key, simdjson::ondemand::value& val,
+                   FastJsonWriter& json_writer, std::string_view* scalar_text) {
+  return StageAnyValueImpl(row, key, val, json_writer, scalar_text);
 }
 
-void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
-                         FastJsonWriter& json_writer, std::string_view* out_service_name) {
-  if (L == nullptr) {
-    return;
-  }
-  if (!lua_checkstack(L, 8)) {
-    throw std::runtime_error("Lua stack overflow in PushAttributesTable");
-  }
-  lua_newtable(L);
-
+void StageAttributeFields(StagedRow& row, simdjson::ondemand::value& attrs_val,
+                          FastJsonWriter& json_writer, std::string_view* out_service_name) {
   auto type_res = attrs_val.type();
   if (type_res.error() != simdjson::SUCCESS) {
     return;
@@ -799,12 +759,11 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
       if (val_res.error() != simdjson::SUCCESS) continue;
       auto v = val_res.value();
 
-      lua_pushlstring(L, k.data(), k.size());
-      const bool is_scalar_str = PushAnyValueScalar(L, v, json_writer);
+      std::string_view text;
+      const bool is_scalar_str = StageAnyValueImpl(row, Key::Dynamic(k), v, json_writer, &text);
       if (out_service_name != nullptr && (k == "service.name" || k == "service_name")) {
-        *out_service_name = CaptureServiceName(L, is_scalar_str);
+        CaptureServiceNameText(is_scalar_str, text, out_service_name);
       }
-      lua_rawset(L, -3);
     }
   } else if (type == simdjson::ondemand::json_type::object) {
     auto obj_res = attrs_val.get_object();
@@ -821,14 +780,20 @@ void PushAttributesTable(lua_State* L, simdjson::ondemand::value& attrs_val,
       if (val_res.error() != simdjson::SUCCESS) continue;
       auto v = val_res.value();
 
-      lua_pushlstring(L, k.data(), k.size());
-      const bool is_scalar_str = PushAnyValueScalar(L, v, json_writer);
+      std::string_view text;
+      const bool is_scalar_str = StageAnyValueImpl(row, Key::Dynamic(k), v, json_writer, &text);
       if (out_service_name != nullptr && (k == "service.name" || k == "service_name")) {
-        *out_service_name = CaptureServiceName(L, is_scalar_str);
+        CaptureServiceNameText(is_scalar_str, text, out_service_name);
       }
-      lua_rawset(L, -3);
     }
   }
+}
+
+void StageAttributes(StagedRow& row, Key key, simdjson::ondemand::value& attrs_val,
+                     FastJsonWriter& json_writer, std::string_view* out_service_name) {
+  row.BeginMap(key);
+  StageAttributeFields(row, attrs_val, json_writer, out_service_name);
+  row.End();
 }
 
 namespace {
@@ -1091,7 +1056,7 @@ bool WriteAnyValueJsonImpl(FastJsonWriter& writer, simdjson::ondemand::value& va
 
 void UpdateServiceNameCandidate(std::string_view* out_service_name, std::string_view k,
                                 bool is_scalar_str, std::string_view scalar_str, bool& has_dot_svc,
-                                bool& has_snake_svc) noexcept {
+                                bool& has_snake_svc) {
   if (out_service_name == nullptr) {
     return;
   }
