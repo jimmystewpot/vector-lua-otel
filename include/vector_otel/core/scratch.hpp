@@ -42,4 +42,6 @@ inline void ResetScratchString(std::string& s) noexcept {
   }
 }
 
+inline void TrimScratchString(std::string& s) noexcept { ResetScratchString(s); }
+
 }  // namespace vector_otel::core

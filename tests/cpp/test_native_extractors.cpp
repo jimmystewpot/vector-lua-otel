@@ -952,6 +952,12 @@ TEST_F(NativeExtractorsTest, NativeMetricsTable_HistogramObjectArrayAndSummary) 
     assert(r2.Attributes.route == "/login", "r2.Attributes.route mismatch")
     assert(r2.Value == nil, "r2.Value must be nil for summary")
     assert(r2.Histogram == nil, "r2.Histogram must be nil for summary")
+    assert(type(r2.Summary) == "table", "r2.Summary must be table")
+    assert(r2.Summary.Count == 10 and r2.Summary.count == 10, "r2.Summary.Count mismatch")
+    assert(math.abs(r2.Summary.Sum - 200.0) < 1e-6, "r2.Summary.Sum mismatch")
+    assert(#r2.Summary.QuantileValues == 2, "r2.Summary.QuantileValues length mismatch")
+    assert(math.abs(r2.Summary.QuantileValues[1].Quantile - 0.5) < 1e-6 and math.abs(r2.Summary.QuantileValues[1].Value - 12.3) < 1e-6, "r2.Summary q1 mismatch")
+    assert(math.abs(r2.Summary.QuantileValues[2].Quantile - 0.99) < 1e-6 and math.abs(r2.Summary.QuantileValues[2].Value - 99.1) < 1e-6, "r2.Summary q2 mismatch")
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }
@@ -1149,6 +1155,7 @@ TEST_F(NativeExtractorsTest, NativeMetricsJson_AllSupportedVariants) {
     local m1 = emitted[1].log
     assert(m1.MetricName == "api.req_count", "m1.MetricName mismatch: " .. tostring(m1.MetricName))
     assert(m1.MetricType == "sum", "m1.MetricType mismatch")
+    assert(m1.AggregationTemporality == 1, "m1.AggregationTemporality mismatch: " .. tostring(m1.AggregationTemporality))
     assert(m1.ServiceName == "json-metric-svc", "m1.ServiceName mismatch")
     assert(m1.ResourceAttributes["service.name"] == "json-metric-svc")
     assert(m1.ResourceAttributes["env"] == "prod")
@@ -1170,8 +1177,10 @@ TEST_F(NativeExtractorsTest, NativeMetricsJson_AllSupportedVariants) {
     local m3 = emitted[3].log
     assert(m3.MetricName == "lat_hist")
     assert(m3.MetricType == "histogram")
+    assert(m3.AggregationTemporality == 0)
     assert(m3.Value == nil)
     assert(m3.Histogram.Count == 11)
+    assert(m3.Histogram.AggregationTemporality == 0)
     assert(math.abs(m3.Histogram.Sum - 123.5) < 1e-6)
     assert(#m3.Histogram.ExplicitBounds == 2 and m3.Histogram.ExplicitBounds[1] == 5.0 and m3.Histogram.ExplicitBounds[2] == 25.0)
     assert(#m3.Histogram.BucketCounts == 3 and m3.Histogram.BucketCounts[3] == 1)
@@ -1181,6 +1190,12 @@ TEST_F(NativeExtractorsTest, NativeMetricsJson_AllSupportedVariants) {
     assert(m4.MetricType == "summary")
     assert(m4.Value == nil)
     assert(m4.Histogram == nil)
+    assert(type(m4.Summary) == "table")
+    assert(m4.Summary.Count == 11 and m4.Summary.count == 11)
+    assert(math.abs(m4.Summary.Sum - 123.5) < 1e-6)
+    assert(#m4.Summary.QuantileValues == 2)
+    assert(math.abs(m4.Summary.QuantileValues[1].Quantile - 0.5) < 1e-6 and math.abs(m4.Summary.QuantileValues[1].Value - 4.2) < 1e-6)
+    assert(math.abs(m4.Summary.QuantileValues[2].Quantile - 0.99) < 1e-6 and math.abs(m4.Summary.QuantileValues[2].Value - 21.0) < 1e-6)
     assert(m4.TimeUnix == m4.processed_at)
     assert(m4.StartTimeUnix == "")
   )";
@@ -1265,6 +1280,84 @@ TEST_F(NativeExtractorsTest, Resilience_EmptyJsonMalformedBatchAndDeepNesting) {
     assert(type(deep_span.Events) == "string", "Events must be JSON string")
     assert(string.find(deep_span.Events, "%[max_depth_exceeded%]") ~= nil,
            "Expected [max_depth_exceeded] in Events JSON, got: " .. tostring(deep_span.Events))
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
+}
+
+TEST_F(NativeExtractorsTest, Resilience_NonWrapperSubObjectAndDeepJsonArrays) {
+  // 1. Flat log table containing a non-wrapper log = { file = "auth.rs", line = 42 } sub-object
+  {
+    const char* script = R"(
+      return {
+        message = "user login",
+        log = { file = "auth.rs", line = 42 },
+        resources = { ["service.name"] = "auth-svc" }
+      }
+    )";
+    ASSERT_EQ(luaL_dostring(L_, script), LUA_OK);
+    int table_idx = lua_gettop(L_);
+    auto res = ProcessNativeLogsTable(L_, table_idx, emit_idx_);
+    lua_pop(L_, 1);
+    EXPECT_TRUE(res.success) << res.error;
+    EXPECT_EQ(res.emitted_count, 1);
+  }
+
+  // 2. Flat log JSON with non-wrapper "log" sub-object before "message"
+  {
+    auto res = ProcessNativeLogs(
+        L_, R"({"log":{"file":"auth.rs","line":42},"message":"json login"})", emit_idx_);
+    EXPECT_TRUE(res.success) << res.error;
+    EXPECT_EQ(res.emitted_count, 1);
+  }
+
+  // 3. Deeply nested JSON array (> 16 levels) in span event attributes clamps safely
+  {
+    std::string deep_arr_json =
+        R"({"name":"deep-arr-span","events":[{"name":"ev","attributes":{"arr":)";
+    for (int i = 0; i < 20; ++i) {
+      deep_arr_json += "[";
+    }
+    deep_arr_json += R"({"stringValue":"unwrapped"})";
+    for (int i = 0; i < 20; ++i) {
+      deep_arr_json += "]";
+    }
+    deep_arr_json += "}}]}";
+
+    auto res = ProcessNativeTraces(L_, deep_arr_json, emit_idx_);
+    EXPECT_TRUE(res.success) << res.error;
+    EXPECT_EQ(res.emitted_count, 1);
+  }
+
+  // 4. Invalid string-encoded bucket count in Lua histogram defaults cleanly to 0
+  {
+    const char* script = R"(
+      return {
+        name = "hist_bad_bc",
+        histogram = {
+          count = 5,
+          sum = 10.0,
+          explicit_bounds = { 1.0 },
+          counts = { "5", "not_a_number" }
+        }
+      }
+    )";
+    ASSERT_EQ(luaL_dostring(L_, script), LUA_OK);
+    int table_idx = lua_gettop(L_);
+    auto res = ProcessNativeMetricsTable(L_, table_idx, emit_idx_);
+    lua_pop(L_, 1);
+    EXPECT_TRUE(res.success) << res.error;
+    EXPECT_EQ(res.emitted_count, 1);
+  }
+
+  const char* verify = R"(
+    assert(#emitted == 4, "Expected 4 emitted events, got " .. #emitted)
+    assert(emitted[1].log.Body == "user login", "Event 1 Body mismatch")
+    assert(emitted[1].log.ServiceName == "auth-svc", "Event 1 ServiceName mismatch")
+    assert(emitted[2].log.Body == "json login", "Event 2 Body mismatch")
+    assert(string.find(emitted[3].log.Events, "%[max_depth_exceeded%]") ~= nil,
+           "Expected [max_depth_exceeded] in nested array Events JSON: " .. tostring(emitted[3].log.Events))
+    assert(emitted[4].log.Histogram.BucketCounts[1] == 5)
+    assert(emitted[4].log.Histogram.BucketCounts[2] == 0)
   )";
   EXPECT_EQ(luaL_dostring(L_, verify), LUA_OK) << lua_tostring(L_, -1);
 }

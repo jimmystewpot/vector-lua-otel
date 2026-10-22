@@ -27,16 +27,8 @@ struct ActiveExtractionGuard {
 };
 
 template <ExtractorStringFn StringExtractor, ExtractorTableFn TableExtractor>
-int ProcessDispatcher(lua_State* L) {
+int ProcessBody(lua_State* L) {
   try {
-    if (tls_active_extraction) [[unlikely]] {
-      lua_pushnil(L);
-      lua_pushstring(L, "re-entrant vector_otel.process() invocation is not permitted");
-      lua_pushinteger(L, 0);
-      return 3;
-    }
-    ActiveExtractionGuard extraction_guard;
-
     int arg_type = lua_type(L, 1);
     if (arg_type != LUA_TSTRING && arg_type != LUA_TTABLE) {
       lua_pushnil(L);
@@ -89,6 +81,42 @@ int ProcessDispatcher(lua_State* L) {
     lua_pushinteger(L, 0);
     return 3;
   }
+}
+
+template <ExtractorStringFn StringExtractor, ExtractorTableFn TableExtractor>
+int ProcessDispatcher(lua_State* L) {
+  if (tls_active_extraction) [[unlikely]] {
+    lua_pushnil(L);
+    lua_pushstring(L, "re-entrant vector_otel.process() invocation is not permitted");
+    lua_pushinteger(L, 0);
+    return 3;
+  }
+
+  int status = LUA_OK;
+  {
+    // CRITICAL: The ActiveExtractionGuard must live in THIS frame (outer).
+    // If we put it inside ProcessBody and Lua raises a memory error
+    // (lua_error/longjmp via a failing allocator), the C++ destructor never
+    // runs, leaving tls_active_extraction=true. By running the extraction
+    // through lua_pcall here, we catch the longjmp BEFORE returning from
+    // this frame, ensuring the guard is destroyed.
+    ActiveExtractionGuard extraction_guard;
+
+    lua_CFunction body_fn = ProcessBody<StringExtractor, TableExtractor>;
+    lua_pushcfunction(L, body_fn);
+    lua_insert(L, 1);  // Move the C function to stack position 1
+    status = lua_pcall(L, lua_gettop(L) - 1, LUA_MULTRET, 0);
+  }  // Guard is destroyed here, BEFORE anything that can allocate
+
+  if (status != LUA_OK) {
+    // lua_pcall failed; error object is on top of stack
+    lua_pushnil(L);
+    lua_insert(L, -2);  // nil, error_msg
+    lua_pushinteger(L, 0);
+    return 3;
+  }
+
+  return lua_gettop(L);  // Return all values that ProcessBody pushed
 }
 
 inline void RegisterInPackageLoaded(lua_State* L, const char* name, int table_idx) {

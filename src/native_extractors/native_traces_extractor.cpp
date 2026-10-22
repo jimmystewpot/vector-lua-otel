@@ -19,6 +19,7 @@ extern "C" {
 #include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
 #include "vector_otel/core/parser.hpp"
+#include "vector_otel/core/scratch.hpp"
 #include "vector_otel/core/table_reader.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
@@ -219,12 +220,18 @@ void WriteAnyValueJson(core::FastJsonWriter& writer, simdjson::ondemand::value& 
       writer.EndObject();
     }
   } else if (type == simdjson::ondemand::json_type::array) {
-    auto raw_res = val.raw_json();
-    if (raw_res.error() == simdjson::SUCCESS) {
-      writer.RawJson(core::TrimJsonWhitespace(raw_res.value()));
-    } else {
+    auto arr_res = val.get_array();
+    if (arr_res.error() != simdjson::SUCCESS) {
       writer.Null();
+      return;
     }
+    writer.StartArray();
+    for (auto elem_res : arr_res.value()) {
+      if (elem_res.error() != simdjson::SUCCESS) continue;
+      auto elem_val = elem_res.value();
+      WriteAnyValueJson(writer, elem_val, depth + 1);
+    }
+    writer.EndArray();
   } else if (type == simdjson::ondemand::json_type::string) {
     auto s_res = val.get_string();
     if (s_res.error() == simdjson::SUCCESS) {
@@ -453,7 +460,8 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
                                   core::FastJsonWriter& events_writer,
                                   core::FastJsonWriter& links_writer,
                                   core::FastJsonWriter& attr_writer, core::LuaEmitter& emitter,
-                                  std::string& err_out, int depth = 0) {
+                                  std::string& err_out, int depth = 0,
+                                  bool* out_matched = nullptr) {
   uint64_t start_ns = 0;
   uint64_t end_ns = 0;
   uint64_t ingest_ns = 0;
@@ -502,7 +510,7 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
     }
     auto fv = fv_res.value();
 
-    if ((k == "log" || k == "trace") && depth == 0) {
+    if ((k == "log" || k == "trace") && depth == 0 && !has_recognized_field) {
       auto t_res = fv.type();
       if (t_res.error() != simdjson::SUCCESS) {
         err_out = std::string(simdjson::error_message(t_res.error()));
@@ -514,19 +522,25 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
           err_out = std::string(simdjson::error_message(inner_obj_res.error()));
           return false;
         }
-        res_attrs_scoped.reset();
-        span_attrs_scoped.reset();
         auto inner_obj = inner_obj_res.value();
-        return ExtractNativeTraceObjectJson(L, inner_obj, processed_at, events_writer, links_writer,
-                                            attr_writer, emitter, err_out, depth + 1);
+        bool inner_matched = false;
+        if (!ExtractNativeTraceObjectJson(L, inner_obj, processed_at, events_writer, links_writer,
+                                          attr_writer, emitter, err_out, depth + 1,
+                                          &inner_matched)) {
+          return false;
+        }
+        if (inner_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
       } else if (t_res.value() == simdjson::ondemand::json_type::array) {
         auto inner_arr_res = fv.get_array();
         if (inner_arr_res.error() != simdjson::SUCCESS) {
           err_out = std::string(simdjson::error_message(inner_arr_res.error()));
           return false;
         }
-        res_attrs_scoped.reset();
-        span_attrs_scoped.reset();
+        bool any_matched = false;
         for (auto elem_res : inner_arr_res.value()) {
           if (elem_res.error() != simdjson::SUCCESS) {
             err_out = std::string(simdjson::error_message(elem_res.error()));
@@ -538,12 +552,19 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
             return false;
           }
           auto elem_obj = elem_obj_res.value();
+          bool elem_matched = false;
           if (!ExtractNativeTraceObjectJson(L, elem_obj, processed_at, events_writer, links_writer,
-                                            attr_writer, emitter, err_out, depth + 1)) {
+                                            attr_writer, emitter, err_out, depth + 1,
+                                            &elem_matched)) {
             return false;
           }
+          any_matched = any_matched || elem_matched;
         }
-        return true;
+        if (any_matched) {
+          if (out_matched != nullptr) *out_matched = true;
+          return true;
+        }
+        continue;
       }
       continue;
     }
@@ -710,6 +731,9 @@ bool ExtractNativeTraceObjectJson(lua_State* L, simdjson::ondemand::object& rec_
 
   if (!has_recognized_field) {
     return true;
+  }
+  if (out_matched != nullptr) {
+    *out_matched = true;
   }
 
   if (!has_events) {
@@ -1125,10 +1149,7 @@ bool ExtractSingleNativeTraceTable(lua_State* L, int rec_idx, std::string_view p
           lua_pop(L, 1);
         }
       }
-      core::PushTableAttributes(L, attrs_src_idx, writer);
-      int pushed_attrs_idx = lua_absindex(L, -1);
-      service_name = core::ReadTableStringView(L, pushed_attrs_idx, "service.name", "service_name",
-                                               tls_service_scratch);
+      core::PushTableAttributes(L, attrs_src_idx, writer, &service_name);
       res_attrs_scoped = ScopedLuaRef(L, luaL_ref(L, LUA_REGISTRYINDEX));
       if (has_nested_attrs) {
         lua_pop(L, 1);
@@ -1309,6 +1330,7 @@ extractors::ExtractionResult ProcessNativeTraces(lua_State* L, std::string_view 
         w1.Trim();
         w2.Trim();
         w3.Trim();
+        core::ResetServiceNameScratch();
       }
       core::FastJsonWriter& w1;
       core::FastJsonWriter& w2;
@@ -1409,16 +1431,11 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
         lua_settop(L, top);
       }
       writer.Trim();
-      auto trim_scratch = [](std::string& s) noexcept {
-        if (s.capacity() > 4096) {
-          std::string().swap(s);
-        }
-      };
-      trim_scratch(tls_service_scratch);
-      trim_scratch(tls_scope_name_scratch);
-      trim_scratch(tls_scope_ver_scratch);
-      trim_scratch(tls_status_msg_scratch);
-      trim_scratch(tls_item_scratch);
+      core::TrimScratchString(tls_service_scratch);
+      core::TrimScratchString(tls_scope_name_scratch);
+      core::TrimScratchString(tls_scope_ver_scratch);
+      core::TrimScratchString(tls_status_msg_scratch);
+      core::TrimScratchString(tls_item_scratch);
     }
     lua_State* L;
     int top;
@@ -1462,14 +1479,15 @@ extractors::ExtractionResult ProcessNativeTracesTable(lua_State* L, int table_id
       if (core::GetTableFieldRaw(L, abs_idx, "log", "trace")) {
         int inner_idx = lua_absindex(L, -1);
         if (lua_istable(L, inner_idx)) {
-          handled_wrapper = true;
           const size_t inner_len = lua_rawlen(L, inner_idx);
           if (inner_len > 0) {
+            handled_wrapper = true;
             if (!extract_array(inner_idx, inner_len)) {
               lua_pop(L, 1);
               return ExtractionResult{false, err_out, emitter.EmittedCount()};
             }
           } else if (HasNativeTraceFields(L, inner_idx)) {
+            handled_wrapper = true;
             if (!ExtractSingleNativeTraceTable(L, inner_idx, processed_at, writer,
                                                tls_service_scratch, tls_scope_name_scratch,
                                                tls_scope_ver_scratch, tls_status_msg_scratch,

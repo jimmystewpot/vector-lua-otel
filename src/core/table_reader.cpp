@@ -12,6 +12,7 @@
 #include "vector_otel/core/fast_json_writer.hpp"
 #include "vector_otel/core/lua_bridge.hpp"
 #include "vector_otel/core/otlp_common.hpp"
+#include "vector_otel/core/scratch.hpp"
 #include "vector_otel/core/timestamp.hpp"
 
 namespace vector_otel::core {
@@ -924,28 +925,32 @@ std::string_view ExtractTableServiceNameView(lua_State* L, int res_idx, std::str
   return service_name;
 }
 
-static void PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& writer) {
+// Returns true if the attribute was a plain string or OTLP stringValue.
+static bool PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& writer) {
   int abs_idx = lua_absindex(L, val_idx);
   int type = lua_type(L, abs_idx);
 
   if (type == LUA_TSTRING) {
     lua_pushvalue(L, abs_idx);
+    return true;
   } else if (type == LUA_TNUMBER) {
     lua_pushvalue(L, abs_idx);
+    return false;
   } else if (type == LUA_TBOOLEAN) {
     lua_pushvalue(L, abs_idx);
+    return false;
   } else if (type == LUA_TTABLE) {
-    if (GetTableField(L, abs_idx, "stringValue", "string_value")) {
+    if (GetTableFieldRaw(L, abs_idx, "stringValue", "string_value")) {
       if (lua_type(L, -1) == LUA_TSTRING) {
-        return;  // value is already on stack
+        return true;  // value is already on stack
       }
       lua_pop(L, 1);
       lua_pushliteral(L, "");
-      return;
+      return true;
     }
-    if (GetTableField(L, abs_idx, "intValue", "int_value")) {
+    if (GetTableFieldRaw(L, abs_idx, "intValue", "int_value")) {
       if (lua_isinteger(L, -1)) {
-        return;
+        return false;
       }
       int64_t v = 0;
       if (lua_type(L, -1) == LUA_TNUMBER) {
@@ -955,18 +960,18 @@ static void PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& 
       }
       lua_pop(L, 1);
       lua_pushinteger(L, v);
-      return;
+      return false;
     }
-    if (GetTableField(L, abs_idx, "boolValue", "bool_value")) {
+    if (GetTableFieldRaw(L, abs_idx, "boolValue", "bool_value")) {
       if (lua_type(L, -1) == LUA_TBOOLEAN) {
-        return;
+        return false;
       }
       bool b = lua_toboolean(L, -1) != 0;
       lua_pop(L, 1);
       lua_pushboolean(L, b ? 1 : 0);
-      return;
+      return false;
     }
-    if (GetTableField(L, abs_idx, "doubleValue", "double_value")) {
+    if (GetTableFieldRaw(L, abs_idx, "doubleValue", "double_value")) {
       double d = 0.0;
       if (lua_type(L, -1) == LUA_TNUMBER) {
         double num = lua_tonumber(L, -1);
@@ -978,18 +983,25 @@ static void PushSingleAttributeValue(lua_State* L, int val_idx, FastJsonWriter& 
       }
       lua_pop(L, 1);
       lua_pushnumber(L, d);
-      return;
+      return false;
     }
     // Complex value -> serialise to JSON string
     writer.Reset();
     SerializeLuaValueToJson(L, abs_idx, writer);
     lua_pushlstring(L, writer.Str().data(), writer.Str().size());
+    return false;
   } else {
     lua_pushnil(L);
+    return false;
   }
 }
 
-void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
+void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer,
+                         std::string_view* out_service_name) {
+  static thread_local std::string tls_attr_service_scratch;
+  if (out_service_name != nullptr) {
+    ResetScratchString(tls_attr_service_scratch);
+  }
   lua_checkstack(L, 10);
   int abs_idx = lua_absindex(L, attrs_idx);
   lua_newtable(L);
@@ -1000,11 +1012,11 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
   }
 
   bool is_kv_array = false;
-  lua_Integer len = luaL_len(L, abs_idx);
+  const size_t len = lua_rawlen(L, abs_idx);
   if (len > 0) {
     lua_rawgeti(L, abs_idx, 1);
     if (lua_istable(L, -1)) {
-      if (GetTableField(L, -1, "key")) {
+      if (GetTableFieldRaw(L, -1, "key")) {
         if (lua_type(L, -1) == LUA_TSTRING) {
           is_kv_array = true;
         }
@@ -1016,16 +1028,29 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
 
   if (is_kv_array) {
     // Array of { key = "...", value = ... }
-    for (lua_Integer i = 1; i <= len; ++i) {
-      lua_rawgeti(L, abs_idx, i);
+    for (size_t i = 1; i <= len; ++i) {
+      lua_rawgeti(L, abs_idx, static_cast<lua_Integer>(i));
       if (lua_istable(L, -1)) {
         int item_idx = lua_absindex(L, -1);
-        if (GetTableField(L, item_idx, "key")) {
+        if (GetTableFieldRaw(L, item_idx, "key")) {
           if (lua_type(L, -1) == LUA_TSTRING && lua_rawlen(L, -1) > 0) {
-            if (GetTableField(L, item_idx, "value")) {
-              PushSingleAttributeValue(L, -1, writer);
+            size_t klen = 0;
+            const char* ks = lua_tolstring(L, -1, &klen);
+            std::string_view key_sv(ks, klen);
+            if (GetTableFieldRaw(L, item_idx, "value")) {
+              bool is_str_attr = PushSingleAttributeValue(L, -1, writer);
               lua_remove(L,
                          -2);  // remove raw value, leaving [key, converted_val]
+              if (out_service_name != nullptr &&
+                  (out_service_name->empty() || *out_service_name == "unknown_service") &&
+                  is_str_attr && (key_sv == "service.name" || key_sv == "service_name")) {
+                size_t vlen = 0;
+                const char* vs = lua_tolstring(L, -1, &vlen);
+                if (vs != nullptr && vlen > 0) {
+                  tls_attr_service_scratch.assign(vs, vlen);
+                  *out_service_name = std::string_view(tls_attr_service_scratch);
+                }
+              }
               lua_rawset(L, out_table_idx);
             } else {
               lua_pop(L, 1);  // pop key
@@ -1039,11 +1064,33 @@ void PushTableAttributes(lua_State* L, int attrs_idx, FastJsonWriter& writer) {
     }
   } else {
     // Direct key-value map
+    bool has_dot_svc = false;
     lua_pushnil(L);
     while (lua_next(L, abs_idx) != 0) {
       if (lua_type(L, -2) == LUA_TSTRING) {
+        size_t klen = 0;
+        const char* ks = lua_tolstring(L, -2, &klen);
+        std::string_view key_sv(ks, klen);
         lua_pushvalue(L, -2);
-        PushSingleAttributeValue(L, -2, writer);
+        bool is_str_attr = PushSingleAttributeValue(L, -2, writer);
+        if (out_service_name != nullptr && is_str_attr) {
+          if (key_sv == "service.name" && !has_dot_svc) {
+            size_t vlen = 0;
+            const char* vs = lua_tolstring(L, -1, &vlen);
+            if (vs != nullptr && vlen > 0) {
+              tls_attr_service_scratch.assign(vs, vlen);
+              *out_service_name = std::string_view(tls_attr_service_scratch);
+              has_dot_svc = true;
+            }
+          } else if (key_sv == "service_name" && !has_dot_svc && tls_attr_service_scratch.empty()) {
+            size_t vlen = 0;
+            const char* vs = lua_tolstring(L, -1, &vlen);
+            if (vs != nullptr && vlen > 0) {
+              tls_attr_service_scratch.assign(vs, vlen);
+              *out_service_name = std::string_view(tls_attr_service_scratch);
+            }
+          }
+        }
         lua_rawset(L, out_table_idx);
       } else if (lua_type(L, -2) == LUA_TNUMBER) {
         lua_pushvalue(L, -2);
