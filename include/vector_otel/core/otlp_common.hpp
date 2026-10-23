@@ -57,6 +57,7 @@ void StageAttributes(StagedRow& row, Key key, simdjson::ondemand::value& attrs_v
                      FastJsonWriter& json_writer, std::string_view* out_service_name = nullptr);
 
 void WriteAnyValueJson(FastJsonWriter& writer, simdjson::ondemand::value& val, int depth = 0);
+std::string_view ExtractOtelBodyView(simdjson::ondemand::value& body_val, FastJsonWriter& writer);
 void WriteAttributesEntriesJson(FastJsonWriter& writer, simdjson::ondemand::value& attrs_val,
                                 std::string_view* out_service_name = nullptr);
 void WriteAttributesJson(FastJsonWriter& writer, simdjson::ondemand::value& attrs_val,

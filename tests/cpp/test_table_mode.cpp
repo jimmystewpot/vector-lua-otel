@@ -3082,5 +3082,122 @@ TEST_F(TableModeTest,
   lua_pop(L_, 1);
 }
 
+TEST_F(TableModeTest, Issue22LogBodyParityTableAndJson) {
+  // Setup callback to capture emitted events
+  ASSERT_EQ(luaL_dostring(L_, R"(
+    test_emitted = {}
+    function test_cb(ev)
+      test_emitted[#test_emitted + 1] = ev
+    end
+  )"),
+            LUA_OK);
+  lua_getglobal(L_, "test_cb");
+  const int cb_idx = lua_gettop(L_);
+
+  // 1. Issue #22 reproduction payload
+  const char* lua_tbl_script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                {
+                  timeUnixNano = "1792102149000000000",
+                  body = {
+                    kvlistValue = {
+                      values = {
+                        { key = "body", value = { stringValue = "value" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, lua_tbl_script), LUA_OK);
+  auto res_tbl = extractors::ProcessLogsTable(L_, -1, cb_idx);
+  EXPECT_TRUE(res_tbl.success) << res_tbl.error;
+  EXPECT_EQ(res_tbl.emitted_count, 1);
+  lua_pop(L_, 1);
+
+  const std::string json_payload =
+      R"({"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"1792102149000000000","body":{"kvlistValue":{"values":[{"key":"body","value":{"stringValue":"value"}}]}}}]}]}]})";
+  auto res_json = extractors::ProcessLogs(L_, json_payload, cb_idx);
+  EXPECT_TRUE(res_json.success) << res_json.error;
+  EXPECT_EQ(res_json.emitted_count, 1);
+
+  const char* verify_script = R"(
+    assert(#test_emitted == 2, "expected 2 emitted records, got " .. #test_emitted)
+    local from_table = test_emitted[1].log.Body
+    local from_json = test_emitted[2].log.Body
+    assert(from_table == '{"body":"value"}', "table body mismatch: " .. tostring(from_table))
+    assert(from_json == '{"body":"value"}', "json body mismatch: " .. tostring(from_json))
+    assert(from_table == from_json, "table and json body must be identical")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
+
+  // 2. Parity for stringValue, arrayValue, intValue, null
+  ASSERT_EQ(luaL_dostring(L_, "test_emitted = {}"), LUA_OK);
+  const char* lua_multi_script = R"(
+    return {
+      resourceLogs = {
+        {
+          scopeLogs = {
+            {
+              logRecords = {
+                { timeUnixNano = "1", body = { stringValue = "hello-str" } },
+                { timeUnixNano = "2", body = { arrayValue = { values = { { stringValue = "a" }, { intValue = 2 } } } } },
+                { timeUnixNano = "3", body = { intValue = 42 } },
+                { timeUnixNano = "4", body = nil }
+              }
+            }
+          }
+        }
+      }
+    }
+  )";
+  ASSERT_EQ(luaL_dostring(L_, lua_multi_script), LUA_OK);
+  auto res_multi_tbl = extractors::ProcessLogsTable(L_, -1, cb_idx);
+  EXPECT_TRUE(res_multi_tbl.success) << res_multi_tbl.error;
+  EXPECT_EQ(res_multi_tbl.emitted_count, 4);
+  lua_pop(L_, 1);
+
+  const std::string json_multi = R"({
+    "resourceLogs": [{
+      "scopeLogs": [{
+        "logRecords": [
+          { "timeUnixNano": "1", "body": { "stringValue": "hello-str" } },
+          { "timeUnixNano": "2", "body": { "arrayValue": { "values": [{ "stringValue": "a" }, { "intValue": "2" }] } } },
+          { "timeUnixNano": "3", "body": { "intValue": "42" } },
+          { "timeUnixNano": "4", "body": null }
+        ]
+      }]
+    }]
+  })";
+  auto res_multi_json = extractors::ProcessLogs(L_, json_multi, cb_idx);
+  EXPECT_TRUE(res_multi_json.success) << res_multi_json.error;
+  EXPECT_EQ(res_multi_json.emitted_count, 4);
+
+  const char* verify_multi = R"(
+    assert(#test_emitted == 8, "expected 8 records, got " .. #test_emitted)
+    for i = 1, 4 do
+      local t_body = test_emitted[i].log.Body
+      local j_body = test_emitted[i + 4].log.Body
+      assert(t_body == j_body, string.format("Mismatch at index %d: table='%s' vs json='%s'", i, t_body, j_body))
+    end
+    assert(test_emitted[1].log.Body == "hello-str")
+    assert(test_emitted[2].log.Body == '["a",2]')
+    assert(test_emitted[3].log.Body == "42")
+    assert(test_emitted[4].log.Body == "")
+  )";
+  EXPECT_EQ(luaL_dostring(L_, verify_multi), LUA_OK) << lua_tostring(L_, -1);
+  lua_pop(L_, 1);  // pop test_cb
+}
+
 }  // namespace
 }  // namespace vector_otel

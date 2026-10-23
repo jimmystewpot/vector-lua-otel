@@ -272,7 +272,7 @@ assert(r1.TraceFlags == 1, "TraceFlags mismatch")
 assert(r1.SeverityText == "INFO", "SeverityText mismatch")
 assert(r1.SeverityNumber == 9, "SeverityNumber mismatch")
 assert(r1.ServiceName == "edge-svc", "ServiceName mismatch")
-assert(type(r1.Body) == "string" and r1.Body:find("kvlistValue") ~= nil, "Body must contain JSON string of kvlistValue")
+assert(r1.Body == '{"message":"processed successfully"}', "Body mismatch: " .. tostring(r1.Body))
 assert(r1.ScopeName == "edge-scope", "ScopeName mismatch")
 assert(r1.ScopeVersion == "1.0.0", "ScopeVersion mismatch")
 assert(r1.ResourceSchemaUrl == "https://opentelemetry.io/schemas/1.26.0", "ResourceSchemaUrl mismatch")
@@ -1302,6 +1302,145 @@ assert(i9_json_sum.Summary == '{"count":50,"sum":1234.5,"quantileValues":[{"quan
 assert(i9_json_sum.Exemplars == "[]")
 
 print("   Issue #9 ExponentialHistogram and Summary validation passed.")
+
+--------------------------------------------------------------------------------
+-- Issue #22: Structured log Body parity across JSON and Table modes
+--------------------------------------------------------------------------------
+print(">> Testing Issue #22 structured log Body parity across JSON and Table modes...")
+
+local function extract_body(input)
+    local rows = {}
+    local count, err = vo.logs.process(input, function(event)
+        table.insert(rows, event.log)
+    end)
+    assert(count == 1, "extract_body failed: " .. tostring(err))
+    assert(type(rows[1].Body) == "string", "Body must be string")
+    return rows[1].Body
+end
+
+-- 1. Exact reproduction from Issue #22
+local issue22_table_payload = {
+    resourceLogs = {{
+        scopeLogs = {{
+            logRecords = {{
+                timeUnixNano = "1792102149000000000",
+                body = {
+                    kvlistValue = {
+                        values = {{
+                            key = "body",
+                            value = { stringValue = "value" },
+                        }},
+                    },
+                },
+            }},
+        }},
+    }},
+}
+local issue22_json_payload = [[{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"1792102149000000000","body":{"kvlistValue":{"values":[{"key":"body","value":{"stringValue":"value"}}]}}}]}]}]}]]
+
+local i22_from_table = extract_body(issue22_table_payload)
+local i22_from_json = extract_body(issue22_json_payload)
+
+assert(i22_from_table == '{"body":"value"}', "Issue #22 table body mismatch: " .. tostring(i22_from_table))
+assert(i22_from_json == '{"body":"value"}', "Issue #22 JSON body mismatch: " .. tostring(i22_from_json))
+assert(i22_from_table == i22_from_json, "Issue #22 table and JSON output must match exactly")
+
+-- 2. AnyValue variants matrix
+local function test_parity(tbl_body, json_body_str, expected_body)
+    local t_payload = {
+        resourceLogs = {{
+            scopeLogs = {{
+                logRecords = {{
+                    timeUnixNano = "1000",
+                    body = tbl_body,
+                }},
+            }},
+        }},
+    }
+    local j_payload = [[{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"1000","body":]] .. json_body_str .. [[}]}]}]}]]
+    local t_out = extract_body(t_payload)
+    local j_out = extract_body(j_payload)
+    assert(t_out == expected_body, string.format("Table mode expected '%s', got '%s'", expected_body, t_out))
+    assert(j_out == expected_body, string.format("JSON mode expected '%s', got '%s'", expected_body, j_out))
+    assert(t_out == j_out, "Table and JSON outputs must match")
+end
+
+-- stringValue wrapper and raw string
+test_parity({ stringValue = "plain-text" }, '{"stringValue":"plain-text"}', "plain-text")
+test_parity("raw-str", '"raw-str"', "raw-str")
+test_parity({ string_value = "snake-text" }, '{"string_value":"snake-text"}', "snake-text")
+
+-- intValue
+test_parity({ intValue = 42 }, '{"intValue":"42"}', "42")
+test_parity({ int_value = 99 }, '{"int_value":99}', "99")
+
+-- doubleValue
+test_parity({ doubleValue = 3.14 }, '{"doubleValue":3.14}', "3.14")
+
+-- boolValue
+test_parity({ boolValue = true }, '{"boolValue":true}', "true")
+test_parity({ boolValue = false }, '{"boolValue":false}', "false")
+
+-- bytesValue
+test_parity({ bytesValue = "AQID" }, '{"bytesValue":"AQID"}', '"AQID"')
+
+-- arrayValue
+test_parity(
+    { arrayValue = { values = { { stringValue = "item1" }, { intValue = 2 } } } },
+    '{"arrayValue":{"values":[{"stringValue":"item1"},{"intValue":"2"}]}}',
+    '["item1",2]'
+)
+
+-- nested kvlistValue and arrayValue
+test_parity(
+    {
+        kvlistValue = {
+            values = {
+                {
+                    key = "nested",
+                    value = {
+                        kvlistValue = {
+                            values = {
+                                { key = "arr", value = { arrayValue = { values = { { stringValue = "val" } } } } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    '{"kvlistValue":{"values":[{"key":"nested","value":{"kvlistValue":{"values":[{"key":"arr","value":{"arrayValue":{"values":[{"stringValue":"val"}]}}}]}}}]}}',
+    '{"nested":{"arr":["val"]}}'
+)
+
+-- plain JSON object (non-OTLP AnyValue envelope, single key deterministic order)
+test_parity(
+    { message = "plain obj" },
+    '{"message":"plain obj"}',
+    '{"message":"plain obj"}'
+)
+
+-- plain JSON object (multi-key, order-independent verification)
+do
+    local t_multi = extract_body({
+        resourceLogs = {{
+            scopeLogs = {{
+                logRecords = {{
+                    timeUnixNano = "1000",
+                    body = { message = "plain obj", code = 200 },
+                }},
+            }},
+        }},
+    })
+    local j_multi = extract_body([[{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"1000","body":{"message":"plain obj","code":200}}]}]}]} ]])
+    assert(t_multi:find('"message":"plain obj"') and t_multi:find('"code":200'), "Table multi-key body missing expected fields: " .. tostring(t_multi))
+    assert(j_multi:find('"message":"plain obj"') and j_multi:find('"code":200'), "JSON multi-key body missing expected fields: " .. tostring(j_multi))
+end
+
+-- null body
+test_parity(nil, 'null', "")
+
+print("   Issue #22 structured log Body parity validation passed.")
 
 --------------------------------------------------------------------------------
 -- 50,000-Event Stress Loop & GC Stability Check (Dual-Mode: String & Table)
