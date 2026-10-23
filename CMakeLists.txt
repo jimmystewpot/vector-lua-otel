@@ -157,6 +157,9 @@ add_test(NAME payload_limits
           -DTEST_BINARY_ROOT=${CMAKE_BINARY_DIR}/payload_limit_configure "-DPASS_THROUGH=${_pt}"
           -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_payload_limits.cmake)
 
+add_test(NAME limit_matrix_script
+  COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/test_limit_matrix.sh)
+
 if(NOT ENABLE_SANITIZERS AND NOT ENABLE_TSAN)
   # Fault-injection tests. This executable REPLACES the global operator new/delete (see
   # tests/support/fault_new.cpp) so it must never be combined with sanitizers' allocator

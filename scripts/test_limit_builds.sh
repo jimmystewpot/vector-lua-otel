@@ -131,13 +131,7 @@ for limit in "${INVALID_LIMITS[@]}"; do
   dir="${SCRATCH}/bad-${limit:-empty}"
   echo "== C='${limit}' (must be rejected) =="
   if configure "${dir}" "-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=${limit}"; then
-    # An empty value falls back to the default (cache entry unset); every other value is fatal.
-    if [[ -z "${limit}" ]] && grep -q "kMaxPayloadBytes = ${DEFAULT_C};" \
-      "${dir}/generated/vector_otel/core/config.hpp"; then
-      pass "C='' falls back to the default ${DEFAULT_C}"
-    else
-      fail "C='${limit}' was accepted"
-    fi
+    fail "C='${limit}' was accepted"
   elif grep -q "VECTOR_OTEL_MAX_PAYLOAD_BYTES" "${dir}.log"; then
     pass "C='${limit}' rejected with a diagnostic"
   else
