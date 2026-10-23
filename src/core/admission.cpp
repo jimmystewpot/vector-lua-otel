@@ -228,7 +228,7 @@ void CountOtlpJson(od::document& doc, const Layout& layout, Walk& w) noexcept {
 // Does not recursively expand nested wrappers (depth-one only).
 std::size_t CountNativeObjectJson(od::object& obj, const Layout& layout) noexcept {
   std::size_t max_candidates = 1;  // single event fallback
-  
+
   for (auto field_result : obj) {
     od::field field;
     if (std::move(field_result).get(field) != simdjson::SUCCESS) {
@@ -238,7 +238,7 @@ std::size_t CountNativeObjectJson(od::object& obj, const Layout& layout) noexcep
     if (field.unescaped_key().get(key) != simdjson::SUCCESS) {
       break;
     }
-    
+
     // Check if this key matches any native wrapper for the current signal.
     bool is_wrapper = false;
     for (const ReadKey& wrapper : layout.native_wrappers) {
@@ -247,17 +247,17 @@ std::size_t CountNativeObjectJson(od::object& obj, const Layout& layout) noexcep
         break;
       }
     }
-    
+
     if (!is_wrapper) {
       continue;
     }
-    
+
     od::value value = std::move(field.value());
     od::json_type type{};
     if (value.type().get(type) != simdjson::SUCCESS) {
       break;
     }
-    
+
     std::size_t wrapper_candidates = 0;
     if (type == od::json_type::array) {
       Walk sub;
@@ -268,10 +268,11 @@ std::size_t CountNativeObjectJson(od::object& obj, const Layout& layout) noexcep
       wrapper_candidates = 1;
     }
     // Non-array, non-object wrappers contribute zero.
-    
+
     max_candidates = std::max<std::size_t>(max_candidates, wrapper_candidates);
+    if (max_candidates > kMaxIncomingRecords) return max_candidates;
   }
-  
+
   return max_candidates;
 }
 

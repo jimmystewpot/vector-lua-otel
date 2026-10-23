@@ -2214,5 +2214,56 @@ INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
                                   info.param->name;
                          });
 
+TEST(NativeJsonAdmissionRegression, ExpandedWrappersRejectBeforeAnyCallback) {
+  for (const char* signal : {"logs", "traces", "metrics"}) {
+    const std::string primary = std::string(signal) == "metrics" ? "metric" : "log";
+    const std::string secondary = std::string(signal) == "traces" ? "trace" : "log";
+    auto rows = [&](int n) {
+      std::string result = "[";
+      for (int i = 0; i < n; ++i) {
+        if (i) result += ',';
+        result += std::string(signal) == "logs"     ? NativeLogRecordJson(0, 0)
+                  : std::string(signal) == "traces" ? NativeSpanJson(0, 0)
+                                                    : NativeMetricRecordJson(0, 0);
+      }
+      return result + "]";
+    };
+    const std::string legal = rows(2048);
+    const std::string too_many = rows(2049);
+    // Outer array contains one wrapper object, not 2,048 plain root objects.
+    for (bool over : {false, true}) {
+      SCOPED_TRACE(std::string(signal) + (over ? " nested2049" : " nested2048"));
+      RawState state;
+      ProcRecorder rec;
+      const auto result = CallProcess(
+          state, true, signal,
+          JsonPayload("[{\"" + primary + "\":" + (over ? too_many : legal) + "}]"), rec);
+      ASSERT_EQ(result.status, LUA_OK);
+      EXPECT_EQ(result.count, over ? 0 : 2048) << result.error;
+      EXPECT_EQ(rec.rows, over ? 0 : 2048);
+      EXPECT_EQ(result.first_nil, over);
+      if (over) EXPECT_EQ(result.error, "event exceeds 2048-record limit");
+    }
+    const std::string a = "{\"" + primary + "\":";
+    const std::string b = "\"" + secondary + "\":";
+    const std::string payloads[] = {
+        a + "[]," + b + too_many + "}",
+        "{" + b + too_many + ",\"" + primary + "\":[]}",
+        a + "[],\"" + primary + "\":" + too_many + "}",
+        "[" + a + rows(1024) + "}," + a + rows(1025) + "}]",
+    };
+    for (const auto& payload : payloads) {
+      RawState state;
+      ProcRecorder rec;
+      const auto result = CallProcess(state, true, signal, JsonPayload(payload), rec);
+      EXPECT_EQ(result.status, LUA_OK);
+      EXPECT_TRUE(result.first_nil);
+      EXPECT_EQ(result.error, "event exceeds 2048-record limit");
+      EXPECT_EQ(result.count, 0);
+      EXPECT_EQ(rec.calls, 0);
+    }
+  }
+}
+
 }  // namespace
 }  // namespace vector_otel::core

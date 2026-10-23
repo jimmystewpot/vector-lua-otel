@@ -757,7 +757,6 @@ TEST(AdmissionTest, PreparationFailureIsAMemoryErrorAndRetryable) {
   EXPECT_TRUE(parser.IsPrepared());
 }
 
-
 // ---- Native JSON admission regression tests (Task 1) ----------------------------------------
 
 TEST(AdmissionTest, NativeJsonRootArrayExpandsWrappers) {
@@ -774,35 +773,37 @@ TEST(AdmissionTest, NativeJsonRootArrayExpandsWrappers) {
 
 TEST(AdmissionTest, NativeJsonCompetingWrappersUseMaximum) {
   // Two wrappers: first 100, second 2048. Should admit by maximum.
-  const std::string comp1 = "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2048) + "}";
+  const std::string comp1 =
+      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2048) + "}";
   ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp1), 2048,
                  "competing wrappers: maximum not sum");
 
   // Reverse order: 2048 first, then 100.
-  const std::string comp2 = "{\"trace\":" + Repeat("{}", 2048) + ",\"log\":" + Repeat("{}", 100) + "}";
+  const std::string comp2 =
+      "{\"trace\":" + Repeat("{}", 2048) + ",\"log\":" + Repeat("{}", 100) + "}";
   ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp2), 2048,
                  "competing wrappers reversed");
 
   // Two 2048 wrappers should admit.
-  const std::string comp3 = "{\"log\":" + Repeat("{}", 2048) + ",\"trace\":" + Repeat("{}", 2048) + "}";
-  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp3), 2048,
-                 "two 2048 wrappers");
+  const std::string comp3 =
+      "{\"log\":" + Repeat("{}", 2048) + ",\"trace\":" + Repeat("{}", 2048) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp3), 2048, "two 2048 wrappers");
 
   // One wrapper 2049 should reject (maximum of alternatives).
-  const std::string comp4 = "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2049) + "}";
+  const std::string comp4 =
+      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2049) + "}";
   ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Traces, comp4),
                     "competing wrappers with one at 2049");
 }
 
 TEST(AdmissionTest, NativeJsonCountsDuplicateWrappers) {
   // When iterating through all fields (not using find_field), duplicate keys are visited.
-  // The JSON standard allows iterating duplicate keys, though the object model normally keeps last.
   // Our counter sees all occurrences and takes the maximum bound.
   const std::string dup1 = "{\"log\":" + Repeat("{}", 100) + ",\"log\":" + Repeat("{}", 2048) + "}";
   ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, dup1), 2048,
                  "duplicate log wrappers: iterate all, use maximum");
 
-  // Both duplicate wrappers at 2049 should reject.
+  // Any oversized duplicate must reject, even when followed by a smaller one.
   const std::string dup2 = "{\"log\":" + Repeat("{}", 2049) + ",\"log\":" + Repeat("{}", 100) + "}";
   ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Logs, dup2),
                     "duplicate log wrapper at 2049");
@@ -815,7 +816,8 @@ TEST(AdmissionTest, NativeJsonDoesNotRecursivelyExpandInnerWrappers) {
                  "nested wrapper counts as one");
 
   // Root array with nested wrappers.
-  const std::string nested2 = "[{\"log\":{\"log\":" + Repeat("{}", 1000) + "}},{\"log\":" + Repeat("{}", 1048) + "}]";
+  const std::string nested2 =
+      "[{\"log\":{\"log\":" + Repeat("{}", 1000) + "}},{\"log\":" + Repeat("{}", 1048) + "}]";
   ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, nested2), 1049,
                  "root array with nested wrappers");
 }
