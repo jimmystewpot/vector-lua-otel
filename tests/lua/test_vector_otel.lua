@@ -1413,12 +1413,29 @@ test_parity(
     '{"nested":{"arr":["val"]}}'
 )
 
--- plain JSON object (non-OTLP AnyValue envelope)
+-- plain JSON object (non-OTLP AnyValue envelope, single key deterministic order)
 test_parity(
-    { message = "plain obj", code = 200 },
-    '{"message":"plain obj","code":200}',
-    '{"message":"plain obj","code":200}'
+    { message = "plain obj" },
+    '{"message":"plain obj"}',
+    '{"message":"plain obj"}'
 )
+
+-- plain JSON object (multi-key, order-independent verification)
+do
+    local t_multi = extract_body({
+        resourceLogs = {{
+            scopeLogs = {{
+                logRecords = {{
+                    timeUnixNano = "1000",
+                    body = { message = "plain obj", code = 200 },
+                }},
+            }},
+        }},
+    })
+    local j_multi = extract_body([[{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"1000","body":{"message":"plain obj","code":200}}]}]}]} ]])
+    assert(t_multi:find('"message":"plain obj"') and t_multi:find('"code":200'), "Table multi-key body missing expected fields: " .. tostring(t_multi))
+    assert(j_multi:find('"message":"plain obj"') and j_multi:find('"code":200'), "JSON multi-key body missing expected fields: " .. tostring(j_multi))
+end
 
 -- null body
 test_parity(nil, 'null', "")
