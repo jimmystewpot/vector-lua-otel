@@ -37,6 +37,45 @@ chmod +x "${binary_dir}/vector_otel_tests"
 STUB
 printf '#!/bin/sh\nexit 0\n' > "${SCRATCH}/bin/lua5.4"
 chmod +x "${SCRATCH}/bin/"*
+# Only a configure call's -B argument identifies the default build directory.
+# A later --build invocation must never satisfy or hide this assertion.
+assert_default_configure_omits_limit() {
+  awk '/^CALL$/{configure=0; default_dir=0; option=0; expect_dir=0; next}
+       /^END$/{if(configure && default_dir) {seen++; if(option) bad=1}; next}
+       expect_dir {default_dir=($0 ~ /\/run-20971520$/); expect_dir=0; next}
+       /^-B$/{configure=1; expect_dir=1; next}
+       /^-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=/{option=1}
+       END{exit !(seen == 1 && !bad)}' "$1"
+}
+
+# Pin the previous blind spot: a clean --build call cannot excuse an explicit
+# limit in the configure call, or substitute for a missing configure call.
+cat > "${SCRATCH}/explicit-default.argv" <<'ARGV'
+CALL
+-S
+/source
+-B
+/build/run-20971520
+-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=20971520
+END
+CALL
+--build
+/build/run-20971520
+END
+ARGV
+cat > "${SCRATCH}/build-only.argv" <<'ARGV'
+CALL
+--build
+/build/run-20971520
+END
+ARGV
+for fixture in explicit-default build-only; do
+  if assert_default_configure_omits_limit "${SCRATCH}/${fixture}.argv"; then
+    echo "FAIL default configure assertion accepted ${fixture}" >&2
+    exit 1
+  fi
+done
+
 for mode in strict accepted wrong; do
   log="${SCRATCH}/${mode}.log"
   argv="${SCRATCH}/${mode}.argv"
@@ -47,12 +86,8 @@ for mode in strict accepted wrong; do
   if [[ "${mode}" == strict ]]; then
     [[ ${status} == 0 ]] || { cat "${log}"; exit 1; }
     grep -q 'PASS  C=20971520 focused C++ tests' "${log}"
-    # Verify exact argv, not a similar substring in script source.
-    awk '/^CALL$/{in_call=1; is_default=0; option=0; next}
-         /^END$/{if(in_call && is_default && !option) found=1; in_call=0; next}
-         /run-20971520$/{is_default=1}
-         /^-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=/{option=1}
-         END{exit !found}' "${argv}"
+    # Verify the real configure argv, never the subsequent build invocation.
+    assert_default_configure_omits_limit "${argv}"
     grep -qx -- '-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=' "${argv}"
   else
     [[ ${status} != 0 ]] || { echo "${mode}: invalid configure was accepted"; exit 1; }
