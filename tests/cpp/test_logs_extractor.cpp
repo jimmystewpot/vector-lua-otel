@@ -109,7 +109,7 @@ TEST_F(LogsExtractorTest, GoldenEdgeFixturesAllRecords) {
     assert(r1.SeverityNumber == 9, "r1.SeverityNumber mismatch")
     assert(r1.ServiceName == "edge-svc", "r1.ServiceName mismatch: " .. tostring(r1.ServiceName))
     assert(type(r1.Body) == "string", "r1.Body must be string")
-    assert(string.find(r1.Body, "kvlistValue") ~= nil, "r1.Body must contain kvlistValue")
+    assert(r1.Body == '{"k":"v"}', "r1.Body mismatch: " .. tostring(r1.Body))
     assert(r1.ScopeName == "edge", "r1.ScopeName mismatch")
     assert(r1.ScopeVersion == "1", "r1.ScopeVersion mismatch")
     assert(type(r1.processed_at) == "string" and #r1.processed_at > 20, "r1.processed_at invalid")

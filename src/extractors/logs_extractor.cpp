@@ -27,63 +27,6 @@ namespace {
 using core::ErrorCode;
 using core::OperationContext;
 
-std::string_view ExtractBodyView(simdjson::ondemand::value& body_val,
-                                 core::FastJsonWriter& writer) {
-  auto type_res = body_val.type();
-  if (type_res.error() != simdjson::SUCCESS) {
-    return "";
-  }
-  auto type = type_res.value();
-  if (type == simdjson::ondemand::json_type::object) {
-    auto b_obj_res = body_val.get_object();
-    if (b_obj_res.error() != simdjson::SUCCESS) {
-      return "";
-    }
-    auto b_obj = b_obj_res.value();
-    writer.Reset();
-    writer.StartObject();
-    for (auto field_res : b_obj) {
-      if (field_res.error() != simdjson::SUCCESS) continue;
-      auto k_res = field_res.unescaped_key();
-      if (k_res.error() != simdjson::SUCCESS) continue;
-      std::string_view k = k_res.value();
-      auto fv_res = field_res.value();
-      if (fv_res.error() != simdjson::SUCCESS) continue;
-      auto fv = fv_res.value();
-
-      if (k == "stringValue" || k == "string_value") {
-        auto s_res = fv.get_string();
-        if (s_res.error() == simdjson::SUCCESS) {
-          return s_res.value();
-        }
-      }
-      writer.Key(k);
-      auto raw_res = fv.raw_json();
-      if (raw_res.error() == simdjson::SUCCESS) {
-        writer.RawJson(raw_res.value());
-      } else {
-        writer.Null();
-      }
-    }
-    writer.EndObject();
-    return writer.Str();
-  } else if (type == simdjson::ondemand::json_type::string) {
-    auto s_res = body_val.get_string();
-    if (s_res.error() == simdjson::SUCCESS) {
-      return s_res.value();
-    }
-    return "";
-  } else if (type == simdjson::ondemand::json_type::null) {
-    return "";
-  } else {
-    auto raw_res = body_val.raw_json();
-    if (raw_res.error() == simdjson::SUCCESS) {
-      return raw_res.value();
-    }
-    return "";
-  }
-}
-
 // Reusable per-thread staging buffers: capacity is retained between invocations, so the steady
 // state performs no C++ allocation per record.
 struct LogsScratch {
@@ -343,7 +286,7 @@ bool ExtractLogsJson(OperationContext& ctx, core::OtelParser& parser,
           } else if (k == "severityNumber" || k == "severity_number") {
             sev_num = core::ParseSeverityNumber(fv);
           } else if (k == "body") {
-            body_sv = ExtractBodyView(fv, s.body_writer);
+            body_sv = core::ExtractOtelBodyView(fv, s.body_writer);
           } else if (k == "eventName" || k == "event_name") {
             auto s_res = fv.get_string();
             if (s_res.error() == simdjson::SUCCESS) {
