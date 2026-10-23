@@ -530,29 +530,33 @@ TEST(AdmissionTest, NativeTablePrimaryNonNilBlocksSecondary) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(c.sig));
 
     // Primary is empty table, secondary is oversized array.
-    // Admission retains a root candidate (1), not the ignored secondary (2049).
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) + "={}, " +
-                                std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary empty blocks secondary array");
+    // Admission retains a root candidate (1), not the ignored secondary (over-limit).
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "={}, " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary empty blocks secondary array");
 
     // Primary is false, secondary is oversized array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) +
-                                "=false, " + std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary false blocks secondary array");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "=false, " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary false blocks secondary array");
 
     // Primary is a number, secondary is oversized array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) + "=42, " +
-                                std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary number blocks secondary array");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "=42, " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary number blocks secondary array");
 
     // Primary is a string, secondary is oversized array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) +
-                                "='text', " + std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary string blocks secondary array");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "='text', " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary string blocks secondary array");
   }
 }
 
@@ -571,29 +575,31 @@ TEST(AdmissionTest, NativeTableNilPrimaryUsesSecondary) {
   for (const auto& c : cases) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(c.sig));
 
-    // Primary is nil, secondary is valid 2048-element array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2048) + "return {" + std::string(c.primary) +
-                                "=nil, " + std::string(c.secondary) + "=r(N)}"),
-                   2048, tag + " primary nil uses secondary 2048");
-
-    // Primary is absent (no wrapper field), secondary is valid 2048-element array.
+    // Primary is nil, secondary is valid array at limit.
     ExpectAccepted(
         RunTable(ModuleKind::Native, c.sig,
-                 NativeTableArray(2048) + "return {" + std::string(c.secondary) + "=r(N)}"),
-        2048, tag + " primary absent uses secondary 2048");
+                 NativeTableArray(kMaxIncomingRecords) + "return {" + std::string(c.primary) +
+                     "=nil, " + std::string(c.secondary) + "=r(N)}"),
+        kMaxIncomingRecords, tag + " primary nil uses secondary at limit");
 
-    // Primary is nil, secondary is oversized 2049-element array.
-    ExpectRecordLimit(RunTable(ModuleKind::Native, c.sig,
-                               NativeTableArray(2049) + "return {" + std::string(c.primary) +
-                                   "=nil, " + std::string(c.secondary) + "=r(N)}"),
-                      tag + " primary nil secondary 2049 rejected");
+    // Primary is absent (no wrapper field), secondary is valid array at limit.
+    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
+                            NativeTableArray(kMaxIncomingRecords) + "return {" +
+                                std::string(c.secondary) + "=r(N)}"),
+                   kMaxIncomingRecords, tag + " primary absent uses secondary at limit");
 
-    // Primary is absent, secondary is oversized 2049-element array.
+    // Primary is nil, secondary is oversized array.
     ExpectRecordLimit(
         RunTable(ModuleKind::Native, c.sig,
-                 NativeTableArray(2049) + "return {" + std::string(c.secondary) + "=r(N)}"),
-        tag + " primary absent secondary 2049 rejected");
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "=nil, " + std::string(c.secondary) + "=r(N)}"),
+        tag + " primary nil secondary over-limit rejected");
+
+    // Primary is absent, secondary is oversized array.
+    ExpectRecordLimit(RunTable(ModuleKind::Native, c.sig,
+                               NativeTableArray(kMaxIncomingRecords + 1) + "return {" +
+                                   std::string(c.secondary) + "=r(N)}"),
+                      tag + " primary absent secondary over-limit rejected");
   }
 }
 
@@ -606,22 +612,24 @@ TEST(AdmissionTest, NativeTablePrimaryArrayWins) {
       if (wrapper == nullptr) continue;
       const std::string w = std::string(wrapper) + " = ";
 
-      // Primary is valid 2048-element array, secondary is oversized 2049-element array.
+      // Primary is valid array at limit, secondary is oversized array.
       ExpectAccepted(RunTable(ModuleKind::Native, sig,
-                              NativeTableArray(2049) + NativeTableArray(2048) + "return {" + w +
-                                  "r(2048), secondary = r(2049)}"),
-                     2048, tag + " primary array 2048 wins over secondary");
+                              NativeTableArray(kMaxIncomingRecords + 1) +
+                                  NativeTableArray(kMaxIncomingRecords) + "return {" + w + "r(" +
+                                  std::to_string(kMaxIncomingRecords) + "), secondary = r(" +
+                                  std::to_string(kMaxIncomingRecords + 1) + ")}"),
+                     kMaxIncomingRecords, tag + " primary array at limit wins over secondary");
 
       // Primary is valid single-element array, secondary is oversized array.
       ExpectAccepted(RunTable(ModuleKind::Native, sig,
-                              NativeTableArray(2049) + "return {" + w +
-                                  "{{message = 'x'}}, secondary = r(2049)}"),
+                              NativeTableArray(kMaxIncomingRecords + 1) + "return {" + w +
+                                  "{{message = 'x'}}, secondary = r(N)}"),
                      1, tag + " primary array 1 wins over secondary");
 
       // Primary is single nonempty table (not array), secondary is oversized array.
       ExpectAccepted(RunTable(ModuleKind::Native, sig,
-                              NativeTableArray(2049) + "return {" + w +
-                                  "{message = 'x'}, secondary = r(2049)}"),
+                              NativeTableArray(kMaxIncomingRecords + 1) + "return {" + w +
+                                  "{message = 'x'}, secondary = r(N)}"),
                      1, tag + " primary single table wins over secondary");
     }
   }

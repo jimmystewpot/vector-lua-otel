@@ -2245,15 +2245,19 @@ INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
                          });
 
 TEST(NativeTableAdmissionRegression, NonNilPrimaryHasSameProcessResultWithIgnoredSecondary) {
+  char limit_buf[96];
+  const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+  const std::string_view limit_text(limit_buf, limit_len);
   for (const char* signal : {"traces", "metrics"}) {
     const std::string primary = std::string(signal) == "metrics" ? "metric" : "log";
     const std::string secondary = std::string(signal) == "metrics" ? "log" : "trace";
     for (const char* value : {"{}", "false", "42", "'text'"}) {
       SCOPED_TRACE(std::string(signal) + " primary=" + value);
       const std::string only = "return {" + primary + "=" + value + "}";
-      const std::string with_secondary =
-          "local rows={} for i=1,2049 do rows[i]={name='m',gauge={value=1}} end return {" +
-          primary + "=" + value + "," + secondary + "=rows}";
+      const std::string with_secondary = "local rows={} for i=1," +
+                                         std::to_string(kMaxIncomingRecords + 1) +
+                                         " do rows[i]={name='m',gauge={value=1}} end return {" +
+                                         primary + "=" + value + "," + secondary + "=rows}";
       RawState first;
       RawState second;
       ProcRecorder a;
@@ -2266,14 +2270,17 @@ TEST(NativeTableAdmissionRegression, NonNilPrimaryHasSameProcessResultWithIgnore
       EXPECT_EQ(actual.count, expected.count);
       EXPECT_EQ(actual.error, expected.error);
       EXPECT_EQ(b.rows, a.rows);
-      EXPECT_EQ(actual.error.find("2048-record limit"), std::string::npos);
+      EXPECT_EQ(actual.error.find(limit_text), std::string::npos);
     }
   }
 }
 
 TEST(NativeTableAdmissionRegression, AbsentPrimarySecondaryRespectsRecordBoundary) {
+  char limit_buf[96];
+  const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+  const std::string expected_limit_err(limit_buf, limit_len);
   for (const char* signal : {"traces", "metrics"}) {
-    for (int count : {2048, 2049}) {
+    for (std::size_t count : {kMaxIncomingRecords, kMaxIncomingRecords + 1}) {
       SCOPED_TRACE(std::string(signal) + " rows=" + std::to_string(count));
       const bool metric = std::string(signal) == "metrics";
       const std::string row = metric ? "{name='m',gauge={value=1}}" : NativeSpanLua(0, 0);
@@ -2284,13 +2291,13 @@ TEST(NativeTableAdmissionRegression, AbsentPrimarySecondaryRespectsRecordBoundar
       ProcRecorder rec;
       const auto result = CallProcess(state, true, signal, TablePayload(chunk), rec);
       ASSERT_EQ(result.status, LUA_OK);
-      if (count == 2048) {
+      if (count == kMaxIncomingRecords) {
         EXPECT_EQ(result.nresults, 2) << result.error;
-        EXPECT_EQ(result.count, 2048);
-        EXPECT_EQ(rec.rows, 2048);
+        EXPECT_EQ(result.count, count);
+        EXPECT_EQ(rec.rows, count);
       } else {
         EXPECT_TRUE(result.first_nil);
-        EXPECT_EQ(result.error, "event exceeds 2048-record limit");
+        EXPECT_EQ(result.error, expected_limit_err);
         EXPECT_EQ(result.count, 0);
         EXPECT_EQ(rec.rows, 0);
       }
