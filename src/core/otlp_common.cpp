@@ -1220,17 +1220,31 @@ std::string_view ExtractOtelBodyView(simdjson::ondemand::value& body_val, FastJs
   if (type == simdjson::ondemand::json_type::null) {
     return "";
   }
+  if (type == simdjson::ondemand::json_type::string) {
+    auto s_res = body_val.get_string();
+    return (s_res.error() == simdjson::SUCCESS) ? s_res.value() : "";
+  }
+  if (type == simdjson::ondemand::json_type::object) {
+    auto obj_res = body_val.get_object();
+    if (obj_res.error() != simdjson::SUCCESS) {
+      return "";
+    }
+    auto obj = obj_res.value();
+    auto str_res = obj.find_field_unordered("stringValue");
+    if (str_res.error() != simdjson::SUCCESS) {
+      str_res = obj.find_field_unordered("string_value");
+    }
+    if (str_res.error() == simdjson::SUCCESS) {
+      auto s_res = str_res.value().get_string();
+      if (s_res.error() == simdjson::SUCCESS) {
+        return s_res.value();
+      }
+    }
+    obj.reset();
+  }
 
   writer.Reset();
-  std::string_view scalar_str;
-  try {
-    const bool is_scalar_str = WriteAnyValueJsonImpl(writer, body_val, 0, &scalar_str);
-    if (is_scalar_str) {
-      return scalar_str;
-    }
-  } catch (...) {
-    return "";
-  }
+  WriteAnyValueJson(writer, body_val, 0);
   return writer.Str();
 }
 

@@ -2185,6 +2185,8 @@ TEST_F(OtlpCommonTest, ExtractOtelBodyViewVariants) {
     "bool_wrapped": { "boolValue": true },
     "double_wrapped": { "doubleValue": 3.14 },
     "bytes_wrapped": { "bytesValue": "AQID" },
+    "multi_field_str": { "stringValue": "summary", "code": 500 },
+    "multi_field_snake": { "string_value": "snake_summary", "status": "ok" },
     "plain_obj": { "custom": "data", "status": 200 },
     "null_val": null
   })"_padded;
@@ -2194,15 +2196,33 @@ TEST_F(OtlpCommonTest, ExtractOtelBodyViewVariants) {
 
   {
     auto val = obj["raw_str"].value();
+    writer_.Reset();
     EXPECT_EQ(ExtractOtelBodyView(val, writer_), "simple log");
+    EXPECT_TRUE(writer_.Str().empty());
   }
   {
     auto val = obj["str_wrapped"].value();
+    writer_.Reset();
     EXPECT_EQ(ExtractOtelBodyView(val, writer_), "hello");
+    EXPECT_TRUE(writer_.Str().empty());
   }
   {
     auto val = obj["snake_str_wrapped"].value();
+    writer_.Reset();
     EXPECT_EQ(ExtractOtelBodyView(val, writer_), "hello snake");
+    EXPECT_TRUE(writer_.Str().empty());
+  }
+  {
+    auto val = obj["multi_field_str"].value();
+    writer_.Reset();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "summary");
+    EXPECT_TRUE(writer_.Str().empty());
+  }
+  {
+    auto val = obj["multi_field_snake"].value();
+    writer_.Reset();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "snake_summary");
+    EXPECT_TRUE(writer_.Str().empty());
   }
   {
     auto val = obj["kv_wrapped"].value();
