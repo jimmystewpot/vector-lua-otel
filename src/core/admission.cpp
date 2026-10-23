@@ -388,25 +388,23 @@ void CountNativeTable(lua_State* L, int root, const Layout& layout, Walk& w) {
     return;
   }
   const int top = lua_gettop(L);
-  // Use two-key raw lookup to match extraction's first-non-nil wrapper selection.
-  // Non-nil primary (even if empty/scalar) blocks secondary fallback and root fallback.
-  bool found = false;
-  if (layout.native_wrappers[0].present()) {
-    found = GetTableFieldRaw(L, root, layout.native_wrappers[0],
-                             layout.native_wrappers[1]);
-  }
-  if (found) {
+  // Match extraction's first-non-nil wrapper selection without retrying a
+  // secondary wrapper after an empty or scalar primary.
+  if (GetTableFieldRaw(L, root, layout.native_wrappers[0], layout.native_wrappers[1])) {
     const int value = lua_gettop(L);
     if (lua_istable(L, value)) {
       if (lua_rawlen(L, value) > 0) {
         CountNonEmptyTables(L, value, w);
-      } else if (!IsLuaTableEmpty(L, value)) {
+        lua_settop(L, top);
+        return;
+      }
+      if (!IsLuaTableEmpty(L, value)) {
         w.Add(1);
+        lua_settop(L, top);
+        return;
       }
     }
-    // Non-nil selected value (whether table or not) blocks root fallback.
     lua_settop(L, top);
-    return;
   }
   if (!IsLuaTableEmpty(L, root)) {
     w.Add(1);
