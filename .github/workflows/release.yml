@@ -156,7 +156,7 @@ jobs:
             "SHA256SUMS"
 
       - name: Generate GitHub SLSA Build Provenance Attestations
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/${{ needs.verify-and-package.outputs.tarball_name }}
