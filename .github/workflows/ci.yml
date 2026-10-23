@@ -225,7 +225,7 @@ jobs:
             --exclude "third_party/.*"
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: jimmystewpot/vector-lua-otel
