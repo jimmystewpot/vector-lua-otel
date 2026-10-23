@@ -87,8 +87,8 @@ TEST(ContractFixtures, RealLogsProcessDeliversEveryRecordAndLeavesStateBaselineU
   EXPECT_EQ(result.status, LUA_OK);
   EXPECT_EQ(result.count, 3);
   EXPECT_TRUE(result.second_is_nil);
-  // one callback per N rows (N = compile-time batch size)
-  EXPECT_EQ(counter.completed() - before, (3u + core::kEmitBatchSize - 1) / core::kEmitBatchSize);
+  // one callback per row
+  EXPECT_EQ(counter.completed() - before, 3u);
 
   const StateSnapshot after = TakeSnapshot(state);
   EXPECT_EQ(after.registry_roots, baseline.registry_roots);

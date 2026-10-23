@@ -10,11 +10,12 @@ cat > "${SCRATCH}/bin/cmake" <<'STUB'
 set -euo pipefail
 printf '%s\n' 'CALL' "$@" 'END' >> "${MATRIX_ARGV}"
 if [[ "${1:-}" == --build ]]; then exit 0; fi
-binary_dir=""; limit=""; explicit=0
+binary_dir=""; limit=""; explicit=0; rec_limit=""; rec_explicit=0
 while (($#)); do
   case "$1" in
     -B) shift; binary_dir="$1" ;;
     -DVECTOR_OTEL_MAX_PAYLOAD_BYTES=*) explicit=1; limit="${1#*=}" ;;
+    -DVECTOR_OTEL_MAX_BATCH_RECORDS=*) rec_explicit=1; rec_limit="${1#*=}" ;;
   esac
   shift
 done
@@ -30,10 +31,19 @@ if ((explicit)); then
     echo 'VECTOR_OTEL_MAX_PAYLOAD_BYTES invalid' >&2; exit 1
   fi
 fi
+if ((rec_explicit)); then
+  if [[ -z "${rec_limit}" ]]; then
+    echo 'VECTOR_OTEL_MAX_BATCH_RECORDS cannot be empty' >&2; exit 1
+  elif ! [[ "${rec_limit}" =~ ^[1-9][0-9]*$ ]] || ((${#rec_limit} > 7)) || ((rec_limit > 1048576)); then
+    echo 'VECTOR_OTEL_MAX_BATCH_RECORDS invalid' >&2; exit 1
+  fi
+fi
 mkdir -p "${binary_dir}/generated/vector_otel/core"
-printf 'constexpr auto kMaxPayloadBytes = %s;\n' "${limit:-20971520}" > "${binary_dir}/generated/vector_otel/core/config.hpp"
+printf 'constexpr auto kMaxPayloadBytes = %s;\nconstexpr auto kMaxIncomingRecords = %s;\n' \
+  "${limit:-20971520}" "${rec_limit:-2048}" > "${binary_dir}/generated/vector_otel/core/config.hpp"
 printf '#!/bin/sh\nexit 0\n' > "${binary_dir}/vector_otel_tests"
-chmod +x "${binary_dir}/vector_otel_tests"
+printf '#!/bin/sh\nexit 0\n' > "${binary_dir}/vector_otel_fault_tests"
+chmod +x "${binary_dir}/vector_otel_tests" "${binary_dir}/vector_otel_fault_tests"
 STUB
 printf '#!/bin/sh\nexit 0\n' > "${SCRATCH}/bin/lua5.4"
 chmod +x "${SCRATCH}/bin/"*

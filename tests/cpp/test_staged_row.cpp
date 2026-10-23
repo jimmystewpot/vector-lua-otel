@@ -88,8 +88,6 @@ struct Recorder {
   std::vector<std::string> events;
   std::vector<const void*> resource_ptrs;
   int rows_delivered = 0;
-  int batch_count_after_failure = -1;
-  int stale_anchors = 0;  // delivered batch whose event/batch anchors were not released
   int calls = 0;
   int fail_at_call = -1;  // zero-based call index that fails
   int fail_mode = 0;      // 1: raise string before recording, 2: record then raise, 3: raise table
@@ -106,15 +104,8 @@ int RecordEmit(lua_State* L) {
   std::string text;
   Dump(L, 1, text);
   g_rec.events.push_back(text);
-  // rows delivered by this event: records.length for grouped events, otherwise 1
-  int rows = 1;
   lua_pushstring(L, "log");
   if (lua_rawget(L, 1) == LUA_TTABLE) {
-    lua_pushstring(L, "records");
-    if (lua_rawget(L, -2) == LUA_TTABLE) {
-      rows = static_cast<int>(lua_rawlen(L, -1));
-    }
-    lua_pop(L, 1);
     lua_pushstring(L, "resource");
     if (lua_rawget(L, -2) == LUA_TTABLE) {
       g_rec.resource_ptrs.push_back(lua_topointer(L, -1));
@@ -122,7 +113,7 @@ int RecordEmit(lua_State* L) {
     lua_pop(L, 1);
   }
   lua_pop(L, 1);
-  g_rec.rows_delivered += rows;
+  g_rec.rows_delivered += 1;
   if (call == g_rec.fail_at_call && g_rec.fail_mode == 2) {
     lua_pushliteral(L, "boom after side effect");
     return lua_error(L);
@@ -163,16 +154,6 @@ std::string SampleDump(int i) {
 }
 
 std::string Wrapped(const std::string& row) { return "{\"log\":" + row + "}"; }
-std::string Grouped(std::initializer_list<int> ids) {
-  std::string out = "{\"log\":{\"records\":[";
-  bool first = true;
-  for (int id : ids) {
-    if (!first) out += ',';
-    first = false;
-    out += SampleDump(id);
-  }
-  return out + "]}}";
-}
 
 void InstallEmit(OperationContext& ctx) {
   lua_pushcfunction(ctx.L, RecordEmit);
@@ -180,23 +161,16 @@ void InstallEmit(OperationContext& ctx) {
 }
 
 void EmitRowsBody(OperationContext& ctx, Scenario& sc) {
-  ctx.batch_size = sc.batch_size;
   InstallEmit(ctx);
   StagedRow& row = ThreadRow();
   for (int i = 0; i < sc.rows; ++i) {
     StageSample(row, i);
     if (!EmitStagedRow(ctx, row)) {
       sc.leaf_ok = false;
-      g_rec.batch_count_after_failure = ctx.batch_count;
       return;
     }
-    if (ctx.batch_count == 0 &&
-        (AnchorType(ctx.L, ctx.anchor_index, AnchorSlot::kEvent) != LUA_TBOOLEAN ||
-         AnchorType(ctx.L, ctx.anchor_index, AnchorSlot::kBatch) != LUA_TBOOLEAN)) {
-      ++g_rec.stale_anchors;
-    }
   }
-  sc.leaf_ok = FlushStagedRows(ctx);
+  sc.leaf_ok = true;
 }
 
 void ExpectAnchorsClear(lua_State* L, ModuleKind kind) {
@@ -206,14 +180,13 @@ void ExpectAnchorsClear(lua_State* L, ModuleKind kind) {
   }
 }
 
-Observed RunRows(RawState& s, int rows, int batch, int fail_at = -1, int fail_mode = 0) {
+Observed RunRows(RawState& s, int rows, int fail_at = -1, int fail_mode = 0) {
   g_rec.Reset();
   g_rec.fail_at_call = fail_at;
   g_rec.fail_mode = fail_mode;
   Scenario sc;
   sc.body = EmitRowsBody;
   sc.rows = rows;
-  sc.batch_size = batch;
   return RunScenario(s, sc, [] {});
 }
 
@@ -295,7 +268,6 @@ TEST(StagedRowEmitTest, SingleRowEventHasExactShape) {
 }
 
 void ScratchBody(OperationContext& ctx, Scenario& sc) {
-  ctx.batch_size = sc.batch_size;
   InstallEmit(ctx);
   StagedRow& row = ThreadRow();
   row.Reset();
@@ -318,29 +290,23 @@ void ScratchBody(OperationContext& ctx, Scenario& sc) {
 }
 
 TEST(StagedRowEmitTest, ScratchAndStackStringsSurviveMaterialization) {
-  for (int batch : {1, 3}) {
-    SCOPED_TRACE("batch " + std::to_string(batch));
-    RawState s;
-    g_rec.Reset();
-    Scenario sc;
-    sc.body = ScratchBody;
-    sc.batch_size = batch;
-    const Observed o = RunScenario(s, sc, [] {});
-    ASSERT_EQ(o.status, LUA_OK);
-    ASSERT_EQ(o.nresults, 2);
-    ASSERT_TRUE(sc.leaf_ok);
-    ASSERT_EQ(g_rec.events.size(), 1u);
-    const std::string expected_row = "{\"big\":\"" + std::string(200000, 'q') +
-                                     "\",\"clamped\":9223372036854775807,\"dynkey\":\"ABC\","
-                                     "\"exact\":9007199254740993,\"id\":\"ABCDEFG\","
-                                     "\"max\":9223372036854775807,\"min\":-9223372036854775808}";
-    EXPECT_EQ(g_rec.events[0], batch == 1 ? Wrapped(expected_row)
-                                          : "{\"log\":{\"records\":[" + expected_row + "]}}");
-  }
+  RawState s;
+  g_rec.Reset();
+  Scenario sc;
+  sc.body = ScratchBody;
+  const Observed o = RunScenario(s, sc, [] {});
+  ASSERT_EQ(o.status, LUA_OK);
+  ASSERT_EQ(o.nresults, 2);
+  ASSERT_TRUE(sc.leaf_ok);
+  ASSERT_EQ(g_rec.events.size(), 1u);
+  const std::string expected_row = "{\"big\":\"" + std::string(200000, 'q') +
+                                   "\",\"clamped\":9223372036854775807,\"dynkey\":\"ABC\","
+                                   "\"exact\":9007199254740993,\"id\":\"ABCDEFG\","
+                                   "\"max\":9223372036854775807,\"min\":-9223372036854775808}";
+  EXPECT_EQ(g_rec.events[0], Wrapped(expected_row));
 }
 
 void SharedAttrsBody(OperationContext& ctx, Scenario& sc) {
-  ctx.batch_size = sc.batch_size;
   InstallEmit(ctx);
   StagedRow tape;
   tape.Str("service.name", "svc");
@@ -353,7 +319,7 @@ void SharedAttrsBody(OperationContext& ctx, Scenario& sc) {
     row.Anchor("resource", AnchorSlot::kResourceAttrs);
     if (!EmitStagedRow(ctx, row)) return;
   }
-  sc.leaf_ok = FlushStagedRows(ctx);
+  sc.leaf_ok = true;
 }
 
 TEST(StagedRowEmitTest, AnchoredTablesAreSharedAcrossRows) {
@@ -374,86 +340,42 @@ TEST(StagedRowEmitTest, AnchoredTablesAreSharedAcrossRows) {
   ExpectAnchorsClear(s.L(), ModuleKind::Otel);
 }
 
-TEST(StagedRowEmitTest, GroupedModeBatchesRowsAndFlushesTheRemainder) {
-  RawState s;
-  const Observed o = RunRows(s, 5, 3);
-  ASSERT_EQ(o.status, LUA_OK);
-  ASSERT_EQ(o.nresults, 2);
-  EXPECT_FALSE(o.first_nil);
-  ASSERT_EQ(g_rec.events.size(), 2u);
-  EXPECT_EQ(g_rec.events[0], Grouped({0, 1, 2}));
-  EXPECT_EQ(g_rec.events[1], Grouped({3, 4}));
-  EXPECT_EQ(g_rec.stale_anchors, 0) << "a delivered batch must release its anchors";
-  ExpectAnchorsClear(s.L(), ModuleKind::Otel);
-
-  // exact multiple: nothing left to flush, no extra callback
-  const Observed exact = RunRows(s, 6, 3);
-  ASSERT_EQ(exact.status, LUA_OK);
-  EXPECT_EQ(g_rec.events.size(), 2u);
-}
-
 // ---- delivered counts
 // -----------------------------------------------------------------------------
 
 TEST(StagedRowCountTest, CompletedCallbacksAdvanceCountBeforeTheNextFailure) {
-  // N=1: calls 0 and 1 succeed, call 2 raises -> (nil, "boom", 2)
-  {
-    RawState s;
-    const Observed o = RunRows(s, 5, 1, /*fail_at=*/2, /*mode=*/1);
-    ASSERT_EQ(o.status, LUA_OK);
-    ASSERT_EQ(o.nresults, 3);
-    EXPECT_TRUE(o.first_nil);
-    EXPECT_EQ(o.text, "boom");
-    EXPECT_EQ(o.last, 2);
-    EXPECT_EQ(g_rec.events.size(), 2u);
-    ExpectAnchorsClear(s.L(), ModuleKind::Otel);
-  }
-  // N=3: first batch (3 rows) delivered, second batch fails -> count 3, pending rows discarded
-  {
-    RawState s;
-    const Observed o = RunRows(s, 6, 3, /*fail_at=*/1, /*mode=*/1);
-    ASSERT_EQ(o.status, LUA_OK);
-    ASSERT_EQ(o.nresults, 3);
-    EXPECT_TRUE(o.first_nil);
-    EXPECT_EQ(o.text, "boom");
-    EXPECT_EQ(o.last, 3);
-    EXPECT_EQ(g_rec.batch_count_after_failure, 0) << "pending rows must not survive a failure";
-    ExpectAnchorsClear(s.L(), ModuleKind::Otel);
-    // nothing carried into the next invocation on the same state
-    const Observed next = RunRows(s, 1, 3);
-    ASSERT_EQ(next.status, LUA_OK);
-    EXPECT_EQ(next.last, -1);  // (count, nil): last result is nil
-    ASSERT_EQ(g_rec.events.size(), 1u);
-    EXPECT_EQ(g_rec.events[0], Grouped({0}));
-  }
+  // Calls 0 and 1 succeed, call 2 raises -> (nil, "boom", 2)
+  RawState s;
+  const Observed o = RunRows(s, 5, /*fail_at=*/2, /*fail_mode=*/1);
+  ASSERT_EQ(o.status, LUA_OK);
+  ASSERT_EQ(o.nresults, 3);
+  EXPECT_TRUE(o.first_nil);
+  EXPECT_EQ(o.text, "boom");
+  EXPECT_EQ(o.last, 2);
+  EXPECT_EQ(g_rec.events.size(), 2u);
+  ExpectAnchorsClear(s.L(), ModuleKind::Otel);
 }
 
 TEST(StagedRowCountTest, ACallbackThatFailsAfterItsSideEffectIsNotCounted) {
-  for (int batch : {1, 3}) {
-    SCOPED_TRACE("batch " + std::to_string(batch));
-    RawState s;
-    const Observed o = RunRows(s, batch, batch, /*fail_at=*/0, /*mode=*/2);
-    ASSERT_EQ(o.status, LUA_OK);
-    ASSERT_EQ(o.nresults, 3);
-    EXPECT_TRUE(o.first_nil);
-    EXPECT_EQ(o.text, "boom after side effect");
-    EXPECT_EQ(o.last, 0);
-    EXPECT_EQ(g_rec.rows_delivered, batch) << "the side effect did happen";
-  }
+  RawState s;
+  const Observed o = RunRows(s, 1, /*fail_at=*/0, /*fail_mode=*/2);
+  ASSERT_EQ(o.status, LUA_OK);
+  ASSERT_EQ(o.nresults, 3);
+  EXPECT_TRUE(o.first_nil);
+  EXPECT_EQ(o.text, "boom after side effect");
+  EXPECT_EQ(o.last, 0);
+  EXPECT_EQ(g_rec.rows_delivered, 1) << "the side effect did happen";
 }
 
 TEST(StagedRowCountTest, NonStringCallbackErrorIsReportedGenerically) {
-  for (int batch : {1, 3}) {
-    SCOPED_TRACE("batch " + std::to_string(batch));
-    RawState s;
-    const Observed o = RunRows(s, batch, batch, /*fail_at=*/0, /*mode=*/3);
-    ASSERT_EQ(o.status, LUA_OK);
-    ASSERT_EQ(o.nresults, 3);
-    EXPECT_TRUE(o.first_nil);
-    EXPECT_EQ(o.text, "Lua operation failed");
-    EXPECT_EQ(o.last, 0);
-    ExpectAnchorsClear(s.L(), ModuleKind::Otel);
-  }
+  RawState s;
+  const Observed o = RunRows(s, 1, /*fail_at=*/0, /*fail_mode=*/3);
+  ASSERT_EQ(o.status, LUA_OK);
+  ASSERT_EQ(o.nresults, 3);
+  EXPECT_TRUE(o.first_nil);
+  EXPECT_EQ(o.text, "Lua operation failed");
+  EXPECT_EQ(o.last, 0);
+  ExpectAnchorsClear(s.L(), ModuleKind::Otel);
 }
 
 // ---- allocator sweeps
@@ -463,7 +385,7 @@ TEST(StagedRowCountTest, NonStringCallbackErrorIsReportedGenerically) {
 // invariants must hold: no Lua error escapes the closure, the returned count equals the rows that
 // reached a callback that returned, anchors are released, and the same state is fully usable after
 // a recovery GC.
-void SweepEmitAllocations(int batch, int rows) {
+void SweepEmitAllocations(int rows) {
   bool saw_failure = false;
   bool saw_success = false;
   for (std::size_t skip = 0; skip < 600 && !saw_success; ++skip) {
@@ -476,13 +398,10 @@ void SweepEmitAllocations(int batch, int rows) {
     Scenario sc;
     sc.body = EmitRowsBody;
     sc.rows = rows;
-    sc.batch_size = batch;
     const Observed o =
         RunScenario(s, sc, [&] { s.alloc().SetPlan(LuaFaultMode::kPersistent, skip); });
     ASSERT_EQ(o.status, LUA_OK) << "an error escaped the dispatcher frame";
     ExpectAnchorsClear(s.L(), ModuleKind::Otel);
-    EXPECT_LE(g_rec.batch_count_after_failure, 0) << "pending rows survived a failed emission";
-    EXPECT_EQ(g_rec.stale_anchors, 0);
     if (o.nresults == 3) {
       saw_failure = true;
       EXPECT_TRUE(o.first_nil);
@@ -494,7 +413,7 @@ void SweepEmitAllocations(int batch, int rows) {
     }
     // recovery: collect, then the same state serves a full, correct call
     lua_gc(s.L(), LUA_GCCOLLECT);
-    const Observed again = RunRows(s, rows, batch);
+    const Observed again = RunRows(s, rows);
     ASSERT_EQ(again.status, LUA_OK);
     ASSERT_EQ(again.nresults, 2);
     EXPECT_EQ(g_rec.rows_delivered, rows);
@@ -504,11 +423,7 @@ void SweepEmitAllocations(int batch, int rows) {
 }
 
 TEST(StagedRowSweepTest, SingleRowEmissionSurvivesDenialAtEveryAllocation) {
-  SweepEmitAllocations(/*batch=*/1, /*rows=*/3);
-}
-
-TEST(StagedRowSweepTest, GroupedEmissionSurvivesDenialAtEveryAllocation) {
-  SweepEmitAllocations(/*batch=*/3, /*rows=*/5);
+  SweepEmitAllocations(/*rows=*/3);
 }
 
 }  // namespace

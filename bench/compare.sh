@@ -57,15 +57,13 @@ if [[ ! -x "$VECTOR" ]]; then
   exit 1
 fi
 
-# Ensure all batch variants are compiled
-for b in 1 16 128; do
-  SO_VAR="$ROOT/build_bench/b${b}/vector_otel.so"
-  if [[ ! -f "$SO_VAR" ]]; then
-    echo "Compiling vector_otel variant (batch size = $b)..."
-    cmake -B "$ROOT/build_bench/b${b}" -DCMAKE_BUILD_TYPE=Release -DVECTOR_OTEL_EMIT_BATCH_SIZE="$b"
-    cmake --build "$ROOT/build_bench/b${b}" --target vector_otel -j$(nproc)
-  fi
-done
+# Ensure vector_otel is compiled
+SO="$ROOT/build_bench/vector_otel.so"
+if [[ ! -f "$SO" ]]; then
+  echo "Compiling vector_otel..."
+  cmake -B "$ROOT/build_bench" -DCMAKE_BUILD_TYPE=Release
+  cmake --build "$ROOT/build_bench" --target vector_otel -j$(nproc)
+fi
 
 VRL_TMPL="$HERE/pipelines/vrl_logs.yaml.tmpl"
 VRL_XFORM="$HERE/vrl/logs.vrl"
@@ -74,7 +72,7 @@ LUA_TMPL="$HERE/pipelines/lua_logs.yaml.tmpl"
 BATCH_SIZES=(1 16 128)
 
 echo "========================================================================================================================"
-echo " Comparative Benchmark: Vector VRL vs vector_otel Lua Flat (N=1) vs Lua Matched (N=Batch)"
+echo " Comparative Benchmark: Vector VRL vs vector_otel Lua Flat Streaming"
 echo " Vector:  $($VECTOR --version | head -n1)"
 echo " Target:  $TOTAL_RECORDS records across N in {1, 16, 128} (Reps: $REPS, Cores: $(nproc))"
 echo " Profiling: Throughput (rec/s, MB/s), Peak Max RSS (MB), Minor Page Faults"
@@ -83,8 +81,7 @@ printf "\n"
 
 # Arrays to store results for final summary tables
 declare -A r_vrl_rec r_vrl_mb r_vrl_rss r_vrl_faults
-declare -A r_l1_rec  r_l1_mb  r_l1_rss  r_l1_faults
-declare -A r_lm_rec  r_lm_mb  r_lm_rss  r_lm_faults
+declare -A r_lua_rec r_lua_mb r_lua_rss r_lua_faults
 declare -A r_fixture_mb r_actual_total
 
 for N in "${BATCH_SIZES[@]}"; do
@@ -107,59 +104,47 @@ for N in "${BATCH_SIZES[@]}"; do
   r_vrl_faults[$N]=$VRL_FAULTS
   r_fixture_mb[$N]=$MB_INPUT
 
-  # 2. Run Lua Flat (N=1 emit batching)
-  L1_SO="$ROOT/build_bench/b1/vector_otel.so"
-  L1_OUT="$(VECTOR="$VECTOR" bash "$HERE/run.sh" -b "$BATCHES" -r "$N" -n "$REPS" "$LUA_TMPL" "$L1_SO")"
-  L1_REC="$(echo "$L1_OUT" | awk '/throughput:/ {print $2}')"
-  L1_MB="$(echo "$L1_OUT" | awk '/throughput:/ {print $4}')"
-  L1_RSS="$(echo "$L1_OUT" | awk '/memory:/ {print $2}')"
-  L1_FAULTS="$(echo "$L1_OUT" | awk '/memory:/ {print $5}')"
-  r_l1_rec[$N]=$L1_REC
-  r_l1_mb[$N]=$L1_MB
-  r_l1_rss[$N]=$L1_RSS
-  r_l1_faults[$N]=$L1_FAULTS
-
-  # 3. Run Lua Matched (N=Batch emit batching)
-  LM_SO="$ROOT/build_bench/b${N}/vector_otel.so"
-  LM_OUT="$(VECTOR="$VECTOR" bash "$HERE/run.sh" -b "$BATCHES" -r "$N" -n "$REPS" "$LUA_TMPL" "$LM_SO")"
-  LM_REC="$(echo "$LM_OUT" | awk '/throughput:/ {print $2}')"
-  LM_MB="$(echo "$LM_OUT" | awk '/throughput:/ {print $4}')"
-  LM_RSS="$(echo "$LM_OUT" | awk '/memory:/ {print $2}')"
-  LM_FAULTS="$(echo "$LM_OUT" | awk '/memory:/ {print $5}')"
-  r_lm_rec[$N]=$LM_REC
-  r_lm_mb[$N]=$LM_MB
-  r_lm_rss[$N]=$LM_RSS
-  r_lm_faults[$N]=$LM_FAULTS
+  # 2. Run Lua Flat Streaming
+  LUA_OUT="$(VECTOR="$VECTOR" bash "$HERE/run.sh" -b "$BATCHES" -r "$N" -n "$REPS" "$LUA_TMPL" "$SO")"
+  LUA_REC="$(echo "$LUA_OUT" | awk '/throughput:/ {print $2}')"
+  LUA_MB="$(echo "$LUA_OUT" | awk '/throughput:/ {print $4}')"
+  LUA_RSS="$(echo "$LUA_OUT" | awk '/memory:/ {print $2}')"
+  LUA_FAULTS="$(echo "$LUA_OUT" | awk '/memory:/ {print $5}')"
+  r_lua_rec[$N]=$LUA_REC
+  r_lua_mb[$N]=$LUA_MB
+  r_lua_rss[$N]=$LUA_RSS
+  r_lua_faults[$N]=$LUA_FAULTS
 done
 
 echo ""
 echo "========================================================================================================================"
 echo " Table 1: Throughput & Speedup Comparison"
 echo "========================================================================================================================"
-printf "%-10s | %-10s | %-10s | %-12s | %-12s | %-10s | %-12s | %-10s\n" \
-  "Batch (N)" "Records" "Size (MB)" "VRL (rec/s)" "Lua N=1" "Speedup" "Lua Matched" "Speedup"
-printf "%-10s-+-%-10s-+-%-10s-+-%-12s-+-%-12s-+-%-10s-+-%-12s-+-%-10s\n" \
-  "----------" "----------" "----------" "------------" "------------" "----------" "------------" "----------"
+printf "%-10s | %-10s | %-10s | %-12s | %-12s | %-10s\n" \
+  "Batch (N)" "Records" "Size (MB)" "VRL (rec/s)" "Lua Flat" "Speedup"
+printf "%-10s-+-%-10s-+-%-10s-+-%-12s-+-%-12s-+-%-10s\n" \
+  "----------" "----------" "----------" "------------" "------------" "----------"
 
 for N in "${BATCH_SIZES[@]}"; do
-  spd1="$(awk -v l="${r_l1_rec[$N]}" -v v="${r_vrl_rec[$N]}" 'BEGIN { if (v > 0) printf "%.2fx", l / v; else print "N/A" }')"
-  spdm="$(awk -v l="${r_lm_rec[$N]}" -v v="${r_vrl_rec[$N]}" 'BEGIN { if (v > 0) printf "%.2fx", l / v; else print "N/A" }')"
-  printf "%-10d | %-10d | %-10s | %-12s | %-12s | %-10s | %-12s | %-10s\n" \
-    "$N" "${r_actual_total[$N]}" "${r_fixture_mb[$N]}" "${r_vrl_rec[$N]}" "${r_l1_rec[$N]}" "$spd1" "${r_lm_rec[$N]}" "$spdm"
+  spd="$(awk -v l="${r_lua_rec[$N]}" -v v="${r_vrl_rec[$N]}" 'BEGIN { if (v > 0) printf "%.2fx", l / v; else print "N/A" }')"
+  printf "%-10d | %-10d | %-10s | %-12s | %-12s | %-10s\n" \
+    "$N" "${r_actual_total[$N]}" "${r_fixture_mb[$N]}" "${r_vrl_rec[$N]}" "${r_lua_rec[$N]}" "$spd"
 done
 
 echo ""
 echo "========================================================================================================================"
 echo " Table 2: Memory Utilization & Minor Page Faults Comparison"
 echo "========================================================================================================================"
-printf "%-10s | %-14s | %-14s | %-14s | %-12s | %-12s | %-12s\n" \
-  "Batch (N)" "VRL RSS (MB)" "Lua N=1 (MB)" "Lua Match (MB)" "VRL Faults" "Lua N=1 Flts" "Lua Match Flts"
-printf "%-10s-+-%-14s-+-%-14s-+-%-14s-+-%-12s-+-%-12s-+-%-12s\n" \
-  "----------" "--------------" "--------------" "--------------" "------------" "------------" "------------"
+printf "%-10s | %-14s | %-14s | %-16s | %-12s | %-12s | %-16s\n" \
+  "Batch (N)" "VRL RSS (MB)" "Lua RSS (MB)" "RSS Reduction" "VRL Faults" "Lua Faults" "Faults Reduction"
+printf "%-10s-+-%-14s-+-%-14s-+-%-16s-+-%-12s-+-%-12s-+-%-16s\n" \
+  "----------" "--------------" "--------------" "----------------" "------------" "------------" "----------------"
 
 for N in "${BATCH_SIZES[@]}"; do
-  printf "%-10d | %-14s | %-14s | %-14s | %-12s | %-12s | %-12s\n" \
-    "$N" "${r_vrl_rss[$N]}" "${r_l1_rss[$N]}" "${r_lm_rss[$N]}" "${r_vrl_faults[$N]}" "${r_l1_faults[$N]}" "${r_lm_faults[$N]}"
+  red_rss="$(awk -v l="${r_lua_rss[$N]}" -v v="${r_vrl_rss[$N]}" 'BEGIN { if (v > 0) printf "-%.1f%%", (1.0 - l / v) * 100; else print "N/A" }')"
+  red_flt="$(awk -v l="${r_lua_faults[$N]}" -v v="${r_vrl_faults[$N]}" 'BEGIN { if (v > 0) printf "-%.1f%%", (1.0 - l / v) * 100; else print "N/A" }')"
+  printf "%-10d | %-14s | %-14s | %-16s | %-12s | %-12s | %-16s\n" \
+    "$N" "${r_vrl_rss[$N]}" "${r_lua_rss[$N]}" "$red_rss" "${r_vrl_faults[$N]}" "${r_lua_faults[$N]}" "$red_flt"
 done
 
 echo "========================================================================================================================"

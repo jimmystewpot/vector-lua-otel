@@ -111,24 +111,24 @@ Benchmarked on Linux x86-64 (16 cores) using Vector 0.59.0 and a 100,000-record 
 
 ### Table 1: Throughput and Speedup Comparison
 
-| Batch Size ($N$) | Records | Fixture Size | VRL Baseline (rec/s) | Lua Flat $N=1$ (rec/s) | Speedup $N=1$ | Lua Matched (rec/s) | Speedup Matched |
-|:---|:---|:---|:---|:---|:---|:---|:---|
-| **1** | 100,000 | 131.7 MB | 111,345 | 54,280 | 0.49x | 56,186 | 0.50x |
-| **16** | 100,000 | 60.1 MB | 81,208 | 81,779 | 1.01x | 81,286 | 1.00x |
-| **128** | 100,096 | 56.0 MB | 16,750 | 82,051 | **4.90x** | 82,299 | **4.91x** |
+| Batch Size ($N$) | Records | Fixture Size | VRL Baseline (rec/s) | Lua Flat Streaming (rec/s) | Speedup |
+|:---|:---|:---|:---|:---|:---|
+| **1** | 100,000 | 131.7 MB | 111,345 | 54,280 | 0.49x |
+| **16** | 100,000 | 60.1 MB | 81,208 | 81,779 | **1.01x** |
+| **128** | 100,096 | 56.0 MB | 16,750 | 82,051 | **4.90x** |
 
 ### Table 2: Memory Utilisation & Allocation Footprint
 
-| Batch Size ($N$) | VRL Max RSS (MB) | Lua $N=1$ RSS (MB) | Lua Matched RSS (MB) | Memory Reduction | VRL Page Faults | Lua $N=1$ Faults | Lua Matched Faults | Faults Reduction |
-|:---|:---|:---|:---|:---|:---|:---|:---|:---|
-| **1** | 452.56 MB | 181.94 MB | 188.64 MB | **58% lower** | 109,750 | 40,071 | 41,718 | **62% fewer** |
-| **16** | 686.86 MB | 158.17 MB | 164.49 MB | **76% lower** | 177,852 | 33,760 | 35,080 | **80% fewer** |
-| **128** | 673.25 MB | 147.38 MB | 190.75 MB | **72% – 78% lower** | 170,076 | 30,570 | 42,194 | **75% – 82% fewer** |
+| Batch Size ($N$) | VRL Max RSS (MB) | Lua Flat RSS (MB) | Memory Reduction | VRL Page Faults | Lua Flat Faults | Faults Reduction |
+|:---|:---|:---|:---|:---|:---|:---|
+| **1** | 452.56 MB | 181.94 MB | **58% lower** | 109,750 | 40,071 | **62% fewer** |
+| **16** | 686.86 MB | 158.17 MB | **76% lower** | 177,852 | 33,760 | **80% fewer** |
+| **128** | 673.25 MB | 147.38 MB | **78% lower** | 170,076 | 30,570 | **82% fewer** |
 
 ### Key Takeaways:
-- **Production Batch Size ($N = 128$)**: VRL performance collapses to **16,750 rec/s** due to nested closure allocations and heavy heap overhead. `vector_otel.so` processes **82,299 rec/s** (46.0 MB/s) — a **4.91x throughput speedup**.
-- **Memory Footprint Reduction (72% – 78% lower RSS)**: At production batch sizes ($N=16, 128$), Vector VRL consumes **673 – 687 MB** of peak resident memory due to deep AST and intermediate object allocations. In contrast, `vector_otel.so` operates in bounded streaming memory, consuming only **147 – 191 MB** peak RSS.
-- **Dramatic Allocation Overhead Reduction (75% – 82% fewer page faults)**: VRL triggers over **170,000 minor page faults** during a 100k-record run, whereas `vector_otel.so` triggers only **30,570 – 42,194** minor page faults due to thread-local scratch buffer recycling and $O(1)$ streaming extraction.
+- **Production Batch Size ($N = 128$)**: VRL performance collapses to **16,750 rec/s** due to nested closure allocations and heavy heap overhead. `vector_otel.so` processes **82,051 rec/s** (46.0 MB/s) — a **4.90x throughput speedup**.
+- **Memory Footprint Reduction (58% – 78% lower RSS)**: At production batch sizes ($N=16, 128$), Vector VRL consumes **673 – 687 MB** of peak resident memory due to deep AST and intermediate object allocations. In contrast, `vector_otel.so` operates in bounded streaming memory, consuming only **147 – 182 MB** peak RSS.
+- **Dramatic Allocation Overhead Reduction (62% – 82% fewer page faults)**: VRL triggers over **170,000 minor page faults** during a 100k-record run, whereas `vector_otel.so` triggers only **30,570 – 40,071** minor page faults due to thread-local scratch buffer recycling and $O(1)$ streaming extraction.
 - **Stable Scaling**: While VRL experiences a 6.6x slowdown when scaling from $N=1$ to $N=128$, `vector_otel.so` delivers consistently high performance (~82,000 rec/s) regardless of batch size.
 
 ---
@@ -272,8 +272,8 @@ Pass these options to `cmake -B build`:
 |:---|:---|:---|
 | `-DCMAKE_BUILD_TYPE` | `Release` | Build mode (`Release`, `Debug`, `RelWithDebInfo`) |
 | `-DENABLE_NATIVE_TUNING=ON` | `OFF` | Enables `-march=native` compiler optimisations |
-| `-DVECTOR_OTEL_EMIT_BATCH_SIZE=N`| `1` | Compile-time emit batch size ($N \ge 1$) |
 | `-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=C`| `20971520` (20 MiB) | Maximum uncompressed JSON payload accepted by **both** modules, in bytes (`1..536870912`) — see [Extraction Limits](#extraction-limits-and-memory) |
+| `-DVECTOR_OTEL_MAX_BATCH_RECORDS=R`| `2048` | Maximum incoming records per call/batch accepted by **both** modules (`1..1048576`) — see [Extraction Limits](#extraction-limits-and-memory) |
 | `-DENABLE_SANITIZERS=ON` | `OFF` | ASan + UBSan (the fault-injection target is not built) |
 | `-DENABLE_TSAN=ON` | `OFF` | ThreadSanitizer (exclusive with `ENABLE_SANITIZERS`; run `vector_otel_worker_tests`) |
 | `-DBUILD_EXTRACTION_BENCHMARKS=ON` | `OFF` | Builds `vector_otel_latency_bench` (see `bench/README.md`) |
@@ -285,15 +285,15 @@ Both modules enforce the same admission limits before anything is delivered:
 | Limit | Value | Error text (second return value) |
 |:---|:---|:---|
 | Uncompressed JSON payload | `C` bytes (build-time, default 20 MiB) | `payload exceeds <C>-byte uncompressed JSON limit` |
-| Records per call (log records / spans / metric data points; table and JSON input) | 2048 (fixed) | `event exceeds 2048-record limit` |
+| Records per call (log records / spans / metric data points; table and JSON input) | `R` records (build-time, default 2048) | `event exceeds <R>-record limit` |
 
 - An over-limit call returns `(nil, <text above>, 0)` — nothing is emitted and no partial delivery happens.
-- `C` is a **rebuild-and-redeploy** setting: it is baked into both `vector_otel.so` and `vector_native.so`. Build both with the same value and deploy them together. Invalid values (`0`, above `536870912`, leading zeros, signs, units, non-digits) fail at configure time; nothing is clamped.
+- `C` and `R` are **rebuild-and-redeploy** settings: they are baked into both `vector_otel.so` and `vector_native.so`. Build both with the same values and deploy them together. Invalid values (`0`, above ceilings `536870912` / `1048576`, leading zeros, signs, units, non-digits) fail at configure time; nothing is clamped.
   ```bash
-  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVECTOR_OTEL_MAX_PAYLOAD_BYTES=33554432   # 32 MiB
+  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVECTOR_OTEL_MAX_PAYLOAD_BYTES=33554432 -DVECTOR_OTEL_MAX_BATCH_RECORDS=4096
   ```
 - The limit applies to the **uncompressed** JSON the module receives. Any source-side compression (for example the `opentelemetry` source or an HTTP/gRPC decoder) has its own, independent size cap that you must set separately; this module never sees compressed bytes.
-- **Table input is bounded by the 2048-record limit but not by `C`**: a decoded Lua table has no serialised size, so its memory is whatever Vector already allocated for it. The module never copies a table into a buffer larger than a single staged row.
+- **Table input is bounded by the `R`-record limit but not by `C`**: a decoded Lua table has no serialised size, so its memory is whatever Vector already allocated for it. The module never copies a table into a buffer larger than a single staged row.
 - **Memory.** Each Vector worker thread that parses JSON keeps one prepared parser workspace of roughly $(20/3) \times C$ bytes (input copy + simdjson parser capacity), allocated on first use and reused for the life of the thread:
 
   | `C` | per workspace | 8 workers, one module | 8 workers, both modules (`vector_otel` + `vector_native`) |
@@ -610,7 +610,7 @@ native_metrics.process(payload: string | table, emit: function) -> (integer, nil
   local count, err, partial_count = otel_logs.process(invalid_payload, emit)
   -- count == nil, err == "error message", partial_count == 0
   ```
-- **Partial counts**: `emitted_count` / `partial_count` is the number of rows whose `emit` call returned successfully. Rows already passed to `emit` cannot be recalled, so a failed call is **not atomic**: log `partial_count` if you need to know how much was delivered. With `VECTOR_OTEL_EMIT_BATCH_SIZE > 1`, rows still queued when a payload fails to parse are discarded and are not counted.
+- **Partial counts**: `emitted_count` / `partial_count` is the number of rows whose `emit` call returned successfully. Rows already passed to `emit` cannot be recalled, so a failed call is **not atomic**: log `partial_count` if you need to know how much was delivered.
 - **Errors raised by `emit`**: `emit` is invoked under `lua_pcall`; an error in your callback stops the call and is returned as `(nil, message, partial_count)`. A non-string error value is reported as `Lua operation failed`.
 - **Always inspect all three returns** (`count, err, partial`), as in the examples above, and only call `require()` / set `package.cpath` in the top-level `source:` block, never inside `process()`.
 - **Table-mode limitation**: table input is validated and read without raising, but unlike JSON input it cannot be dry-run-validated before the first row is emitted, so a malformed record deep in a table fails *after* earlier rows were delivered (see partial counts).

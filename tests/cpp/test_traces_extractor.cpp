@@ -1632,33 +1632,6 @@ TEST_F(TracesExtractorTest, JsonModeServiceNameSurvivesCallbackRemovingResourceA
   EXPECT_EQ(luaL_dostring(L_, verify_script), LUA_OK) << lua_tostring(L_, -1);
 }
 
-// Batch mode only: a parse error fails the whole call. Rows still queued (not yet passed to
-// emit) are discarded and must not be counted as emitted.
-TEST_F(TracesExtractorTest, BatchModeParseErrorDiscardsQueuedRows) {
-  if (::vector_otel::core::kEmitBatchSize <= 1) {
-    GTEST_SKIP() << "requires VECTOR_OTEL_EMIT_BATCH_SIZE > 1";
-  }
-  ASSERT_EQ(luaL_dostring(L_, R"(
-    batch_emit_calls = 0
-    function batch_emit(event) batch_emit_calls = batch_emit_calls + 1 end
-  )"),
-            LUA_OK);
-  lua_getglobal(L_, "batch_emit");
-  const int emit_idx = lua_gettop(L_);
-
-  // One complete record (fewer than the batch size) is queued, then a missing comma makes the
-  // parser fail mid-array.
-  const std::string json =
-      R"({"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"0123456789abcdef0123456789abcdef","spanId":"0123456789abcde1"} {"x":1}]}]}]})";
-  auto res = ProcessTraces(L_, json, emit_idx);
-  lua_pop(L_, 1);
-  EXPECT_FALSE(res.success);
-  EXPECT_EQ(res.emitted_count, 0);
-  lua_getglobal(L_, "batch_emit_calls");
-  EXPECT_EQ(lua_tointeger(L_, -1), 0);
-  lua_pop(L_, 1);
-}
-
 TEST_F(TracesExtractorTest, TableModeBinaryIdsNormalizedToHex) {
   // Binary 16B trace ID: \x4b\xf9\x2f\x35\x77\xb3\x4d\xa6\xa3\xce\x92\x9d\x0e\x0e\x47\x36
   // Binary 8B span ID (with embedded \0): \x00\xf0\x67\xaa\x0b\xa9\x02\xb7

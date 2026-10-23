@@ -11,8 +11,10 @@ namespace vector_otel::core {
 inline constexpr std::size_t kAbsoluteMaxPayloadBytes = 536870912;
 // Configured maximum uncompressed JSON payload in bytes (VECTOR_OTEL_MAX_PAYLOAD_BYTES).
 inline constexpr std::size_t kMaxPayloadBytes = @VECTOR_OTEL_MAX_PAYLOAD_BYTES@;
-// Fixed per-call cap on incoming records (log records / spans / metric data points).
-inline constexpr std::size_t kMaxIncomingRecords = 2048;
+// Hard ceiling for the configurable per-call/batch record limit.
+inline constexpr std::size_t kAbsoluteMaxBatchRecords = 1048576;
+// Configured per-call cap on incoming records (VECTOR_OTEL_MAX_BATCH_RECORDS).
+inline constexpr std::size_t kMaxIncomingRecords = @VECTOR_OTEL_MAX_BATCH_RECORDS@;
 // Bytes reserved after the input for simdjson's SIMD over-read; must cover SIMDJSON_PADDING.
 inline constexpr std::size_t kPayloadPaddingBytes = 64;
 
@@ -20,5 +22,7 @@ static_assert(kMaxPayloadBytes >= 1 && kMaxPayloadBytes <= kAbsoluteMaxPayloadBy
               "VECTOR_OTEL_MAX_PAYLOAD_BYTES must be in 1..536870912");
 static_assert(kMaxPayloadBytes <= static_cast<std::size_t>(-1) - kPayloadPaddingBytes,
               "payload limit plus padding must not overflow std::size_t");
+static_assert(kMaxIncomingRecords >= 1 && kMaxIncomingRecords <= kAbsoluteMaxBatchRecords,
+              "VECTOR_OTEL_MAX_BATCH_RECORDS must be in 1..1048576");
 
 }  // namespace vector_otel::core

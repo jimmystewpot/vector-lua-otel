@@ -18,8 +18,7 @@ Every modification to this repository **must** strictly adhere to the following 
 
 1. **$O(1)$ Streaming Memory Model**:
    - **Never buffer entire batches** in C++ memory or Lua tables before emitting.
-   - For $N = 1$ (default), extract and emit each record immediately via `lua_pcall(emit, 1, 0)`.
-   - For $N > 1$, accumulate only up to $N$ rows in a pre-allocated reusable buffer before flushing.
+   - Extract and emit each record immediately via `lua_pcall(emit, 1, 0)` with a single `{log = <row>}` event table.
    - Memory usage must remain bounded and independent of batch size ($M$).
 
 2. **Zero Dynamic Heap Allocations in Hot Extraction Loops**:
@@ -81,7 +80,7 @@ Every modification to this repository **must** strictly adhere to the following 
   - Methods / Functions: `CamelCase` or `snake_case` matching existing module conventions
   - Member variables: `trailing_underscore_` (e.g. `buffer_`, `capacity_`)
   - Local variables: `snake_case` (e.g. `raw_payload`, `emitted_count`)
-  - Constants / Macros: `ALL_CAPS` (e.g. `VECTOR_OTEL_EMIT_BATCH_SIZE`)
+  - Constants / Macros: `ALL_CAPS` (e.g. `VECTOR_OTEL_MAX_BATCH_RECORDS`)
 - **Headers & Includes**:
   - Prefer project includes in the order: own header, standard library headers, third-party libraries (`simdjson`, `lua.hpp`), internal headers.
   - All public headers reside in `include/vector_otel/`.
@@ -121,7 +120,7 @@ Every modification to this repository **must** strictly adhere to the following 
 ├── .gitattributes                      # Binary/text attributes for vendored trees
 ├── include/vector_otel/
 │   ├── core/
-│   │   ├── admission.hpp               # Input admission (2048-record / byte limits, preflight)
+│   │   ├── admission.hpp               # Input admission (configurable record / byte limits, preflight)
 │   │   ├── fast_json_writer.hpp        # Allocation-free JSON serialiser
 │   │   ├── module_runner.hpp           # Active-extraction guard & package.loaded helper
 │   │   ├── module_state.hpp            # Per-Lua-state module anchor (registry slots)
@@ -202,11 +201,11 @@ vector validate --no-environment tests/vector/vector_test.yaml tests/vector/vect
 
 ### Step 3b: Worker Isolation, Limits and Thread Safety
 ```bash
-./build/vector_otel_worker_tests                 # 8 concurrent states; also run at VECTOR_OTEL_EMIT_BATCH_SIZE=3
-bash scripts/test_limit_builds.sh                # payload-limit matrix (default/8 MiB/32 MiB + configure-only)
+./build/vector_otel_worker_tests                 # 8 concurrent states
+bash scripts/test_limit_builds.sh                # payload-limit and record-limit matrix
 cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON && cmake --build build-tsan --target vector_otel_worker_tests && ./build-tsan/vector_otel_worker_tests
 ```
-**Expected**: all pass; TSan reports nothing. Also run `./build/vector_otel_fault_tests` (allocator fault injection, un-sanitised builds only) at the default batch size 1 and again from a `-DVECTOR_OTEL_EMIT_BATCH_SIZE=3` build, plus `./build-n3/vector_otel_tests --gtest_filter='*BatchMode*'`.
+**Expected**: all pass; TSan reports nothing. Also run `./build/vector_otel_fault_tests` (allocator fault injection, un-sanitised builds only).
 
 ### Step 4: Formatting Verification
 ```bash

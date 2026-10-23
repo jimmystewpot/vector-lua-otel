@@ -27,13 +27,23 @@ constexpr int InvocationIndex(AnchorSlot slot) noexcept {
 }  // namespace
 
 std::size_t FormatPayloadLimitText(char* buffer, std::size_t capacity) noexcept {
-  const int n = std::snprintf(buffer, capacity, "payload exceeds %zu-byte uncompressed JSON limit",
-                              static_cast<std::size_t>(kMaxPayloadBytes));
-  if (n < 0) {
-    buffer[0] = '\0';
+  if (capacity == 0) {
     return 0;
   }
-  return static_cast<std::size_t>(n) < capacity ? static_cast<std::size_t>(n) : capacity - 1;
+  const int n = std::snprintf(buffer, capacity, "payload exceeds %zu-byte uncompressed JSON limit",
+                              static_cast<std::size_t>(kMaxPayloadBytes));
+  const auto un = static_cast<std::size_t>(n);
+  return un < capacity ? un : capacity - 1;
+}
+
+std::size_t FormatRecordLimitText(char* buffer, std::size_t capacity) noexcept {
+  if (capacity == 0) {
+    return 0;
+  }
+  const int n = std::snprintf(buffer, capacity, "event exceeds %zu-record limit",
+                              static_cast<std::size_t>(kMaxIncomingRecords));
+  const auto un = static_cast<std::size_t>(n);
+  return un < capacity ? un : capacity - 1;
 }
 
 namespace {
@@ -49,12 +59,17 @@ int BootstrapLeaf(lua_State* L) {
   lua_pushlstring(L, limit_text, limit_len);
   lua_rawseti(L, 2, ImmutableIndex(ImmutableSlot::kPayloadLimitMessage));
 
+  char record_limit_text[96];
+  const std::size_t record_limit_len =
+      FormatRecordLimitText(record_limit_text, sizeof(record_limit_text));
+  lua_pushlstring(L, record_limit_text, record_limit_len);
+  lua_rawseti(L, 2, ImmutableIndex(ImmutableSlot::kRecordLimitMessage));
+
   struct Fixed {
     ImmutableSlot slot;
     std::string_view text;
   };
   const Fixed fixed[] = {
-      {ImmutableSlot::kRecordLimitMessage, kRecordLimitText},
       {ImmutableSlot::kMemoryMessage, kMemoryText},
       {ImmutableSlot::kLuaMessage, kLuaText},
       {ImmutableSlot::kExtractionMessage, kExtractionText},
@@ -64,8 +79,9 @@ int BootstrapLeaf(lua_State* L) {
       {ImmutableSlot::kStackMessage, kStackText},
   };
   static_assert(
-      sizeof(fixed) / sizeof(fixed[0]) + 2 == static_cast<std::size_t>(ImmutableSlot::kCount),
-      "every immutable slot must be interned (payload limit and read keys are built separately)");
+      sizeof(fixed) / sizeof(fixed[0]) + 3 == static_cast<std::size_t>(ImmutableSlot::kCount),
+      "every immutable slot must be interned (payload limit, record limit, and read keys are "
+      "built separately)");
   for (const Fixed& f : fixed) {
     lua_pushlstring(L, f.text.data(), f.text.size());
     lua_rawseti(L, 2, ImmutableIndex(f.slot));

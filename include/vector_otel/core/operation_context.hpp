@@ -72,7 +72,7 @@ struct OperationContext {
   ModuleKind module = ModuleKind::Otel;
   Signal signal = Signal::Logs;
 
-  // Rows delivered by emit callbacks that RETURNED successfully (batch length in grouped mode).
+  // Rows delivered by emit callbacks that RETURNED successfully.
   // Updated immediately after the successful call, before any further fallible work.
   int delivered_count = 0;
 
@@ -88,10 +88,6 @@ struct OperationContext {
   // Absolute stack indexes of the process() arguments.
   int input_index = 1;
   int emit_index = 2;
-
-  // Grouped emission bookkeeping (batch never spans invocations).
-  int batch_size = 1;
-  int batch_count = 0;
 
   // Borrowed, never Lua-owned: selected by the dispatcher, used by the extractors.
   OtelParser* parser = nullptr;

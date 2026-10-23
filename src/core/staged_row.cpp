@@ -198,79 +198,20 @@ bool CallEmit(OperationContext& ctx, RowPayload& payload) {
   return false;
 }
 
-// Delivers the anchored batch (event on kEvent) and releases it whether or not the callback
-// succeeded: a batch never survives its callback.
-void DeliverBatch(OperationContext& ctx, RowPayload& payload) {
-  lua_State* L = ctx.L;
-  PushAnchor(L, kLeafAnchorIndex, AnchorSlot::kEmit);
-  PushAnchor(L, kLeafAnchorIndex, AnchorSlot::kEvent);
-  const int rows = ctx.batch_count;
-  if (CallEmit(ctx, payload)) {
-    ctx.delivered_count += rows;  // immediately: nothing fallible runs between return and count
-  }
-  ctx.batch_count = 0;
-  ClearAnchor(L, kLeafAnchorIndex, AnchorSlot::kEvent);
-  ClearAnchor(L, kLeafAnchorIndex, AnchorSlot::kBatch);
-}
-
-// Creates {log = {records = <array of batch_size>}} and anchors it (kEvent, kBatch).
-void StartBatch(OperationContext& ctx) {
-  lua_State* L = ctx.L;
-  lua_createtable(L, 0, 1);  // event
-  lua_pushvalue(L, -1);
-  SetAnchor(L, kLeafAnchorIndex, AnchorSlot::kEvent);
-  const int event = lua_gettop(L);
-  lua_createtable(L, 0, 1);  // {records = ...}
-  const int container = lua_gettop(L);
-  lua_pushliteral(L, "records");
-  lua_createtable(L, ctx.batch_size, 0);
-  lua_pushvalue(L, -1);
-  SetAnchor(L, kLeafAnchorIndex, AnchorSlot::kBatch);
-  lua_rawset(L, container);
-  lua_pushliteral(L, "log");
-  lua_pushvalue(L, container);
-  lua_rawset(L, event);
-  lua_settop(L, event - 1);
-}
-
 int EmitRowLeaf(lua_State* L) {
   OperationContext& ctx = LeafContext(L);
   auto& payload = *static_cast<RowPayload*>(ctx.leaf_payload);
   luaL_checkstack(L, kLeafStackSlots, "staged row too deep");
 
-  if (ctx.batch_size <= 1) {
-    PushAnchor(L, kLeafAnchorIndex, AnchorSlot::kEmit);
-    lua_createtable(L, 0, 1);  // event
-    const int event = lua_gettop(L);
-    lua_pushliteral(L, "log");
-    PushRowTable(L, *payload.row);
-    lua_rawset(L, event);
-    if (CallEmit(ctx, payload)) {
-      ctx.delivered_count += 1;
-    }
-    return 0;
-  }
-
-  if (ctx.batch_count == 0) {
-    StartBatch(ctx);
-  }
-  PushAnchor(L, kLeafAnchorIndex, AnchorSlot::kBatch);
-  const int records = lua_gettop(L);
+  PushAnchor(L, kLeafAnchorIndex, AnchorSlot::kEmit);
+  lua_createtable(L, 0, 1);  // event
+  const int event = lua_gettop(L);
+  lua_pushliteral(L, "log");
   PushRowTable(L, *payload.row);
-  lua_rawseti(L, records, static_cast<lua_Integer>(ctx.batch_count) + 1);
-  ctx.batch_count += 1;  // the row is now part of the anchored batch
-  lua_settop(L, records - 1);
-  if (ctx.batch_count >= ctx.batch_size) {
-    DeliverBatch(ctx, payload);
+  lua_rawset(L, event);
+  if (CallEmit(ctx, payload)) {
+    ctx.delivered_count += 1;
   }
-  return 0;
-}
-
-int FlushLeaf(lua_State* L) {
-  OperationContext& ctx = LeafContext(L);
-  auto& payload = *static_cast<RowPayload*>(ctx.leaf_payload);
-  luaL_checkstack(L, kLeafStackSlots, "staged row too deep");
-  DeliverBatch(ctx, payload);
   return 0;
 }
 
@@ -288,23 +229,7 @@ int MaterializeLeaf(lua_State* L) {
 bool EmitStagedRow(OperationContext& ctx, const StagedRow& row) noexcept {
   RowPayload payload;
   payload.row = &row;
-  const bool ok = RunLuaLeaf(ctx, EmitRowLeaf, &payload) && !payload.callback_failed;
-  if (!ok) {
-    ctx.batch_count = 0;  // pending rows are discarded, never counted, never carried over
-  }
-  return ok;
-}
-
-bool FlushStagedRows(OperationContext& ctx) noexcept {
-  if (ctx.batch_size <= 1 || ctx.batch_count == 0) {
-    return true;
-  }
-  RowPayload payload;
-  const bool ok = RunLuaLeaf(ctx, FlushLeaf, &payload) && !payload.callback_failed;
-  if (!ok) {
-    ctx.batch_count = 0;
-  }
-  return ok;
+  return RunLuaLeaf(ctx, EmitRowLeaf, &payload) && !payload.callback_failed;
 }
 
 bool MaterializeToAnchor(OperationContext& ctx, const StagedRow& tape, AnchorSlot slot) noexcept {

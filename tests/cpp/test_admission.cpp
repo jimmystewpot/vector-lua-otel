@@ -124,7 +124,11 @@ Outcome RunTable(ModuleKind kind, Signal signal, const std::string& chunk) {
   return Collect(sc, o);
 }
 
-const char* const kRecordLimitMessage = "event exceeds 2048-record limit";
+std::string ExpectedRecordLimitMessage() {
+  char buf[96];
+  const std::size_t len = FormatRecordLimitText(buf, sizeof(buf));
+  return std::string(buf, len);
+}
 
 void ExpectAccepted(const Outcome& r, std::size_t count, const std::string& what) {
   EXPECT_TRUE(r.ok) << what;
@@ -135,13 +139,14 @@ void ExpectAccepted(const Outcome& r, std::size_t count, const std::string& what
 }
 
 void ExpectRecordLimit(const Outcome& r, const std::string& what) {
+  const std::string expected = ExpectedRecordLimitMessage();
   EXPECT_FALSE(r.ok) << what;
   EXPECT_EQ(r.code, ErrorCode::RecordLimit) << what;
-  EXPECT_EQ(r.count, kMaxIncomingRecords + 1) << what << ": counting stops at record 2049";
-  EXPECT_EQ(r.message, kRecordLimitMessage) << what;
+  EXPECT_EQ(r.count, kMaxIncomingRecords + 1) << what << ": counting stops at record limit + 1";
+  EXPECT_EQ(r.message, expected) << what;
   ASSERT_EQ(r.observed.nresults, 3) << what;
   EXPECT_TRUE(r.observed.first_nil) << what;
-  EXPECT_EQ(r.observed.text, kRecordLimitMessage) << what;
+  EXPECT_EQ(r.observed.text, expected) << what;
   EXPECT_EQ(r.observed.last, 0) << what << ": nothing was delivered";
 }
 
@@ -230,8 +235,9 @@ std::string OtlpChunk(Signal signal, const Layout& layout, const std::string& it
 }
 
 void CheckWholeEvent(Signal signal) {
-  for (const std::size_t n :
-       {std::size_t{0}, std::size_t{1}, std::size_t{2047}, std::size_t{2048}, std::size_t{2049}}) {
+  for (const std::size_t n : {std::size_t{0}, std::size_t{1},
+                              kMaxIncomingRecords > 1 ? kMaxIncomingRecords - 1 : std::size_t{0},
+                              kMaxIncomingRecords, kMaxIncomingRecords + 1}) {
     const Layout layout = Spread(n);
     for (int form = 0; form < 2; ++form) {
       const std::string what = std::string(form == 0 ? "json " : "table ") + std::to_string(n);
@@ -250,21 +256,22 @@ TEST(AdmissionTest, LogsCountsWholeEvent) { CheckWholeEvent(Signal::Logs); }
 TEST(AdmissionTest, TracesCountsWholeEvent) { CheckWholeEvent(Signal::Traces); }
 TEST(AdmissionTest, MetricsCountsWholeEvent) { CheckWholeEvent(Signal::Metrics); }
 
-TEST(AdmissionTest, MetricsOneDescriptorWith2049DataPointsIsRejected) {
-  const Layout one = {{2049}};
+TEST(AdmissionTest, MetricsOneDescriptorWithOverLimitDataPointsIsRejected) {
+  const Layout one = {{kMaxIncomingRecords + 1}};
   ExpectRecordLimit(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, one)),
                     "json");
   ExpectRecordLimit(RunTable(ModuleKind::Otel, Signal::Metrics, OtlpChunk(Signal::Metrics, one)),
                     "table");
-  // Bulk additions saturate at the limit + 1 too (the reported count is exactly 2049).
-  const Layout two = {{1500, 1500}};
+  // Bulk additions saturate at the limit + 1 too.
+  const std::size_t half = (kMaxIncomingRecords + 1) / 2 + 1;
+  const Layout two = {{half, half}};
   ExpectRecordLimit(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, two)),
                     "json two descriptors");
-  const Layout ok = {{2048}};
-  ExpectAccepted(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, ok)), 2048,
-                 "json");
-  ExpectAccepted(RunTable(ModuleKind::Otel, Signal::Metrics, OtlpChunk(Signal::Metrics, ok)), 2048,
-                 "table");
+  const Layout ok = {{kMaxIncomingRecords}};
+  ExpectAccepted(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, ok)),
+                 kMaxIncomingRecords, "json");
+  ExpectAccepted(RunTable(ModuleKind::Otel, Signal::Metrics, OtlpChunk(Signal::Metrics, ok)),
+                 kMaxIncomingRecords, "table");
 }
 
 TEST(AdmissionTest, MetricsCountOnlyTheSelectedTypeRegardlessOfKeyOrder) {
@@ -437,10 +444,12 @@ TEST(AdmissionTest, NativeJsonSingleArrayAndWrapperNormalization) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(sig));
     ExpectAccepted(RunJson(ModuleKind::Native, sig, R"({"message":"x"})"), 1, tag + " single");
     ExpectAccepted(RunJson(ModuleKind::Native, sig, "[]"), 0, tag + " empty array");
-    ExpectAccepted(RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", 2048)), 2048,
-                   tag + " array 2048");
-    ExpectRecordLimit(RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", 2049)),
-                      tag + " array 2049");
+    ExpectAccepted(
+        RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", kMaxIncomingRecords)),
+        kMaxIncomingRecords, tag + " array limit");
+    ExpectRecordLimit(
+        RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", kMaxIncomingRecords + 1)),
+        tag + " array over limit");
     // non-object members are left to extraction; only objects are candidates
     ExpectAccepted(RunJson(ModuleKind::Native, sig, R"([{"message":"x"},5,null,{"message":"y"}])"),
                    2, tag + " malformed member");
@@ -449,25 +458,28 @@ TEST(AdmissionTest, NativeJsonSingleArrayAndWrapperNormalization) {
       const std::string w = std::string("\"") + wrapper + "\":";
       ExpectAccepted(RunJson(ModuleKind::Native, sig, "{" + w + R"({"message":"x"}})"), 1,
                      tag + " wrapped object");
-      ExpectAccepted(
-          RunJson(ModuleKind::Native, sig, "{" + w + Repeat(R"({"message":"x"})", 2048) + "}"),
-          2048, tag + " wrapped array 2048");
+      ExpectAccepted(RunJson(ModuleKind::Native, sig,
+                             "{" + w + Repeat(R"({"message":"x"})", kMaxIncomingRecords) + "}"),
+                     kMaxIncomingRecords, tag + " wrapped array limit");
       ExpectRecordLimit(
-          RunJson(ModuleKind::Native, sig, "{" + w + Repeat(R"({"message":"x"})", 2049) + "}"),
-          tag + " wrapped array 2049");
+          RunJson(ModuleKind::Native, sig,
+                  "{" + w + Repeat(R"({"message":"x"})", kMaxIncomingRecords + 1) + "}"),
+          tag + " wrapped array over limit");
       // source-field order does not change the decision
       ExpectRecordLimit(
-          RunJson(ModuleKind::Native, sig, R"({"message":"x",)" + w + Repeat("{}", 2049) + "}"),
+          RunJson(ModuleKind::Native, sig,
+                  R"({"message":"x",)" + w + Repeat("{}", kMaxIncomingRecords + 1) + "}"),
           tag + " wrapper after field");
       ExpectRecordLimit(
-          RunJson(ModuleKind::Native, sig, "{" + w + Repeat("{}", 2049) + R"(,"message":"x"})"),
+          RunJson(ModuleKind::Native, sig,
+                  "{" + w + Repeat("{}", kMaxIncomingRecords + 1) + R"(,"message":"x"})"),
           tag + " wrapper before field");
     }
   }
   // wrappers belong to their own signal only
-  ExpectAccepted(
-      RunJson(ModuleKind::Native, Signal::Logs, R"({"trace":)" + Repeat("{}", 2049) + "}"), 1,
-      "logs ignores trace wrapper");
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs,
+                         R"({"trace":)" + Repeat("{}", kMaxIncomingRecords + 1) + "}"),
+                 1, "logs ignores trace wrapper");
 }
 
 TEST(AdmissionTest, NativeTableSingleArrayAndWrapperNormalization) {
@@ -476,10 +488,12 @@ TEST(AdmissionTest, NativeTableSingleArrayAndWrapperNormalization) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(sig));
     ExpectAccepted(RunTable(ModuleKind::Native, sig, "return {message = 'x'}"), 1, tag + " single");
     ExpectAccepted(RunTable(ModuleKind::Native, sig, "return {}"), 0, tag + " empty");
-    ExpectAccepted(RunTable(ModuleKind::Native, sig, NativeTableArray(2048) + "return r(N)"), 2048,
-                   tag + " array 2048");
-    ExpectRecordLimit(RunTable(ModuleKind::Native, sig, NativeTableArray(2049) + "return r(N)"),
-                      tag + " array 2049");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, sig, NativeTableArray(kMaxIncomingRecords) + "return r(N)"),
+        kMaxIncomingRecords, tag + " array limit");
+    ExpectRecordLimit(RunTable(ModuleKind::Native, sig,
+                               NativeTableArray(kMaxIncomingRecords + 1) + "return r(N)"),
+                      tag + " array over limit");
     ExpectAccepted(
         RunTable(ModuleKind::Native, sig, "return {{message = 'x'}, 5, 'y', {}, {message = 'z'}}"),
         2, tag + " malformed members (empty tables never emit)");
@@ -488,12 +502,13 @@ TEST(AdmissionTest, NativeTableSingleArrayAndWrapperNormalization) {
       const std::string w = std::string(wrapper) + " = ";
       ExpectAccepted(RunTable(ModuleKind::Native, sig, "return {" + w + "{message = 'x'}}"), 1,
                      tag + " wrapped single");
-      ExpectAccepted(
-          RunTable(ModuleKind::Native, sig, NativeTableArray(2048) + "return {" + w + "r(N)}"),
-          2048, tag + " wrapped array 2048");
+      ExpectAccepted(RunTable(ModuleKind::Native, sig,
+                              NativeTableArray(kMaxIncomingRecords) + "return {" + w + "r(N)}"),
+                     kMaxIncomingRecords, tag + " wrapped array limit");
       ExpectRecordLimit(
-          RunTable(ModuleKind::Native, sig, NativeTableArray(2049) + "return {" + w + "r(N)}"),
-          tag + " wrapped array 2049");
+          RunTable(ModuleKind::Native, sig,
+                   NativeTableArray(kMaxIncomingRecords + 1) + "return {" + w + "r(N)}"),
+          tag + " wrapped array over limit");
     }
   }
 }
@@ -515,29 +530,33 @@ TEST(AdmissionTest, NativeTablePrimaryNonNilBlocksSecondary) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(c.sig));
 
     // Primary is empty table, secondary is oversized array.
-    // Admission retains a root candidate (1), not the ignored secondary (2049).
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) + "={}, " +
-                                std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary empty blocks secondary array");
+    // Admission retains a root candidate (1), not the ignored secondary (over-limit).
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "={}, " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary empty blocks secondary array");
 
     // Primary is false, secondary is oversized array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) +
-                                "=false, " + std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary false blocks secondary array");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "=false, " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary false blocks secondary array");
 
     // Primary is a number, secondary is oversized array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) + "=42, " +
-                                std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary number blocks secondary array");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "=42, " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary number blocks secondary array");
 
     // Primary is a string, secondary is oversized array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2049) + "return {" + std::string(c.primary) +
-                                "='text', " + std::string(c.secondary) + "=r(N)}"),
-                   1, tag + " primary string blocks secondary array");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "='text', " + std::string(c.secondary) + "=r(N)}"),
+        1, tag + " primary string blocks secondary array");
   }
 }
 
@@ -556,29 +575,31 @@ TEST(AdmissionTest, NativeTableNilPrimaryUsesSecondary) {
   for (const auto& c : cases) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(c.sig));
 
-    // Primary is nil, secondary is valid 2048-element array.
-    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
-                            NativeTableArray(2048) + "return {" + std::string(c.primary) +
-                                "=nil, " + std::string(c.secondary) + "=r(N)}"),
-                   2048, tag + " primary nil uses secondary 2048");
-
-    // Primary is absent (no wrapper field), secondary is valid 2048-element array.
+    // Primary is nil, secondary is valid array at limit.
     ExpectAccepted(
         RunTable(ModuleKind::Native, c.sig,
-                 NativeTableArray(2048) + "return {" + std::string(c.secondary) + "=r(N)}"),
-        2048, tag + " primary absent uses secondary 2048");
+                 NativeTableArray(kMaxIncomingRecords) + "return {" + std::string(c.primary) +
+                     "=nil, " + std::string(c.secondary) + "=r(N)}"),
+        kMaxIncomingRecords, tag + " primary nil uses secondary at limit");
 
-    // Primary is nil, secondary is oversized 2049-element array.
-    ExpectRecordLimit(RunTable(ModuleKind::Native, c.sig,
-                               NativeTableArray(2049) + "return {" + std::string(c.primary) +
-                                   "=nil, " + std::string(c.secondary) + "=r(N)}"),
-                      tag + " primary nil secondary 2049 rejected");
+    // Primary is absent (no wrapper field), secondary is valid array at limit.
+    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
+                            NativeTableArray(kMaxIncomingRecords) + "return {" +
+                                std::string(c.secondary) + "=r(N)}"),
+                   kMaxIncomingRecords, tag + " primary absent uses secondary at limit");
 
-    // Primary is absent, secondary is oversized 2049-element array.
+    // Primary is nil, secondary is oversized array.
     ExpectRecordLimit(
         RunTable(ModuleKind::Native, c.sig,
-                 NativeTableArray(2049) + "return {" + std::string(c.secondary) + "=r(N)}"),
-        tag + " primary absent secondary 2049 rejected");
+                 NativeTableArray(kMaxIncomingRecords + 1) + "return {" + std::string(c.primary) +
+                     "=nil, " + std::string(c.secondary) + "=r(N)}"),
+        tag + " primary nil secondary over-limit rejected");
+
+    // Primary is absent, secondary is oversized array.
+    ExpectRecordLimit(RunTable(ModuleKind::Native, c.sig,
+                               NativeTableArray(kMaxIncomingRecords + 1) + "return {" +
+                                   std::string(c.secondary) + "=r(N)}"),
+                      tag + " primary absent secondary over-limit rejected");
   }
 }
 
@@ -591,35 +612,38 @@ TEST(AdmissionTest, NativeTablePrimaryArrayWins) {
       if (wrapper == nullptr) continue;
       const std::string w = std::string(wrapper) + " = ";
 
-      // Primary is valid 2048-element array, secondary is oversized 2049-element array.
+      // Primary is valid array at limit, secondary is oversized array.
       ExpectAccepted(RunTable(ModuleKind::Native, sig,
-                              NativeTableArray(2049) + NativeTableArray(2048) + "return {" + w +
-                                  "r(2048), secondary = r(2049)}"),
-                     2048, tag + " primary array 2048 wins over secondary");
+                              NativeTableArray(kMaxIncomingRecords + 1) +
+                                  NativeTableArray(kMaxIncomingRecords) + "return {" + w + "r(" +
+                                  std::to_string(kMaxIncomingRecords) + "), secondary = r(" +
+                                  std::to_string(kMaxIncomingRecords + 1) + ")}"),
+                     kMaxIncomingRecords, tag + " primary array at limit wins over secondary");
 
       // Primary is valid single-element array, secondary is oversized array.
       ExpectAccepted(RunTable(ModuleKind::Native, sig,
-                              NativeTableArray(2049) + "return {" + w +
-                                  "{{message = 'x'}}, secondary = r(2049)}"),
+                              NativeTableArray(kMaxIncomingRecords + 1) + "return {" + w +
+                                  "{{message = 'x'}}, secondary = r(N)}"),
                      1, tag + " primary array 1 wins over secondary");
 
       // Primary is single nonempty table (not array), secondary is oversized array.
       ExpectAccepted(RunTable(ModuleKind::Native, sig,
-                              NativeTableArray(2049) + "return {" + w +
-                                  "{message = 'x'}, secondary = r(2049)}"),
+                              NativeTableArray(kMaxIncomingRecords + 1) + "return {" + w +
+                                  "{message = 'x'}, secondary = r(N)}"),
                      1, tag + " primary single table wins over secondary");
     }
   }
 }
 
 TEST(AdmissionTest, NativeMetricEventIsOneRecordWhateverItsBucketCount) {
-  const std::string buckets = Repeat("1", 2049);
+  const std::string buckets = Repeat("1", kMaxIncomingRecords + 1);
   ExpectAccepted(RunJson(ModuleKind::Native, Signal::Metrics,
                          R"({"name":"h","aggregated_histogram":{"buckets":)" + buckets + "}}"),
                  1, "json");
   ExpectAccepted(RunTable(ModuleKind::Native, Signal::Metrics,
-                          "local b = {} for i = 1, 2049 do b[i] = {upper_limit = i, count = 1} end "
-                          "return {name = 'h', aggregated_histogram = {buckets = b}}"),
+                          "local b = {} for i = 1, " + std::to_string(kMaxIncomingRecords + 1) +
+                              " do b[i] = {upper_limit = i, count = 1} end "
+                              "return {name = 'h', aggregated_histogram = {buckets = b}}"),
                  1, "table");
 }
 
@@ -785,8 +809,8 @@ TEST(AdmissionTest, PaddedCallerInputIsBorrowedAndBoundedByTheSameLimit) {
     }
   }
 
-  // Borrowed input is counted like any other: 2049 records on a fresh parser are rejected.
-  const Layout over = {{2049}};
+  // Borrowed input is counted like any other: over-limit records on a fresh parser are rejected.
+  const Layout over = {{kMaxIncomingRecords + 1}};
   const std::string records = OtlpJson(Signal::Logs, over);
   const simdjson::padded_string padded(records);
   OtelParser parser;
@@ -832,14 +856,15 @@ TEST(AdmissionTest, EmptyAndNulInputsStayParseErrorsForExtraction) {
 
 TEST(AdmissionTest, CountAdmissionIsNotTransactionalValidation) {
   // Admission only counts: a malformed later field is still extraction's to report, but if the
-  // 2049th record is seen first the event is rejected before anything can be emitted.
+  // record limit is exceeded first the event is rejected before anything can be emitted.
   const std::string malformed_later =
       R"({"resourceLogs":[{"scopeLogs":[{"logRecords":[{},{"bad":}]}]}]})";
   const Outcome r = RunJson(ModuleKind::Otel, Signal::Logs, malformed_later);
   EXPECT_TRUE(r.ok);
   EXPECT_LE(r.count, 2u);
 
-  std::string over = R"({"resourceLogs":[{"scopeLogs":[{"logRecords":)" + Repeat("{}", 2049);
+  std::string over =
+      R"({"resourceLogs":[{"scopeLogs":[{"logRecords":)" + Repeat("{}", kMaxIncomingRecords + 1);
   over.resize(over.size() - 1);  // drop the closing bracket: truncated document
   over += R"(,{"bad":}]}]}]})";
   ExpectRecordLimit(RunJson(ModuleKind::Otel, Signal::Logs, over),
@@ -874,53 +899,56 @@ TEST(AdmissionTest, PreparationFailureIsAMemoryErrorAndRetryable) {
 // ---- Native JSON admission regression tests (Task 1) ----------------------------------------
 
 TEST(AdmissionTest, NativeJsonRootArrayExpandsWrappers) {
-  // Root array with wrapper holding 2048 records should be admitted.
-  const std::string wrapped_2048 = "[{\"log\":" + Repeat("{}", 2048) + "}]";
-  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, wrapped_2048), 2048,
-                 "root array with wrapper expanding 2048");
+  // Root array with wrapper holding kMaxIncomingRecords records should be admitted.
+  const std::string wrapped_ok = "[{\"log\":" + Repeat("{}", kMaxIncomingRecords) + "}]";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, wrapped_ok), kMaxIncomingRecords,
+                 "root array with wrapper expanding kMaxIncomingRecords");
 
-  // Same with 2049 should be rejected.
-  const std::string wrapped_2049 = "[{\"log\":" + Repeat("{}", 2049) + "}]";
-  ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Logs, wrapped_2049),
-                    "root array with wrapper expanding 2049");
+  // Same with kMaxIncomingRecords + 1 should be rejected.
+  const std::string wrapped_over = "[{\"log\":" + Repeat("{}", kMaxIncomingRecords + 1) + "}]";
+  ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Logs, wrapped_over),
+                    "root array with wrapper expanding kMaxIncomingRecords + 1");
 }
 
 TEST(AdmissionTest, NativeJsonCompetingWrappersUseMaximum) {
-  // Two wrappers: first 100, second 2048. Should admit by maximum.
+  // Two wrappers: first 100, second kMaxIncomingRecords. Should admit by maximum.
   const std::string comp1 =
-      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2048) + "}";
-  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp1), 2048,
+      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", kMaxIncomingRecords) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp1), kMaxIncomingRecords,
                  "competing wrappers: maximum not sum");
 
-  // Reverse order: 2048 first, then 100.
+  // Reverse order: kMaxIncomingRecords first, then 100.
   const std::string comp2 =
-      "{\"trace\":" + Repeat("{}", 2048) + ",\"log\":" + Repeat("{}", 100) + "}";
-  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp2), 2048,
+      "{\"trace\":" + Repeat("{}", kMaxIncomingRecords) + ",\"log\":" + Repeat("{}", 100) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp2), kMaxIncomingRecords,
                  "competing wrappers reversed");
 
-  // Two 2048 wrappers should admit.
-  const std::string comp3 =
-      "{\"log\":" + Repeat("{}", 2048) + ",\"trace\":" + Repeat("{}", 2048) + "}";
-  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp3), 2048, "two 2048 wrappers");
+  // Two kMaxIncomingRecords wrappers should admit.
+  const std::string comp3 = "{\"log\":" + Repeat("{}", kMaxIncomingRecords) +
+                            ",\"trace\":" + Repeat("{}", kMaxIncomingRecords) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp3), kMaxIncomingRecords,
+                 "two kMaxIncomingRecords wrappers");
 
-  // One wrapper 2049 should reject (maximum of alternatives).
+  // One wrapper kMaxIncomingRecords + 1 should reject (maximum of alternatives).
   const std::string comp4 =
-      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2049) + "}";
+      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", kMaxIncomingRecords + 1) + "}";
   ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Traces, comp4),
-                    "competing wrappers with one at 2049");
+                    "competing wrappers with one at kMaxIncomingRecords + 1");
 }
 
 TEST(AdmissionTest, NativeJsonCountsDuplicateWrappers) {
   // When iterating through all fields (not using find_field), duplicate keys are visited.
   // Our counter sees all occurrences and takes the maximum bound.
-  const std::string dup1 = "{\"log\":" + Repeat("{}", 100) + ",\"log\":" + Repeat("{}", 2048) + "}";
-  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, dup1), 2048,
+  const std::string dup1 =
+      "{\"log\":" + Repeat("{}", 100) + ",\"log\":" + Repeat("{}", kMaxIncomingRecords) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, dup1), kMaxIncomingRecords,
                  "duplicate log wrappers: iterate all, use maximum");
 
   // Any oversized duplicate must reject, even when followed by a smaller one.
-  const std::string dup2 = "{\"log\":" + Repeat("{}", 2049) + ",\"log\":" + Repeat("{}", 100) + "}";
+  const std::string dup2 =
+      "{\"log\":" + Repeat("{}", kMaxIncomingRecords + 1) + ",\"log\":" + Repeat("{}", 100) + "}";
   ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Logs, dup2),
-                    "duplicate log wrapper at 2049");
+                    "duplicate log wrapper at kMaxIncomingRecords + 1");
 }
 
 TEST(AdmissionTest, NativeJsonDoesNotRecursivelyExpandInnerWrappers) {
