@@ -19,7 +19,7 @@ print(">> Testing module loading and exports...")
 
 local vn = require("vector_native")
 assert(type(vn) == "table", "vector_native must export a table")
-assert(vn._VERSION == "0.2.0", "Expected _VERSION 0.2.0, got: " .. tostring(vn._VERSION))
+assert(vn._VERSION == "0.3.0", "Expected _VERSION 0.3.0, got: " .. tostring(vn._VERSION))
 
 assert(type(vn.logs) == "table", "vn.logs must be a table")
 assert(type(vn.logs.process) == "function", "vn.logs.process must be a function")
