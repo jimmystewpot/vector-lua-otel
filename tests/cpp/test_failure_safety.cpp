@@ -1497,6 +1497,45 @@ TEST(FailureSafetyNativeLogs, TimestampFallsBackToObservedThenProcessedAt) {
   }
 }
 
+TEST(FailureSafetyNativeLogs, AdmissionLimitEnforcedBeforeEmission) {
+  // Root array with 2,048 valid records: admitted and all delivered.
+  {
+    SCOPED_TRACE("root array 2048");
+    RawState s;
+    ProcRecorder rec;
+    std::string payload = "[";
+    for (int i = 0; i < 2048; ++i) {
+      if (i > 0) payload += ",";
+      payload += NativeLogRecordJson(0, i);
+    }
+    payload += "]";
+    const ProcResult r = CallProcess(s, true, "logs", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    EXPECT_FALSE(r.first_nil);
+    EXPECT_EQ(r.count, 2048);
+    EXPECT_EQ(rec.rows, 2048);
+  }
+
+  // Same with 2,049: record-limit error, zero callbacks, zero partial.
+  {
+    SCOPED_TRACE("root array 2049 rejected");
+    RawState s;
+    ProcRecorder rec;
+    std::string payload = "[";
+    for (int i = 0; i < 2049; ++i) {
+      if (i > 0) payload += ",";
+      payload += NativeLogRecordJson(0, i);
+    }
+    payload += "]";
+    const ProcResult r = CallProcess(s, true, "logs", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 3) << "Expected (nil, error, partial)";
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    EXPECT_EQ(r.count, 0) << "Expected zero delivered_count on reject";
+    EXPECT_EQ(rec.rows, 0) << "Expected no rows emitted on admission reject";
+  }
+}
+
 // ---- native traces: accepted shapes, mappings, malformed entries -----------------------------
 
 struct NativeTraceCase {
@@ -1671,6 +1710,45 @@ TEST(FailureSafetyNativeTraces, NumericSpanNamesAndAttributeKeysAreFormattedWith
   EXPECT_NE(rec.events[0].find(R"("2.5":"b")"), std::string::npos) << rec.events[0];
   EXPECT_NE(rec.events[0].find(R"("k":"c")"), std::string::npos) << rec.events[0];
   EXPECT_EQ(lua_gettop(s.L()), 0);
+}
+
+TEST(FailureSafetyNativeTraces, AdmissionLimitEnforcedBeforeEmission) {
+  // Root array with 2,048 valid spans: admitted and all delivered.
+  {
+    SCOPED_TRACE("root array 2048");
+    RawState s;
+    ProcRecorder rec;
+    std::string payload = "[";
+    for (int i = 0; i < 2048; ++i) {
+      if (i > 0) payload += ",";
+      payload += NativeSpanJson(0, i);
+    }
+    payload += "]";
+    const ProcResult r = CallProcess(s, true, "traces", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    EXPECT_FALSE(r.first_nil);
+    EXPECT_EQ(r.count, 2048);
+    EXPECT_EQ(rec.rows, 2048);
+  }
+
+  // Same with 2,049: record-limit error, zero callbacks.
+  {
+    SCOPED_TRACE("root array 2049 rejected");
+    RawState s;
+    ProcRecorder rec;
+    std::string payload = "[";
+    for (int i = 0; i < 2049; ++i) {
+      if (i > 0) payload += ",";
+      payload += NativeSpanJson(0, i);
+    }
+    payload += "]";
+    const ProcResult r = CallProcess(s, true, "traces", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 3);
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    EXPECT_EQ(r.count, 0);
+    EXPECT_EQ(rec.rows, 0);
+  }
 }
 
 // ---- native metrics: accepted shapes, mappings, unsupported variants, limits ------------------
@@ -1961,6 +2039,143 @@ TEST(FailureSafetyNativeMetrics, RootShapesWrappersAndErrors) {
     EXPECT_NE(captured_out.find("[WARN] Dropped 1 unsupported metric item(s) in batch"),
               std::string::npos);
     EXPECT_NE(captured_out.find("set: 1"), std::string::npos);
+  }
+}
+
+TEST(FailureSafetyNativeMetrics, AdmissionLimitEnforcedBeforeEmission) {
+  // Root array with 2,048 valid metrics: admitted and all delivered.
+  {
+    SCOPED_TRACE("root array 2048");
+    RawState s;
+    ProcRecorder rec;
+    std::string payload = "[";
+    for (int i = 0; i < 2048; ++i) {
+      if (i > 0) payload += ",";
+      payload += NativeMetricRecordJson(0, i);
+    }
+    payload += "]";
+    const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    EXPECT_FALSE(r.first_nil);
+    EXPECT_EQ(r.count, 2048);
+    EXPECT_EQ(rec.rows, 2048);
+  }
+
+  // Same with 2,049: record-limit error, zero callbacks.
+  {
+    SCOPED_TRACE("root array 2049 rejected");
+    RawState s;
+    ProcRecorder rec;
+    std::string payload = "[";
+    for (int i = 0; i < 2049; ++i) {
+      if (i > 0) payload += ",";
+      payload += NativeMetricRecordJson(0, i);
+    }
+    payload += "]";
+    const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 3);
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    EXPECT_EQ(r.count, 0);
+    EXPECT_EQ(rec.rows, 0);
+  }
+
+  // Two legal alternative wrappers of 2,048 each: admit by maximum, not summed.
+  // Extraction selects source-order first match; admission bounds any alternative.
+  {
+    SCOPED_TRACE("two 2048 wrappers, metric first (maximum not sum)");
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    // Build: {"metric": [2048 records], "log": [2048 records]}.
+    // Admission sees max(1, 2048, 2048) = 2048; extraction uses "metric" first.
+    std::string metric_array = "[";
+    for (int i = 0; i < 2048; ++i) {
+      if (i > 0) metric_array += ",";
+      metric_array += NativeMetricRecordJson(0, i);
+    }
+    metric_array += "]";
+    std::string log_array = "[";
+    for (int i = 0; i < 2048; ++i) {
+      if (i > 0) log_array += ",";
+      log_array += NativeMetricRecordJson(0, i);
+    }
+    log_array += "]";
+    std::string payload = R"({"metric":)" + metric_array + R"(,"log":)" + log_array + "}";
+    const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    EXPECT_FALSE(r.first_nil);
+    EXPECT_EQ(r.count, 2048) << "Admission uses maximum, extraction uses first match";
+    EXPECT_EQ(rec.rows, 2048);
+  }
+
+  // Same but reversed order: "log" first, "metric" second (source order unchanged in admission).
+  {
+    SCOPED_TRACE("two 2048 wrappers, log first (order preserved)");
+    RawState s;
+    ProcRecorder rec;
+    rec.dump = true;
+    std::string metric_array = "[";
+    for (int i = 0; i < 2048; ++i) {
+      if (i > 0) metric_array += ",";
+      metric_array += NativeMetricRecordJson(0, i);
+    }
+    metric_array += "]";
+    std::string log_array = "[";
+    for (int i = 0; i < 2048; ++i) {
+      if (i > 0) log_array += ",";
+      log_array += NativeMetricRecordJson(0, i);
+    }
+    log_array += "]";
+    std::string payload = R"({"log":)" + log_array + R"(,"metric":)" + metric_array + "}";
+    const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 2) << r.error;
+    EXPECT_FALSE(r.first_nil);
+    EXPECT_EQ(r.count, 2048);
+    EXPECT_EQ(rec.rows, 2048);
+  }
+}
+
+TEST(FailureSafetyNativeMetrics, OversizedCandidateBoundRejectsEvenIfExtractionWouldSelectSmaller) {
+  // Empty primary wrapper "metric" followed by large "log": admission sees max(1, 0, 2049) = 2049,
+  // and rejects. Extraction would skip empty "metric" and use "log", but never gets there.
+  {
+    SCOPED_TRACE("empty metric, large log wrapper");
+    RawState s;
+    ProcRecorder rec;
+    std::string log_array = "[";
+    for (int i = 0; i < 2049; ++i) {
+      if (i > 0) log_array += ",";
+      log_array += NativeMetricRecordJson(0, i);
+    }
+    log_array += "]";
+    std::string payload = R"({"metric":[],"log":)" + log_array + "}";
+    const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 3);
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    EXPECT_EQ(r.count, 0);
+    EXPECT_EQ(rec.rows, 0);
+  }
+
+  // Reverse: large "log", then empty "metric"; same rejection.
+  {
+    SCOPED_TRACE("large log, empty metric wrapper");
+    RawState s;
+    ProcRecorder rec;
+    std::string log_array = "[";
+    for (int i = 0; i < 2049; ++i) {
+      if (i > 0) log_array += ",";
+      log_array += NativeMetricRecordJson(0, i);
+    }
+    log_array += "]";
+    std::string payload = R"({"log":)" + log_array + R"(,"metric":[]})";
+    const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
+    ASSERT_EQ(r.nresults, 3);
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    EXPECT_EQ(r.count, 0);
+    EXPECT_EQ(rec.rows, 0);
   }
 }
 
