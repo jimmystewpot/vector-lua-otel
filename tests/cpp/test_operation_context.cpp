@@ -495,242 +495,243 @@ TEST(FailureSafetyTest, PersistentOomAfterAcquisitionRestoresTheSameState) {
 
 }  // namespace
 
-// ============================================================================
-// MODULE REGISTRATION FAULT INJECTION TESTS
-// ============================================================================
-//
-// Tests RegisterModulesInPackageLoaded with deterministic fault injection:
-// - Parameterized across 4 distinct module names and fault modes
-// - Validates atomicity: on failure, tables are restored to pre-call state
-// - Tests both single and multiple entry scenarios
-// - Confirms successful retry after transient denials
-
 namespace {
+struct LoaderCase {
+  const char* module;
+  const char* name;
+  lua_CFunction open;
+};
+extern "C" int luaopen_vector_otel_metrics(lua_State*);
+extern "C" int luaopen_vector_native_logs(lua_State*);
+extern "C" int luaopen_vector_native_traces(lua_State*);
+const LoaderCase kLoaders[] = {
+    {"vector_otel", "vector_otel", luaopen_vector_otel},
+    {"vector_native", "vector_native", luaopen_vector_native},
+    {"vector_otel", "vector_otel.logs", luaopen_vector_otel_logs},
+    {"vector_otel", "vector_otel.traces", luaopen_vector_otel_traces},
+    {"vector_otel", "vector_otel.metrics", luaopen_vector_otel_metrics},
+    {"vector_native", "vector_native.logs", luaopen_vector_native_logs},
+    {"vector_native", "vector_native.traces", luaopen_vector_native_traces},
+    {"vector_native", "vector_native.metrics", luaopen_vector_native_metrics},
+};
 
-// Helper: snapshot pre-call state of package.loaded and _G for given keys
-struct RegistrySnapshot {
-  std::string name;
-  bool exists_in_loaded = false;
-  bool exists_in_global = false;
+int LoadedTarget(lua_State* L, bool global) {
+  if (global) {
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "loaded");
+    lua_remove(L, -2);
+  } else {
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+  }
+  return lua_gettop(L);
+}
 
-  static RegistrySnapshot Capture(lua_State* L, const char* key) {
-    RegistrySnapshot snap{key, false, false};
-
-    // Check package.loaded[key]
-    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
-    lua_pushliteral(L, "package");
+struct RollbackObservation {
+  LuaFaultAllocator* allocator = nullptr;
+  std::size_t attempts = 0;
+  bool allocated = false;
+  int calls = 0;
+  int partial = 0;
+};
+thread_local RollbackObservation* rollback_observation = nullptr;
+void ObserveRollback(lua_State* L, int journal, bool before) {
+  auto& observation = *rollback_observation;
+  if (!before) {
+    observation.allocated |= observation.allocator->stats().attempts != observation.attempts;
+    return;
+  }
+  ++observation.calls;
+  observation.attempts = observation.allocator->stats().attempts;
+  // Fixed journal layout is internal to this fault-target instrumentation.
+  lua_rawgeti(L, journal, 6);
+  const int count = static_cast<int>(lua_tointeger(L, -1));
+  lua_pop(L, 1);
+  for (int i = 0; i < count; ++i) {
+    const int slot = 7 + i * 4;
+    lua_rawgeti(L, journal, slot);
+    lua_rawgeti(L, journal, slot + 1);
     lua_rawget(L, -2);
-    if (lua_istable(L, -1)) {
-      lua_pushliteral(L, "loaded");
-      lua_rawget(L, -2);
-      if (lua_istable(L, -1)) {
-        lua_pushstring(L, key);
-        lua_rawget(L, -2);
-        snap.exists_in_loaded = !lua_isnil(L, -1);
-        lua_pop(L, 1);
+    lua_rawgeti(L, journal, slot + 2);
+    if (!lua_rawequal(L, -1, -2)) ++observation.partial;
+    lua_pop(L, 3);
+  }
+}
+
+TEST(ModuleRegistration, AllLoadersRollbackAndRetryUnderPersistentAndWindowOom) {
+  for (const auto& loader : kLoaders) {
+    for (bool distinct : {false, true}) {
+      for (LuaFaultMode mode : {LuaFaultMode::kPersistent, LuaFaultMode::kWindow}) {
+        bool success = false;
+        int failures = 0;
+        int rollback_calls = 0;
+        int partial_writes = 0;
+        for (std::size_t skip = 0; skip < 256; ++skip) {
+          SCOPED_TRACE(std::string(loader.name) + " skip=" + std::to_string(skip) +
+                       " distinct=" + std::to_string(distinct));
+          RawState state;
+          lua_State* L = state.L();
+          luaL_openlibs(L);
+          if (distinct) {
+            lua_getglobal(L, "package");
+            lua_newtable(L);
+            lua_setfield(L, -2, "loaded");
+            lua_pop(L, 1);
+          }
+          const std::string names[] = {loader.module, std::string(loader.module) + ".logs",
+                                       std::string(loader.module) + ".traces",
+                                       std::string(loader.module) + ".metrics"};
+          int snapshots[2][4]{};
+          const void* identities[2]{};
+          for (int target = 0; target < 2; ++target) {
+            const int table = LoadedTarget(L, target == 1);
+            identities[target] = lua_topointer(L, table);
+            // Cover absent, false and object old values, not merely existence.
+            lua_pushboolean(L, false);
+            lua_setfield(L, table, names[1].c_str());
+            lua_newtable(L);
+            lua_setfield(L, table, names[2].c_str());
+            for (int i = 0; i < 4; ++i) {
+              lua_getfield(L, table, names[i].c_str());
+              snapshots[target][i] = luaL_ref(L, LUA_REGISTRYINDEX);
+            }
+            lua_pop(L, 1);
+          }
+          // Aliased targets were seeded twice, so recapture after both seeds.
+          for (int target = 0; target < 2; ++target) {
+            const int table = LoadedTarget(L, target == 1);
+            for (int i = 0; i < 4; ++i) {
+              luaL_unref(L, LUA_REGISTRYINDEX, snapshots[target][i]);
+              lua_getfield(L, table, names[i].c_str());
+              snapshots[target][i] = luaL_ref(L, LUA_REGISTRYINDEX);
+            }
+            lua_pop(L, 1);
+          }
+          lua_pushcfunction(L, loader.open);
+          RollbackObservation observation;
+          observation.allocator = &state.alloc();
+          rollback_observation = &observation;
+          tls_registration_rollback_observer = ObserveRollback;
+          state.alloc().SetPlan(mode, skip, 8);
+          const int status = lua_pcall(L, 0, 1, 0);
+          const auto stats = state.alloc().stats();
+          state.alloc().ClearPlan();
+          tls_registration_rollback_observer = nullptr;
+          rollback_observation = nullptr;
+          EXPECT_FALSE(observation.allocated);
+          rollback_calls += observation.calls;
+          partial_writes += observation.partial;
+          if (status != LUA_OK) {
+            ++failures;
+            EXPECT_EQ(status, LUA_ERRMEM);
+            lua_pop(L, 1);
+            for (int target = 0; target < 2; ++target) {
+              const int table = LoadedTarget(L, target == 1);
+              ASSERT_EQ(lua_topointer(L, table), identities[target]);
+              for (int i = 0; i < 4; ++i) {
+                lua_getfield(L, table, names[i].c_str());
+                if (snapshots[target][i] == LUA_REFNIL)
+                  lua_pushnil(L);
+                else
+                  lua_rawgeti(L, LUA_REGISTRYINDEX, snapshots[target][i]);
+                EXPECT_TRUE(lua_rawequal(L, -1, -2)) << names[i];
+                lua_pop(L, 2);
+              }
+              lua_pop(L, 1);
+            }
+            // Same state, recovered allocator: complete anchor remains reusable.
+            lua_pushcfunction(L, loader.open);
+            ASSERT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK);
+            ASSERT_TRUE(lua_istable(L, -1));
+            lua_pop(L, 1);
+          } else {
+            ASSERT_TRUE(lua_istable(L, -1));
+            lua_pop(L, 1);
+            success = stats.denied == 0;
+          }
+          EXPECT_EQ(lua_gettop(L), 0);
+          if (success) break;
+        }
+        EXPECT_GT(failures, 0);
+        EXPECT_TRUE(success);
+        if (distinct && std::strcmp(loader.name, loader.module) == 0) EXPECT_GT(rollback_calls, 0);
+        if (distinct && std::strcmp(loader.name, loader.module) == 0) EXPECT_GT(partial_writes, 0);
       }
-      lua_pop(L, 1);
     }
+  }
+}
+
+int RegisterTestBatch(lua_State* L) {
+  // Values are already rooted in arguments, no C++ owner crosses a Lua raise.
+  const ModuleRegistration entries[] = {{"transaction.first", 1},
+                                        {"transaction.second", 2},
+                                        {"transaction.third", 3},
+                                        {"transaction.fourth", 4}};
+  RegisterModulesInPackageLoaded(L, entries, 4);
+  return 0;
+}
+
+TEST(ModuleRegistration, MissingRegistryAndGlobalPackageCompatibility) {
+  for (bool package : {false, true}) {
+    bool success = false;
+    for (std::size_t skip = 0; skip < 128; ++skip) {
+      RawState state;
+      lua_State* L = state.L();
+      if (package) luaL_openlibs(L);
+      lua_pushnil(L);
+      lua_setfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+      lua_pushcfunction(L, RegisterTestBatch);
+      for (int i = 0; i < 4; ++i) lua_newtable(L);
+      state.alloc().SetPlan(LuaFaultMode::kPersistent, skip);
+      const int status = lua_pcall(L, 4, 0, 0);
+      const auto stats = state.alloc().stats();
+      state.alloc().ClearPlan();
+      if (status != LUA_OK) {
+        lua_pop(L, 1);
+        lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+        EXPECT_TRUE(lua_isnil(L, -1));
+        lua_pop(L, 1);
+        if (package) {
+          const int table = LoadedTarget(L, true);
+          lua_getfield(L, table, "transaction.first");
+          EXPECT_TRUE(lua_isnil(L, -1));
+          lua_pop(L, 2);
+        }
+      } else
+        success = stats.denied == 0;
+      if (success) break;
+    }
+    EXPECT_TRUE(success);
+  }
+}
+TEST(ModuleRegistration, RequireUsesPublishedTablesWithoutMetamethods) {
+  for (const char* module : {"vector_otel", "vector_native"}) {
+    RawState state;
+    lua_State* L = state.L();
+    luaL_openlibs(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    lua_pushcfunction(
+        L, std::strcmp(module, "vector_otel") == 0 ? luaopen_vector_otel : luaopen_vector_native);
+    lua_setfield(L, -2, module);
     lua_pop(L, 2);
-
-    // Check _G[key]
-    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
-    lua_pushstring(L, key);
-    lua_rawget(L, -2);
-    snap.exists_in_global = !lua_isnil(L, -1);
-    lua_pop(L, 2);
-
-    return snap;
+    const std::string chunk =
+        "local m=require('" + std::string(module) + "'); assert(m==require('" + module +
+        "')); assert(m.logs==require('" + module + ".logs')); assert(m.traces==require('" + module +
+        ".traces')); assert(m.metrics==require('" + module + ".metrics')); return true";
+    ASSERT_EQ(luaL_loadstring(L, chunk.c_str()), LUA_OK);
+    ASSERT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK) << lua_tostring(L, -1);
+    EXPECT_TRUE(lua_toboolean(L, -1));
   }
-
-  void AssertRestored(lua_State* L) const {
-    auto restored = Capture(L, name);
-    EXPECT_EQ(restored.exists_in_loaded, exists_in_loaded)
-        << "key '" << name << "' should" << (exists_in_loaded ? "" : " not")
-        << " exist in package.loaded after rollback";
-    EXPECT_EQ(restored.exists_in_global, exists_in_global)
-        << "key '" << name << "' should" << (exists_in_global ? "" : " not")
-        << " exist in _G after rollback";
-  }
-};
-
-// Test case parameters: (module_name, fault_mode, skip, window_size)
-struct ModuleRegistrationTestParam {
-  const char* name1;
-  const char* name2;
-  const char* name3;
-  const char* name4;
-  LuaFaultMode fault_mode;
-  std::size_t skip;
-  std::size_t window_size;  // ignored if kPersistent
-};
-
-class ModuleRegistrationTest
-    : public ::testing::TestWithParam<ModuleRegistrationTestParam> {
- protected:
-  LuaFaultAllocator alloc_;
-};
-
-// Parameterized test: 4 distinct module names, persistent fault injection
-TEST_P(ModuleRegistrationTest, FaultInjectionRollsBackAndRetrySucceeds) {
-  const auto& param = GetParam();
-  auto* L = alloc_.NewState();
-  ASSERT_NE(L, nullptr);
+  RawState state;
+  lua_State* L = state.L();
   luaL_openlibs(L);
-
-  // Create 4 distinct module tables
-  lua_newtable(L);  // table1
-  lua_newtable(L);  // table2
-  lua_newtable(L);  // table3
-  lua_newtable(L);  // table4
-
-  // Capture pre-state: only table1 (index 4) should initially fail registration
-  // due to fault injection
-  std::vector<RegistrySnapshot> pre_snapshots{
-      RegistrySnapshot::Capture(L, param.name1),
-      RegistrySnapshot::Capture(L, param.name2),
-      RegistrySnapshot::Capture(L, param.name3),
-      RegistrySnapshot::Capture(L, param.name4),
-  };
-
-  // Stack: [table1, table2, table3, table4]
-  const int base = lua_gettop(L);
-
-  // === PHASE 1: Register with fault injection enabled ===
-  ModuleRegistration registrations[4] = {
-      {param.name1, -4},  // table1 (4th from top)
-      {param.name2, -3},  // table2 (3rd from top)
-      {param.name3, -2},  // table3 (2nd from top)
-      {param.name4, -1},  // table4 (1st from top / top)
-  };
-
-  alloc_.SetPlan(param.fault_mode, param.skip, param.window_size);
-
-  // First call should fail (caught as longjmp, which Lua translates to error)
-  int status = lua_pcall(L, 0, 0, 0);  // dummy call to catch the error
-  int result = RegisterModulesInPackageLoaded(L, registrations, 4);
-
-  // After fault, stack should be restored to base (tables still present)
-  EXPECT_EQ(lua_gettop(L), base) << "Stack was not properly restored after fault";
-
-  // Verify pre-state was restored (atomicity)
-  for (std::size_t i = 0; i < 4; ++i) {
-    pre_snapshots[i].AssertRestored(L);
-  }
-
-  // === PHASE 2: Clear fault injection and retry (should succeed) ===
-  alloc_.ClearPlan();
-  result = RegisterModulesInPackageLoaded(L, registrations, 4);
-  EXPECT_EQ(result, 0) << "Registration should succeed after fault injection is cleared";
-
-  // Verify all 4 modules are now registered
-  for (const auto& snap : pre_snapshots) {
-    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
-    lua_pushliteral(L, "package");
-    lua_rawget(L, -2);
-    lua_pushliteral(L, "loaded");
-    lua_rawget(L, -2);
-    lua_pushstring(L, snap.name);
-    lua_rawget(L, -2);
-    bool registered = !lua_isnil(L, -1);
-    lua_pop(L, 4);
-    EXPECT_TRUE(registered) << "Module '" << snap.name
-                            << "' should be registered in package.loaded";
-  }
-
-  // Cleanup
-  lua_settop(L, 0);
-  lua_close(L);
+  ASSERT_EQ(
+      luaL_dostring(
+          L, "setmetatable(package.loaded,{__newindex=function() error('metamethod called') end})"),
+      LUA_OK);
+  lua_pushcfunction(L, luaopen_vector_otel);
+  EXPECT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK) << lua_tostring(L, -1);
 }
-
-// Test: Single entry (compatibility with RegisterInPackageLoaded)
-TEST_F(ModuleRegistrationTest, SingleEntryRegistrationUnderFault) {
-  auto* L = alloc_.NewState();
-  ASSERT_NE(L, nullptr);
-  luaL_openlibs(L);
-
-  lua_newtable(L);
-  const int table_idx = lua_gettop(L);
-
-  const char* key = "test_single_module";
-  RegistrySnapshot pre = RegistrySnapshot::Capture(L, key);
-
-  ModuleRegistration reg = {key, table_idx};
-
-  // Inject fault at allocation 0 (first prepare attempt)
-  alloc_.SetPlan(LuaFaultMode::kWindow, 0, 1);
-
-  // First call fails and rolls back
-  RegisterModulesInPackageLoaded(L, &reg, 1);
-
-  // Verify rollback
-  pre.AssertRestored(L);
-
-  // Retry without fault
-  alloc_.ClearPlan();
-  RegisterModulesInPackageLoaded(L, &reg, 1);
-
-  // Verify success
-  lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
-  lua_pushliteral(L, "package");
-  lua_rawget(L, -2);
-  lua_pushliteral(L, "loaded");
-  lua_rawget(L, -2);
-  lua_pushstring(L, key);
-  lua_rawget(L, -2);
-  EXPECT_FALSE(lua_isnil(L, -1)) << "Module should be registered after retry";
-
-  lua_close(L);
-}
-
-// Test: Ensure early keys don't affect later ones (growth boundary)
-TEST_F(ModuleRegistrationTest, HashGrowthFailureRollsBackAllEntries) {
-  auto* L = alloc_.NewState();
-  ASSERT_NE(L, nullptr);
-  luaL_openlibs(L);
-
-  // Create tables for 2 entries
-  lua_newtable(L);
-  lua_newtable(L);
-
-  const char* early_key = "early_module";
-  const char* late_key = "late_module";
-
-  RegistrySnapshot early_pre = RegistrySnapshot::Capture(L, early_key);
-  RegistrySnapshot late_pre = RegistrySnapshot::Capture(L, late_key);
-
-  ModuleRegistration registrations[2] = {
-      {early_key, -2},
-      {late_key, -1},
-  };
-
-  // Trigger hash table growth failure on 2nd write (likely during publish)
-  alloc_.SetPlan(LuaFaultMode::kPersistent, 2, 0);
-
-  RegisterModulesInPackageLoaded(L, registrations, 2);
-
-  // Both should be restored
-  early_pre.AssertRestored(L);
-  late_pre.AssertRestored(L);
-
-  // Retry and verify both succeed
-  alloc_.ClearPlan();
-  RegisterModulesInPackageLoaded(L, registrations, 2);
-
-  lua_close(L);
-}
-
-// Instantiation: parameterized across fault modes and skip positions
-INSTANTIATE_TEST_SUITE_P(
-    FaultModes, ModuleRegistrationTest,
-    ::testing::Values(
-        // (name1, name2, name3, name4, fault_mode, skip, window_size)
-        ModuleRegistrationTestParam{"mod1", "mod2", "mod3", "mod4", LuaFaultMode::kWindow, 0, 1},
-        ModuleRegistrationTestParam{"mod1", "mod2", "mod3", "mod4", LuaFaultMode::kWindow, 1, 1},
-        ModuleRegistrationTestParam{"mod1", "mod2", "mod3", "mod4", LuaFaultMode::kWindow, 2, 1},
-        ModuleRegistrationTestParam{"mod1", "mod2", "mod3", "mod4", LuaFaultMode::kPersistent, 0, 0},
-        ModuleRegistrationTestParam{"mod1", "mod2", "mod3", "mod4", LuaFaultMode::kPersistent, 1, 0},
-        ModuleRegistrationTestParam{"mod1", "mod2", "mod3", "mod4", LuaFaultMode::kPersistent, 2, 0}));
 
 }  // namespace
 }  // namespace vector_otel::core
