@@ -169,10 +169,6 @@ void EmitRowsBody(OperationContext& ctx, Scenario& sc) {
       sc.leaf_ok = false;
       return;
     }
-    if (AnchorType(ctx.L, ctx.anchor_index, AnchorSlot::kEvent) != LUA_TBOOLEAN) {
-      sc.leaf_ok = false;
-      return;
-    }
   }
   sc.leaf_ok = true;
 }
