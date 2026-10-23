@@ -121,7 +121,7 @@ Every modification to this repository **must** strictly adhere to the following 
 ├── .gitattributes                      # Binary/text attributes for vendored trees
 ├── include/vector_otel/
 │   ├── core/
-│   │   ├── admission.hpp               # Input admission (2048-record / byte limits, preflight)
+│   │   ├── admission.hpp               # Input admission (configurable record / byte limits, preflight)
 │   │   ├── fast_json_writer.hpp        # Allocation-free JSON serialiser
 │   │   ├── module_runner.hpp           # Active-extraction guard & package.loaded helper
 │   │   ├── module_state.hpp            # Per-Lua-state module anchor (registry slots)

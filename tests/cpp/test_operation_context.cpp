@@ -136,7 +136,8 @@ TEST(ModuleStateTest, ImmutableMessagesAreInternedAtBootstrapWithTheCompiledLimi
   } cases[] = {
       {ImmutableSlot::kPayloadLimitMessage,
        "payload exceeds " + std::to_string(kMaxPayloadBytes) + "-byte uncompressed JSON limit"},
-      {ImmutableSlot::kRecordLimitMessage, "event exceeds 2048-record limit"},
+      {ImmutableSlot::kRecordLimitMessage,
+       "event exceeds " + std::to_string(kMaxIncomingRecords) + "-record limit"},
       {ImmutableSlot::kMemoryMessage, "memory allocation failed"},
       {ImmutableSlot::kLuaMessage, "Lua operation failed"},
       {ImmutableSlot::kExtractionMessage, "extraction failed"},

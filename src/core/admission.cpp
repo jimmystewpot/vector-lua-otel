@@ -498,6 +498,13 @@ bool RejectPayload(OperationContext& ctx) noexcept {
   return false;
 }
 
+bool RejectRecordLimit(OperationContext& ctx) noexcept {
+  char text[96];
+  const std::size_t length = FormatRecordLimitText(text, sizeof(text));
+  ctx.error.Set(ErrorCode::RecordLimit, std::string_view(text, length));
+  return false;
+}
+
 bool RejectStaging(OperationContext& ctx, simdjson::error_code error) noexcept {
   if (error == simdjson::CAPACITY) {
     return RejectPayload(ctx);
@@ -520,8 +527,7 @@ bool CountAndDecide(OperationContext& ctx, OtelParser& parser, simdjson::padded_
   CountJson(parser, ctx.module, ctx.signal, staged, w);
   ctx.incoming_records = w.n;
   if (w.over) {
-    ctx.error.Set(ErrorCode::RecordLimit, kRecordLimitText);
-    return false;
+    return RejectRecordLimit(ctx);
   }
   admitted = staged;
   return true;
@@ -566,8 +572,7 @@ bool AdmitTable(OperationContext& ctx, int input_index) noexcept {
     return false;
   }
   if (ctx.incoming_records > kMaxIncomingRecords) {
-    ctx.error.Set(ErrorCode::RecordLimit, kRecordLimitText);
-    return false;
+    return RejectRecordLimit(ctx);
   }
   return true;
 }

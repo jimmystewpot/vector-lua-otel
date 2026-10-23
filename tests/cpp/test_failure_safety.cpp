@@ -810,24 +810,30 @@ TEST_P(FailureSafetyOtelTest, InvalidJsonIsAnErrorWithNothingEmitted) {
 }
 
 TEST_P(FailureSafetyOtelTest, RecordLimitIsEnforcedBeforeAnyEmission) {
+  char limit_buf[96];
+  const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+  const std::string_view expected_limit(limit_buf, limit_len);
+
   RawState s;
   ProcRecorder rec;
-  const ProcResult ok = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(false, 1, 2048), rec);
+  const ProcResult ok =
+      CallProcess(s, g_sig->native, g_sig->name, PayloadFor(false, 1, kMaxIncomingRecords), rec);
   ASSERT_EQ(ok.nresults, 2);
-  EXPECT_EQ(ok.count, 2048);
+  EXPECT_EQ(ok.count, kMaxIncomingRecords);
   ProcRecorder over;
-  const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(false, 1, 2049), over);
+  const ProcResult r = CallProcess(s, g_sig->native, g_sig->name,
+                                   PayloadFor(false, 1, kMaxIncomingRecords + 1), over);
   ASSERT_EQ(r.status, LUA_OK);
   ASSERT_EQ(r.nresults, 3);
   EXPECT_TRUE(r.first_nil);
-  EXPECT_EQ(r.error, "event exceeds 2048-record limit");
+  EXPECT_EQ(r.error, expected_limit);
   EXPECT_EQ(r.count, 0);
   EXPECT_EQ(over.calls, 0);
   ProcRecorder over_t;
-  const ProcResult rt =
-      CallProcess(s, g_sig->native, g_sig->name, PayloadFor(true, 1, 2049), over_t);
+  const ProcResult rt = CallProcess(s, g_sig->native, g_sig->name,
+                                    PayloadFor(true, 1, kMaxIncomingRecords + 1), over_t);
   ASSERT_EQ(rt.nresults, 3);
-  EXPECT_EQ(rt.error, "event exceeds 2048-record limit");
+  EXPECT_EQ(rt.error, expected_limit);
   EXPECT_EQ(over_t.calls, 0);
 }
 
@@ -885,11 +891,15 @@ TEST_P(FailureSafetyOtelTest, StateRecoversAfterDeliveryFailures) {
       EXPECT_EQ(re.count, 0);
       EXPECT_EQ(empty.calls, 0);
 
+      char limit_buf[96];
+      const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+      const std::string_view expected_limit(limit_buf, limit_len);
+
       ProcRecorder over;
-      const ProcResult ro =
-          CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 1, 2049), over);
+      const ProcResult ro = CallProcess(s, g_sig->native, g_sig->name,
+                                        PayloadFor(table, 1, kMaxIncomingRecords + 1), over);
       ASSERT_EQ(ro.nresults, 3);
-      EXPECT_EQ(ro.error, "event exceeds 2048-record limit");
+      EXPECT_EQ(ro.error, expected_limit);
       EXPECT_EQ(ro.count, 0);
       EXPECT_EQ(over.calls, 0);
 
@@ -1191,7 +1201,7 @@ TEST(FailureSafetyTraces, SpansWithoutEventsOrLinksEmitEmptyArrays) {
   }
 }
 
-// The 2048 limit counts data points: not metrics, not bucket or quantile entries.
+// The record limit counts data points: not metrics, not bucket or quantile entries.
 std::string GaugeMetricJson(int points) {
   std::string out = "{\"name\":\"g\",\"gauge\":{\"dataPoints\":[";
   for (int i = 0; i < points; ++i) {
@@ -1216,16 +1226,25 @@ std::string MetricsSplitJson(const std::vector<std::vector<int>>& resources) {
 }
 
 TEST(FailureSafetyMetrics, DataPointLimitCountsAcrossResourcesScopesAndMetrics) {
+  char limit_buf[96];
+  const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+  const std::string_view expected_limit(limit_buf, limit_len);
+
+  const int half = static_cast<int>(kMaxIncomingRecords / 2);
+  const int other_half = static_cast<int>(kMaxIncomingRecords - half);
+  const int prev = static_cast<int>(kMaxIncomingRecords > 1 ? kMaxIncomingRecords - 1 : 0);
+  const int max_rec = static_cast<int>(kMaxIncomingRecords);
+
   struct Case {
     std::vector<std::vector<int>> split;
     bool ok;
   };
   const Case cases[] = {
-      {{{1024, 1024}}, true},           // 2048 in one resource, two scopes
-      {{{1024, 1023}, {1, 0}}, true},   // 2048 over two resources
-      {{{1024, 1024}, {1, 0}}, false},  // 2049 over two resources
-      {{{2047, 0}}, true},              // 2047
-      {{{2048, 1}}, false},             // 2049 over two scopes
+      {{{half, other_half}}, true},              // limit in one resource, two scopes
+      {{{half, other_half - 1}, {1, 0}}, true},  // limit over two resources
+      {{{half, other_half}, {1, 0}}, false},     // limit + 1 over two resources
+      {{{prev, 0}}, true},                       // limit - 1
+      {{{max_rec, 1}}, false},                   // limit + 1 over two scopes
   };
   for (const Case& c : cases) {
     RawState s;
@@ -1235,11 +1254,11 @@ TEST(FailureSafetyMetrics, DataPointLimitCountsAcrossResourcesScopesAndMetrics) 
     ASSERT_EQ(r.status, LUA_OK);
     if (c.ok) {
       ASSERT_EQ(r.nresults, 2) << r.error;
-      EXPECT_GE(r.count, 2047);
+      EXPECT_GE(r.count, prev);
     } else {
       ASSERT_EQ(r.nresults, 3);
       EXPECT_TRUE(r.first_nil);
-      EXPECT_EQ(r.error, "event exceeds 2048-record limit");
+      EXPECT_EQ(r.error, expected_limit);
       EXPECT_EQ(rec.calls, 0) << "nothing may be emitted once the limit is exceeded";
     }
   }
@@ -2075,7 +2094,10 @@ TEST(FailureSafetyNativeMetrics, AdmissionLimitEnforcedBeforeEmission) {
     const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
     ASSERT_EQ(r.nresults, 3);
     EXPECT_TRUE(r.first_nil);
-    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    char limit_buf[96];
+    const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+    EXPECT_NE(r.error.find(std::string_view(limit_buf, limit_len)), std::string_view::npos)
+        << r.error;
     EXPECT_EQ(r.count, 0);
     EXPECT_EQ(rec.rows, 0);
   }
@@ -2153,7 +2175,10 @@ TEST(FailureSafetyNativeMetrics, OversizedCandidateBoundRejectsEvenIfExtractionW
     const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
     ASSERT_EQ(r.nresults, 3);
     EXPECT_TRUE(r.first_nil);
-    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    char limit_buf[96];
+    const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+    EXPECT_NE(r.error.find(std::string_view(limit_buf, limit_len)), std::string_view::npos)
+        << r.error;
     EXPECT_EQ(r.count, 0);
     EXPECT_EQ(rec.rows, 0);
   }
@@ -2173,13 +2198,16 @@ TEST(FailureSafetyNativeMetrics, OversizedCandidateBoundRejectsEvenIfExtractionW
     const ProcResult r = CallProcess(s, true, "metrics", JsonPayload(payload), rec);
     ASSERT_EQ(r.nresults, 3);
     EXPECT_TRUE(r.first_nil);
-    EXPECT_NE(r.error.find("exceeds 2048-record limit"), std::string::npos) << r.error;
+    char limit_buf[96];
+    const std::size_t limit_len = FormatRecordLimitText(limit_buf, sizeof(limit_buf));
+    EXPECT_NE(r.error.find(std::string_view(limit_buf, limit_len)), std::string_view::npos)
+        << r.error;
     EXPECT_EQ(r.count, 0);
     EXPECT_EQ(rec.rows, 0);
   }
 }
 
-// The 2048 limit counts events, never the buckets or quantiles inside one.
+// The record limit counts events, never the buckets or quantiles inside one.
 TEST(FailureSafetyNativeMetrics, LimitCountsEventsNotBuckets) {
   std::string counts_json;
   std::string counts_lua;

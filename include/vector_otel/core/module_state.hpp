@@ -74,8 +74,8 @@ enum class AnchorSlot : int {
 inline constexpr int kImmutableSlotCount = static_cast<int>(ImmutableSlot::kCount);
 inline constexpr int kInvocationSlotCount = static_cast<int>(AnchorSlot::kCount);
 
-// Exact text of the immutable messages (kPayloadLimitMessage is formatted at bootstrap).
-inline constexpr std::string_view kRecordLimitText = "event exceeds 2048-record limit";
+// Exact text of the immutable messages (kPayloadLimitMessage and kRecordLimitMessage are formatted
+// at bootstrap).
 inline constexpr std::string_view kMemoryText = "memory allocation failed";
 inline constexpr std::string_view kLuaText = "Lua operation failed";
 inline constexpr std::string_view kExtractionText = "extraction failed";
@@ -84,12 +84,16 @@ inline constexpr std::string_view kEmitArgText = "emit callback must be a functi
 inline constexpr std::string_view kReentrantText =
     "re-entrant vector_otel.process() invocation is not permitted";
 inline constexpr std::string_view kStackText = "out of lua stack space";
-static_assert(kMaxIncomingRecords == 2048, "kRecordLimitText hard-codes the record limit");
 
 // Formats "payload exceeds <C>-byte uncompressed JSON limit" into `buffer` (NUL terminated, at
 // most `capacity` bytes) and returns its length. Shared by bootstrap interning and admission so
 // the immutable message and the diagnostic can never drift apart.
 std::size_t FormatPayloadLimitText(char* buffer, std::size_t capacity) noexcept;
+
+// Formats "event exceeds <R>-record limit" into `buffer` (NUL terminated, at
+// most `capacity` bytes) and returns its length. Shared by bootstrap interning and admission so
+// the immutable message and the diagnostic can never drift apart.
+std::size_t FormatRecordLimitText(char* buffer, std::size_t capacity) noexcept;
 
 // Finds or creates the anchor for `kind` in `L`. On success the anchor table is left on top of the
 // stack. On failure a protected Lua error object is left on top and NOTHING is published; a later

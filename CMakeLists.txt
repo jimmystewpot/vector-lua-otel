@@ -139,6 +139,7 @@ target_link_libraries(vector_otel_tests PRIVATE
 add_test(NAME vector_otel_tests COMMAND vector_otel_tests)
 target_compile_definitions(vector_otel_tests PRIVATE
   VECTOR_OTEL_TEST_EXPECTED_MAX_PAYLOAD_BYTES=${VECTOR_OTEL_MAX_PAYLOAD_BYTES}
+  VECTOR_OTEL_TEST_EXPECTED_MAX_BATCH_RECORDS=${VECTOR_OTEL_MAX_BATCH_RECORDS}
   VECTOR_OTEL_UNCHECKED_READ_KEYS  # tests probe the readers with arbitrary keys (see read_keys.hpp)
 )
 

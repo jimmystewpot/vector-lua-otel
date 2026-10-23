@@ -27,9 +27,12 @@ JOBS="${JOBS:-4}"
 EXTRA_ARGS=(${VECTOR_OTEL_CMAKE_ARGS:-})
 
 DEFAULT_C=20971520
+DEFAULT_R=2048
 RUN_LIMITS=("" 8388608 33554432)           # "" = leave the option unset (the default)
 CONFIGURE_ONLY_LIMITS=(1 536870912)
 INVALID_LIMITS=(0 536870913 01 +5 -1 1e3 0x10 "" 5MiB)
+CONFIGURE_ONLY_RECORD_LIMITS=(1 1048576)
+INVALID_RECORD_LIMITS=(0 1048577 01 +5 -1 1e3 0x10 "" 5k)
 FOCUSED_TESTS='*Admission*:*Parser*:*ExtractionLimits*:*ModuleExports*:*PayloadLimit*'
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/votel-limits.XXXXXX")"
@@ -51,7 +54,7 @@ configure() {
   local dir="$1"
   shift
   mkdir -p "${dir}"
-  cmake -S "${ROOT}" -B "${dir}" -DCMAKE_BUILD_TYPE=Release "${EXTRA_ARGS[@]}" "$@" \
+  cmake -S "${ROOT}" -B "${dir}" -DCMAKE_BUILD_TYPE=Release ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$@" \
     >"${dir}.log" 2>&1
 }
 
@@ -69,6 +72,13 @@ self_test() {
   # The 512 MiB limit must never be in the executed set.
   for c in "${RUN_LIMITS[@]}"; do
     [[ -z "${c}" || "${c}" -le 33554432 ]] || ok=0
+  done
+  for r in "${CONFIGURE_ONLY_RECORD_LIMITS[@]}"; do
+    [[ -z "${r}" || "${r}" =~ ^[1-9][0-9]*$ ]] || ok=0
+    [[ -z "${r}" ]] || [[ "${r}" -le 1048576 ]] || ok=0
+  done
+  for r in "${INVALID_RECORD_LIMITS[@]}"; do
+    if [[ "${r}" =~ ^[1-9][0-9]*$ && "${r}" -le 1048576 ]]; then ok=0; fi
   done
   if [[ "${ok}" == 1 ]]; then
     echo "self-test OK (${#RUN_LIMITS[@]} executed, ${#CONFIGURE_ONLY_LIMITS[@]} configure-only," \
@@ -91,7 +101,7 @@ for limit in "${RUN_LIMITS[@]}"; do
   args=()
   [[ -n "${limit}" ]] && args+=("-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=${limit}")
   echo "== C=${effective} (build + execute) =="
-  if ! configure "${dir}" "${args[@]}"; then
+  if ! configure "${dir}" ${args[@]+"${args[@]}"}; then
     fail "C=${effective} configure (see ${dir}.log)"
     tail -5 "${dir}.log" || true
     continue
@@ -113,6 +123,42 @@ for limit in "${RUN_LIMITS[@]}"; do
     pass "C=${effective} admission text + record behaviour in both real modules"
   else
     fail "C=${effective} Lua payload-limit test"
+  fi
+  RECORD_LIMIT="$(sed -n 's/.*kMaxIncomingRecords = \([0-9][0-9]*\);.*/\1/p' "${dir}/generated/vector_otel/core/config.hpp")"
+  if LUA_CPATH="${dir}/?.so;;" "${LUA_BIN}" "${ROOT}/tests/lua/test_record_limit.lua" \
+    "${RECORD_LIMIT}"; then
+    pass "C=${effective} Lua record-limit test (${RECORD_LIMIT} records)"
+  else
+    fail "C=${effective} Lua record-limit test"
+  fi
+done
+
+for limit in "${CONFIGURE_ONLY_RECORD_LIMITS[@]}"; do
+  dir="${SCRATCH}/cfg-rec-${limit}"
+  echo "== R=${limit} (configure only) =="
+  if configure "${dir}" "-DVECTOR_OTEL_MAX_BATCH_RECORDS=${limit}" &&
+    grep -q "kMaxIncomingRecords = ${limit};" "${dir}/generated/vector_otel/core/config.hpp"; then
+    pass "R=${limit} configures and is baked into the generated header"
+  else
+    fail "R=${limit} configure"
+  fi
+done
+
+for limit in "${INVALID_RECORD_LIMITS[@]}"; do
+  dir="${SCRATCH}/bad-rec-${limit:-empty}"
+  echo "== R='${limit}' (must be rejected) =="
+  if configure "${dir}" "-DVECTOR_OTEL_MAX_BATCH_RECORDS=${limit}"; then
+    # An empty value falls back to the default (cache entry unset); every other value is fatal.
+    if [[ -z "${limit}" ]] && grep -q "kMaxIncomingRecords = ${DEFAULT_R};" \
+      "${dir}/generated/vector_otel/core/config.hpp"; then
+      pass "R='' falls back to the default ${DEFAULT_R}"
+    else
+      fail "R='${limit}' was accepted"
+    fi
+  elif grep -q "VECTOR_OTEL_MAX_BATCH_RECORDS" "${dir}.log"; then
+    pass "R='${limit}' rejected with a diagnostic"
+  else
+    fail "R='${limit}' failed without a VECTOR_OTEL_MAX_BATCH_RECORDS diagnostic"
   fi
 done
 

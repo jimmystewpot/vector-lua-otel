@@ -274,6 +274,7 @@ Pass these options to `cmake -B build`:
 | `-DENABLE_NATIVE_TUNING=ON` | `OFF` | Enables `-march=native` compiler optimisations |
 | `-DVECTOR_OTEL_EMIT_BATCH_SIZE=N`| `1` | Compile-time emit batch size ($N \ge 1$) |
 | `-DVECTOR_OTEL_MAX_PAYLOAD_BYTES=C`| `20971520` (20 MiB) | Maximum uncompressed JSON payload accepted by **both** modules, in bytes (`1..536870912`) — see [Extraction Limits](#extraction-limits-and-memory) |
+| `-DVECTOR_OTEL_MAX_BATCH_RECORDS=R`| `2048` | Maximum incoming records per call/batch accepted by **both** modules (`1..1048576`) — see [Extraction Limits](#extraction-limits-and-memory) |
 | `-DENABLE_SANITIZERS=ON` | `OFF` | ASan + UBSan (the fault-injection target is not built) |
 | `-DENABLE_TSAN=ON` | `OFF` | ThreadSanitizer (exclusive with `ENABLE_SANITIZERS`; run `vector_otel_worker_tests`) |
 | `-DBUILD_EXTRACTION_BENCHMARKS=ON` | `OFF` | Builds `vector_otel_latency_bench` (see `bench/README.md`) |
@@ -285,15 +286,15 @@ Both modules enforce the same admission limits before anything is delivered:
 | Limit | Value | Error text (second return value) |
 |:---|:---|:---|
 | Uncompressed JSON payload | `C` bytes (build-time, default 20 MiB) | `payload exceeds <C>-byte uncompressed JSON limit` |
-| Records per call (log records / spans / metric data points; table and JSON input) | 2048 (fixed) | `event exceeds 2048-record limit` |
+| Records per call (log records / spans / metric data points; table and JSON input) | `R` records (build-time, default 2048) | `event exceeds <R>-record limit` |
 
 - An over-limit call returns `(nil, <text above>, 0)` — nothing is emitted and no partial delivery happens.
-- `C` is a **rebuild-and-redeploy** setting: it is baked into both `vector_otel.so` and `vector_native.so`. Build both with the same value and deploy them together. Invalid values (`0`, above `536870912`, leading zeros, signs, units, non-digits) fail at configure time; nothing is clamped.
+- `C` and `R` are **rebuild-and-redeploy** settings: they are baked into both `vector_otel.so` and `vector_native.so`. Build both with the same values and deploy them together. Invalid values (`0`, above ceilings `536870912` / `1048576`, leading zeros, signs, units, non-digits) fail at configure time; nothing is clamped.
   ```bash
-  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVECTOR_OTEL_MAX_PAYLOAD_BYTES=33554432   # 32 MiB
+  cmake -B build -DCMAKE_BUILD_TYPE=Release -DVECTOR_OTEL_MAX_PAYLOAD_BYTES=33554432 -DVECTOR_OTEL_MAX_BATCH_RECORDS=4096
   ```
 - The limit applies to the **uncompressed** JSON the module receives. Any source-side compression (for example the `opentelemetry` source or an HTTP/gRPC decoder) has its own, independent size cap that you must set separately; this module never sees compressed bytes.
-- **Table input is bounded by the 2048-record limit but not by `C`**: a decoded Lua table has no serialised size, so its memory is whatever Vector already allocated for it. The module never copies a table into a buffer larger than a single staged row.
+- **Table input is bounded by the `R`-record limit but not by `C`**: a decoded Lua table has no serialised size, so its memory is whatever Vector already allocated for it. The module never copies a table into a buffer larger than a single staged row.
 - **Memory.** Each Vector worker thread that parses JSON keeps one prepared parser workspace of roughly $(20/3) \times C$ bytes (input copy + simdjson parser capacity), allocated on first use and reused for the life of the thread:
 
   | `C` | per workspace | 8 workers, one module | 8 workers, both modules (`vector_otel` + `vector_native`) |

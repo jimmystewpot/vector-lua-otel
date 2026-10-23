@@ -87,6 +87,63 @@ expect_invalid("9999999999" "longer")
 expect_invalid("${hundred_nines}" "longer")
 expect_invalid("536870913" "above")
 
+# ---- record-limit unit cases -------------------------------------------------------------------
+function(expect_record_valid value)
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "VOTEL_VALIDATOR=record" "VOTEL_CASE_VALUE=${value}"
+            "${CMAKE_COMMAND}" "-DPROJECT_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/validate_one.cmake"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+  string(FIND "${err}${out}" "VALIDATED=${value}\n" p_line)
+  if(NOT rc EQUAL 0 OR p_line EQUAL -1)
+    record_failure("expected record '${value}' accepted; rc=${rc} output=${out}${err}")
+  else()
+    message(STATUS "ok: accepted record '${value}'")
+  endif()
+endfunction()
+
+function(expect_record_invalid value reason)
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "VOTEL_VALIDATOR=record" "VOTEL_CASE_VALUE=${value}"
+            "${CMAKE_COMMAND}" "-DPROJECT_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/tests/cmake/validate_one.cmake"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+  set(text "${out}${err}")
+  set(ok TRUE)
+  if(rc EQUAL 0)
+    set(ok FALSE)
+  endif()
+  set(rec_var "VECTOR_OTEL_MAX_BATCH_RECORDS")
+  set(rec_range "1..1048576")
+  string(FIND "${text}" "${rec_var}" p_var)
+  string(FIND "${text}" "'${value}'" p_val)
+  string(FIND "${text}" "records" p_unit)
+  string(FIND "${text}" "${rec_range}" p_range)
+  string(FIND "${text}" "${reason}" p_reason)
+  foreach(p IN ITEMS p_var p_val p_unit p_range p_reason)
+    if(${p} EQUAL -1)
+      set(ok FALSE)
+      set(missing "${missing} ${p}")
+    endif()
+  endforeach()
+  if(NOT ok)
+    record_failure("expected record '${value}' rejected with full diagnostic; rc=${rc} missing:${missing}")
+  else()
+    message(STATUS "ok: rejected record '${value}'")
+  endif()
+endfunction()
+
+foreach(v IN ITEMS 1 100 2048 65536 1048576)
+  expect_record_valid("${v}")
+endforeach()
+
+foreach(v IN ITEMS "" "0" "-1" "+5" "1.5" "20k" "2e3" "0123" " 5" "5 " "0x10")
+  expect_record_invalid("${v}" "canonical")
+endforeach()
+expect_record_invalid("99999999" "longer")
+expect_record_invalid("${hundred_nines}" "longer")
+expect_record_invalid("1048577" "above")
+
 # ---- end-to-end: the real CMakeLists must validate and generate the header ---------------------
 function(configure_case name value out_rc out_text out_dir)
   set(dir "${TEST_BINARY_ROOT}/${name}")
@@ -138,6 +195,52 @@ expect_configure_header(custom 33554432 33554432)
 expect_configure_rejected(empty "")
 expect_configure_rejected(zero 0)
 expect_configure_rejected(too_large 536870913)
+
+function(expect_configure_records_header name value expected)
+  set(dir "${TEST_BINARY_ROOT}/${name}")
+  file(REMOVE_RECURSE "${dir}")
+  set(args "")
+  if(NOT value STREQUAL "<omit>")
+    list(APPEND args "-DVECTOR_OTEL_MAX_BATCH_RECORDS=${value}")
+  endif()
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${PROJECT_SOURCE_DIR}" -B "${dir}" ${pass_through} ${args}
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+  set(header "${dir}/generated/vector_otel/core/config.hpp")
+  if(NOT rc EQUAL 0 OR NOT EXISTS "${header}")
+    record_failure("configure records '${value}' should succeed and generate ${header}; rc=${rc}")
+    return()
+  endif()
+  file(READ "${header}" content)
+  if(NOT content MATCHES "kMaxIncomingRecords = ${expected};")
+    record_failure("generated header for records '${value}' lacks 'kMaxIncomingRecords = ${expected};'")
+  else()
+    message(STATUS "ok: configure records '${value}' -> kMaxIncomingRecords = ${expected}")
+  endif()
+endfunction()
+
+function(expect_configure_records_rejected name value)
+  set(dir "${TEST_BINARY_ROOT}/${name}")
+  file(REMOVE_RECURSE "${dir}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -S "${PROJECT_SOURCE_DIR}" -B "${dir}" ${pass_through} "-DVECTOR_OTEL_MAX_BATCH_RECORDS=${value}"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+  string(FIND "${out}${err}" "VECTOR_OTEL_MAX_BATCH_RECORDS" p_var)
+  string(FIND "${out}${err}" "'${value}'" p_val)
+  if(rc EQUAL 0 OR p_var EQUAL -1 OR p_val EQUAL -1)
+    record_failure("configure record '${value}' should fail naming VECTOR_OTEL_MAX_BATCH_RECORDS and the value; rc=${rc}")
+  else()
+    message(STATUS "ok: configure rejected record '${value}'")
+  endif()
+endfunction()
+
+expect_configure_records_header(rec_default "<omit>" 2048)
+expect_configure_records_header(rec_minimum 1 1)
+expect_configure_records_header(rec_maximum 1048576 1048576)
+expect_configure_records_header(rec_custom 4096 4096)
+expect_configure_records_rejected(rec_empty "")
+expect_configure_records_rejected(rec_zero 0)
+expect_configure_records_rejected(rec_too_large 1048577)
 
 file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
 get_property(failures GLOBAL PROPERTY PL_FAILURES)

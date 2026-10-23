@@ -124,7 +124,11 @@ Outcome RunTable(ModuleKind kind, Signal signal, const std::string& chunk) {
   return Collect(sc, o);
 }
 
-const char* const kRecordLimitMessage = "event exceeds 2048-record limit";
+std::string ExpectedRecordLimitMessage() {
+  char buf[96];
+  const std::size_t len = FormatRecordLimitText(buf, sizeof(buf));
+  return std::string(buf, len);
+}
 
 void ExpectAccepted(const Outcome& r, std::size_t count, const std::string& what) {
   EXPECT_TRUE(r.ok) << what;
@@ -135,13 +139,14 @@ void ExpectAccepted(const Outcome& r, std::size_t count, const std::string& what
 }
 
 void ExpectRecordLimit(const Outcome& r, const std::string& what) {
+  const std::string expected = ExpectedRecordLimitMessage();
   EXPECT_FALSE(r.ok) << what;
   EXPECT_EQ(r.code, ErrorCode::RecordLimit) << what;
-  EXPECT_EQ(r.count, kMaxIncomingRecords + 1) << what << ": counting stops at record 2049";
-  EXPECT_EQ(r.message, kRecordLimitMessage) << what;
+  EXPECT_EQ(r.count, kMaxIncomingRecords + 1) << what << ": counting stops at record limit + 1";
+  EXPECT_EQ(r.message, expected) << what;
   ASSERT_EQ(r.observed.nresults, 3) << what;
   EXPECT_TRUE(r.observed.first_nil) << what;
-  EXPECT_EQ(r.observed.text, kRecordLimitMessage) << what;
+  EXPECT_EQ(r.observed.text, expected) << what;
   EXPECT_EQ(r.observed.last, 0) << what << ": nothing was delivered";
 }
 
@@ -230,8 +235,9 @@ std::string OtlpChunk(Signal signal, const Layout& layout, const std::string& it
 }
 
 void CheckWholeEvent(Signal signal) {
-  for (const std::size_t n :
-       {std::size_t{0}, std::size_t{1}, std::size_t{2047}, std::size_t{2048}, std::size_t{2049}}) {
+  for (const std::size_t n : {std::size_t{0}, std::size_t{1},
+                              kMaxIncomingRecords > 1 ? kMaxIncomingRecords - 1 : std::size_t{0},
+                              kMaxIncomingRecords, kMaxIncomingRecords + 1}) {
     const Layout layout = Spread(n);
     for (int form = 0; form < 2; ++form) {
       const std::string what = std::string(form == 0 ? "json " : "table ") + std::to_string(n);
@@ -250,21 +256,22 @@ TEST(AdmissionTest, LogsCountsWholeEvent) { CheckWholeEvent(Signal::Logs); }
 TEST(AdmissionTest, TracesCountsWholeEvent) { CheckWholeEvent(Signal::Traces); }
 TEST(AdmissionTest, MetricsCountsWholeEvent) { CheckWholeEvent(Signal::Metrics); }
 
-TEST(AdmissionTest, MetricsOneDescriptorWith2049DataPointsIsRejected) {
-  const Layout one = {{2049}};
+TEST(AdmissionTest, MetricsOneDescriptorWithOverLimitDataPointsIsRejected) {
+  const Layout one = {{kMaxIncomingRecords + 1}};
   ExpectRecordLimit(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, one)),
                     "json");
   ExpectRecordLimit(RunTable(ModuleKind::Otel, Signal::Metrics, OtlpChunk(Signal::Metrics, one)),
                     "table");
-  // Bulk additions saturate at the limit + 1 too (the reported count is exactly 2049).
-  const Layout two = {{1500, 1500}};
+  // Bulk additions saturate at the limit + 1 too.
+  const std::size_t half = (kMaxIncomingRecords + 1) / 2 + 1;
+  const Layout two = {{half, half}};
   ExpectRecordLimit(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, two)),
                     "json two descriptors");
-  const Layout ok = {{2048}};
-  ExpectAccepted(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, ok)), 2048,
-                 "json");
-  ExpectAccepted(RunTable(ModuleKind::Otel, Signal::Metrics, OtlpChunk(Signal::Metrics, ok)), 2048,
-                 "table");
+  const Layout ok = {{kMaxIncomingRecords}};
+  ExpectAccepted(RunJson(ModuleKind::Otel, Signal::Metrics, OtlpJson(Signal::Metrics, ok)),
+                 kMaxIncomingRecords, "json");
+  ExpectAccepted(RunTable(ModuleKind::Otel, Signal::Metrics, OtlpChunk(Signal::Metrics, ok)),
+                 kMaxIncomingRecords, "table");
 }
 
 TEST(AdmissionTest, MetricsCountOnlyTheSelectedTypeRegardlessOfKeyOrder) {
@@ -437,10 +444,12 @@ TEST(AdmissionTest, NativeJsonSingleArrayAndWrapperNormalization) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(sig));
     ExpectAccepted(RunJson(ModuleKind::Native, sig, R"({"message":"x"})"), 1, tag + " single");
     ExpectAccepted(RunJson(ModuleKind::Native, sig, "[]"), 0, tag + " empty array");
-    ExpectAccepted(RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", 2048)), 2048,
-                   tag + " array 2048");
-    ExpectRecordLimit(RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", 2049)),
-                      tag + " array 2049");
+    ExpectAccepted(
+        RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", kMaxIncomingRecords)),
+        kMaxIncomingRecords, tag + " array limit");
+    ExpectRecordLimit(
+        RunJson(ModuleKind::Native, sig, Repeat(R"({"message":"x"})", kMaxIncomingRecords + 1)),
+        tag + " array over limit");
     // non-object members are left to extraction; only objects are candidates
     ExpectAccepted(RunJson(ModuleKind::Native, sig, R"([{"message":"x"},5,null,{"message":"y"}])"),
                    2, tag + " malformed member");
@@ -449,25 +458,28 @@ TEST(AdmissionTest, NativeJsonSingleArrayAndWrapperNormalization) {
       const std::string w = std::string("\"") + wrapper + "\":";
       ExpectAccepted(RunJson(ModuleKind::Native, sig, "{" + w + R"({"message":"x"}})"), 1,
                      tag + " wrapped object");
-      ExpectAccepted(
-          RunJson(ModuleKind::Native, sig, "{" + w + Repeat(R"({"message":"x"})", 2048) + "}"),
-          2048, tag + " wrapped array 2048");
+      ExpectAccepted(RunJson(ModuleKind::Native, sig,
+                             "{" + w + Repeat(R"({"message":"x"})", kMaxIncomingRecords) + "}"),
+                     kMaxIncomingRecords, tag + " wrapped array limit");
       ExpectRecordLimit(
-          RunJson(ModuleKind::Native, sig, "{" + w + Repeat(R"({"message":"x"})", 2049) + "}"),
-          tag + " wrapped array 2049");
+          RunJson(ModuleKind::Native, sig,
+                  "{" + w + Repeat(R"({"message":"x"})", kMaxIncomingRecords + 1) + "}"),
+          tag + " wrapped array over limit");
       // source-field order does not change the decision
       ExpectRecordLimit(
-          RunJson(ModuleKind::Native, sig, R"({"message":"x",)" + w + Repeat("{}", 2049) + "}"),
+          RunJson(ModuleKind::Native, sig,
+                  R"({"message":"x",)" + w + Repeat("{}", kMaxIncomingRecords + 1) + "}"),
           tag + " wrapper after field");
       ExpectRecordLimit(
-          RunJson(ModuleKind::Native, sig, "{" + w + Repeat("{}", 2049) + R"(,"message":"x"})"),
+          RunJson(ModuleKind::Native, sig,
+                  "{" + w + Repeat("{}", kMaxIncomingRecords + 1) + R"(,"message":"x"})"),
           tag + " wrapper before field");
     }
   }
   // wrappers belong to their own signal only
-  ExpectAccepted(
-      RunJson(ModuleKind::Native, Signal::Logs, R"({"trace":)" + Repeat("{}", 2049) + "}"), 1,
-      "logs ignores trace wrapper");
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs,
+                         R"({"trace":)" + Repeat("{}", kMaxIncomingRecords + 1) + "}"),
+                 1, "logs ignores trace wrapper");
 }
 
 TEST(AdmissionTest, NativeTableSingleArrayAndWrapperNormalization) {
@@ -476,10 +488,12 @@ TEST(AdmissionTest, NativeTableSingleArrayAndWrapperNormalization) {
     const std::string tag = "signal " + std::to_string(static_cast<int>(sig));
     ExpectAccepted(RunTable(ModuleKind::Native, sig, "return {message = 'x'}"), 1, tag + " single");
     ExpectAccepted(RunTable(ModuleKind::Native, sig, "return {}"), 0, tag + " empty");
-    ExpectAccepted(RunTable(ModuleKind::Native, sig, NativeTableArray(2048) + "return r(N)"), 2048,
-                   tag + " array 2048");
-    ExpectRecordLimit(RunTable(ModuleKind::Native, sig, NativeTableArray(2049) + "return r(N)"),
-                      tag + " array 2049");
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, sig, NativeTableArray(kMaxIncomingRecords) + "return r(N)"),
+        kMaxIncomingRecords, tag + " array limit");
+    ExpectRecordLimit(RunTable(ModuleKind::Native, sig,
+                               NativeTableArray(kMaxIncomingRecords + 1) + "return r(N)"),
+                      tag + " array over limit");
     ExpectAccepted(
         RunTable(ModuleKind::Native, sig, "return {{message = 'x'}, 5, 'y', {}, {message = 'z'}}"),
         2, tag + " malformed members (empty tables never emit)");
@@ -488,12 +502,13 @@ TEST(AdmissionTest, NativeTableSingleArrayAndWrapperNormalization) {
       const std::string w = std::string(wrapper) + " = ";
       ExpectAccepted(RunTable(ModuleKind::Native, sig, "return {" + w + "{message = 'x'}}"), 1,
                      tag + " wrapped single");
-      ExpectAccepted(
-          RunTable(ModuleKind::Native, sig, NativeTableArray(2048) + "return {" + w + "r(N)}"),
-          2048, tag + " wrapped array 2048");
+      ExpectAccepted(RunTable(ModuleKind::Native, sig,
+                              NativeTableArray(kMaxIncomingRecords) + "return {" + w + "r(N)}"),
+                     kMaxIncomingRecords, tag + " wrapped array limit");
       ExpectRecordLimit(
-          RunTable(ModuleKind::Native, sig, NativeTableArray(2049) + "return {" + w + "r(N)}"),
-          tag + " wrapped array 2049");
+          RunTable(ModuleKind::Native, sig,
+                   NativeTableArray(kMaxIncomingRecords + 1) + "return {" + w + "r(N)}"),
+          tag + " wrapped array over limit");
     }
   }
 }
@@ -613,13 +628,14 @@ TEST(AdmissionTest, NativeTablePrimaryArrayWins) {
 }
 
 TEST(AdmissionTest, NativeMetricEventIsOneRecordWhateverItsBucketCount) {
-  const std::string buckets = Repeat("1", 2049);
+  const std::string buckets = Repeat("1", kMaxIncomingRecords + 1);
   ExpectAccepted(RunJson(ModuleKind::Native, Signal::Metrics,
                          R"({"name":"h","aggregated_histogram":{"buckets":)" + buckets + "}}"),
                  1, "json");
   ExpectAccepted(RunTable(ModuleKind::Native, Signal::Metrics,
-                          "local b = {} for i = 1, 2049 do b[i] = {upper_limit = i, count = 1} end "
-                          "return {name = 'h', aggregated_histogram = {buckets = b}}"),
+                          "local b = {} for i = 1, " + std::to_string(kMaxIncomingRecords + 1) +
+                              " do b[i] = {upper_limit = i, count = 1} end "
+                              "return {name = 'h', aggregated_histogram = {buckets = b}}"),
                  1, "table");
 }
 
@@ -785,8 +801,8 @@ TEST(AdmissionTest, PaddedCallerInputIsBorrowedAndBoundedByTheSameLimit) {
     }
   }
 
-  // Borrowed input is counted like any other: 2049 records on a fresh parser are rejected.
-  const Layout over = {{2049}};
+  // Borrowed input is counted like any other: over-limit records on a fresh parser are rejected.
+  const Layout over = {{kMaxIncomingRecords + 1}};
   const std::string records = OtlpJson(Signal::Logs, over);
   const simdjson::padded_string padded(records);
   OtelParser parser;
@@ -832,14 +848,15 @@ TEST(AdmissionTest, EmptyAndNulInputsStayParseErrorsForExtraction) {
 
 TEST(AdmissionTest, CountAdmissionIsNotTransactionalValidation) {
   // Admission only counts: a malformed later field is still extraction's to report, but if the
-  // 2049th record is seen first the event is rejected before anything can be emitted.
+  // record limit is exceeded first the event is rejected before anything can be emitted.
   const std::string malformed_later =
       R"({"resourceLogs":[{"scopeLogs":[{"logRecords":[{},{"bad":}]}]}]})";
   const Outcome r = RunJson(ModuleKind::Otel, Signal::Logs, malformed_later);
   EXPECT_TRUE(r.ok);
   EXPECT_LE(r.count, 2u);
 
-  std::string over = R"({"resourceLogs":[{"scopeLogs":[{"logRecords":)" + Repeat("{}", 2049);
+  std::string over =
+      R"({"resourceLogs":[{"scopeLogs":[{"logRecords":)" + Repeat("{}", kMaxIncomingRecords + 1);
   over.resize(over.size() - 1);  // drop the closing bracket: truncated document
   over += R"(,{"bad":}]}]}]})";
   ExpectRecordLimit(RunJson(ModuleKind::Otel, Signal::Logs, over),
