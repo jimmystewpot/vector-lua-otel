@@ -149,15 +149,12 @@ class StagedRow {
 // All three return false after recording the failure in ctx.error (and rooting the error object).
 // They require a dispatcher-frame context (ctx.anchor_index valid, kEmit anchored).
 
-// Materialises `row` as {log = <row table>} and delivers it. With ctx.batch_size == 1 the emit
-// callback is invoked inside the same protected leaf and ctx.delivered_count is advanced as soon as
-// it returns successfully. With a larger batch size the row is appended to the anchored batch and
-// the callback is invoked when the batch is full (delivered_count then advances by the batch
-// length). A failed callback discards the pending rows, which are never counted.
+// Materialises `row` as {log = <row table>} and delivers it immediately via the anchored emit
+// callback. ctx.delivered_count is advanced as soon as emit returns successfully.
 bool EmitStagedRow(OperationContext& ctx, const StagedRow& row) noexcept;
 
-// Delivers a partially filled batch (no-op when nothing is pending or batch_size == 1).
-bool FlushStagedRows(OperationContext& ctx) noexcept;
+// Compatibility no-op: rows are always emitted immediately.
+inline bool FlushStagedRows([[maybe_unused]] OperationContext& ctx) noexcept { return true; }
 
 // Materialises `tape` (its root children become the table's fields) into an anchor slot, so that
 // later rows can share one table through StagedRow::Anchor().

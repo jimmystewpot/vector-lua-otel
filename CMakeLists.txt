@@ -10,7 +10,6 @@ option(ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
 option(ENABLE_SANITIZERS "Enable ASAN and UBSAN instrumentation" OFF)
 option(BUILD_EXTRACTION_BENCHMARKS "Build the opt-in extraction latency benchmark (vector_otel_latency_bench)" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer instrumentation (exclusive with ENABLE_SANITIZERS)" OFF)
-set(VECTOR_OTEL_EMIT_BATCH_SIZE 1 CACHE STRING "Compile-time emit batch size (default: 1)")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(ENABLE_NATIVE_TUNING)
@@ -88,7 +87,6 @@ if(NOT DEFINED VECTOR_NATIVE_MODULE_NAME)
   set(VECTOR_NATIVE_MODULE_NAME "vector_native")
 endif()
 target_compile_definitions(vector_otel_core PUBLIC
-  VECTOR_OTEL_EMIT_BATCH_SIZE=${VECTOR_OTEL_EMIT_BATCH_SIZE}
   VECTOR_NATIVE_MODULE_NAME="${VECTOR_NATIVE_MODULE_NAME}"
 )
 

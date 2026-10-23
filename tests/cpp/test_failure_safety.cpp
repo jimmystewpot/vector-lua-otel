@@ -24,8 +24,6 @@ using namespace fixtures;
 using test::CppFaultMode;
 using test::CppFaultScope;
 
-constexpr int kN = static_cast<int>(kEmitBatchSize);
-
 // ---- payload factories ------------------------------------------------------------------------
 
 std::string LogRecordJson(int i) {
@@ -845,24 +843,18 @@ TEST_P(FailureSafetyOtelTest, CallbackFailureReportsRowsFromCompletedCallbacks) 
     rec.fail_at_call = 1;  // the second delivery raises
     const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 1, 5), rec);
     ASSERT_EQ(r.status, LUA_OK);
-    if (kN >= 5) {
-      // a single delivery for all five rows: call index 1 never happens
-      ASSERT_EQ(r.nresults, 2);
-      EXPECT_EQ(r.count, 5);
-    } else {
-      ASSERT_EQ(r.nresults, 3);
-      EXPECT_TRUE(r.first_nil);
-      EXPECT_NE(r.error.find("boom"), std::string::npos) << r.error;
-      EXPECT_EQ(r.count, kN) << "only rows of completed callbacks are counted";
-      EXPECT_EQ(rec.rows, kN);
-    }
+    ASSERT_EQ(r.nresults, 3);
+    EXPECT_TRUE(r.first_nil);
+    EXPECT_NE(r.error.find("boom"), std::string::npos) << r.error;
+    EXPECT_EQ(r.count, 1) << "only rows of completed callbacks are counted";
+    EXPECT_EQ(rec.rows, 1);
     ExpectAnchorsReleased(s.L());
   }
 }
 
-// A failed delivery - including one in the final partial batch and one raising a non-string
-// value - reports exactly the rows of completed callbacks, and the same state then serves empty,
-// over-limit and ordinary calls correctly.
+// A failed delivery - including one raising a non-string value - reports exactly the rows of
+// completed callbacks, and the same state then serves empty, over-limit and ordinary calls
+// correctly.
 TEST_P(FailureSafetyOtelTest, StateRecoversAfterDeliveryFailures) {
   for (bool table : {false, true}) {
     for (bool non_string : {false, true}) {
@@ -870,16 +862,15 @@ TEST_P(FailureSafetyOtelTest, StateRecoversAfterDeliveryFailures) {
                    (non_string ? " non-string error" : " string error"));
       RawState s;
       ProcRecorder bad;
-      bad.fail_at_call = 1;  // with N > 1 this is the final partial batch
+      bad.fail_at_call = 1;  // the second delivery raises
       bad.fail_with_table = non_string;
-      const ProcResult r =
-          CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 1, kN + 1), bad);
+      const ProcResult r = CallProcess(s, g_sig->native, g_sig->name, PayloadFor(table, 1, 2), bad);
       ASSERT_EQ(r.status, LUA_OK);
       ASSERT_EQ(r.nresults, 3);
       EXPECT_TRUE(r.first_nil);
       EXPECT_FALSE(r.error.empty());
-      EXPECT_EQ(r.count, kN);
-      EXPECT_EQ(bad.rows, kN);
+      EXPECT_EQ(r.count, 1);
+      EXPECT_EQ(bad.rows, 1);
       ExpectAnchorsReleased(s.L());
 
       ProcRecorder empty;
@@ -1466,7 +1457,7 @@ TEST(FailureSafetyNativeLogs, MalformedJsonEntryFailsAfterDeliveredRows) {
   EXPECT_TRUE(r.first_nil);
   EXPECT_FALSE(r.error.empty());
   EXPECT_EQ(r.count, rec.rows) << "count must equal rows in completed callbacks";
-  EXPECT_EQ(r.count, (1 / kN) * kN) << "rows still queued for a batch are discarded";
+  EXPECT_EQ(r.count, 1);
 
   ProcRecorder scalar;
   const ProcResult rs = CallProcess(s, true, "logs", JsonPayload("5"), scalar);
@@ -1697,7 +1688,7 @@ TEST(FailureSafetyNativeTraces, MalformedEntriesAndRoots) {
   ASSERT_EQ(r.nresults, 3);
   EXPECT_TRUE(r.first_nil);
   EXPECT_EQ(r.count, rec.rows) << "count must equal rows in completed callbacks";
-  EXPECT_EQ(r.count, (1 / kN) * kN) << "rows still queued for a batch are discarded";
+  EXPECT_EQ(r.count, 1);
 
   ProcRecorder scalar;
   const ProcResult rs = CallProcess(s, true, "traces", JsonPayload("5"), scalar);

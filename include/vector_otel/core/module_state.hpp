@@ -46,9 +46,8 @@ enum class ImmutableSlot : int {
 enum class AnchorSlot : int {
   kInput,  // process() argument 1 (string or table)
   kEmit,   // process() argument 2
-  kEvent,  // emit wrapper table for the current row/batch
+  kEvent,  // emit wrapper table {log = ...} for the current row
   kRow,    // current record table
-  kBatch,  // records array for grouped emission
   kResourceAttrs,
   kScopeAttrs,
   kRecordAttrs,    // log/span/data point attributes

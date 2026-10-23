@@ -31,7 +31,7 @@
 #include "vector_otel/core/process_runner.hpp"
 namespace bench_cfg {
 constexpr std::size_t kMaxPayload = vector_otel::core::kMaxPayloadBytes;
-constexpr int kBatch = static_cast<int>(vector_otel::core::kEmitBatchSize);
+constexpr int kBatch = 1;
 }  // namespace bench_cfg
 #else
 namespace bench_cfg {

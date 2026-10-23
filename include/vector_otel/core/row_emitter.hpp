@@ -37,11 +37,8 @@ class RowEmitter {
     }
     ++staged_count_;
   }
-  void Flush() noexcept {
-    if (!failed_ && !ctx_.dry_run && !FlushStagedRows(ctx_)) {
-      failed_ = true;
-    }
-  }
+  // No-op: each row is delivered immediately to emit({log = ...}) during EndRecord().
+  void Flush() noexcept {}
 
   bool HasError() const noexcept { return failed_; }
   std::string_view ErrorMessage() const noexcept { return ctx_.error.view(); }

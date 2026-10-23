@@ -30,14 +30,7 @@ extern "C" {
 #include "vector_otel/core/parser.hpp"
 #include "vector_otel/extractors/logs_extractor.hpp"
 
-#ifndef VECTOR_OTEL_EMIT_BATCH_SIZE
-#define VECTOR_OTEL_EMIT_BATCH_SIZE 1
-#endif
-
 namespace vector_otel::core {
-
-inline constexpr int kEmitBatchSize = VECTOR_OTEL_EMIT_BATCH_SIZE;
-static_assert(kEmitBatchSize >= 1, "VECTOR_OTEL_EMIT_BATCH_SIZE must be at least 1");
 
 // Free Lua stack slots reserved once per invocation: the raw table readers push into them without
 // further checks.

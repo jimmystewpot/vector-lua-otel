@@ -790,33 +790,6 @@ TEST_F(LogsExtractorTest, JsonModeServiceNameEmbeddedNulAndEmptyPreserved) {
   }
 }
 
-// Batch mode only: a parse error fails the whole call. Rows still queued (not yet passed to
-// emit) are discarded and must not be counted as emitted.
-TEST_F(LogsExtractorTest, BatchModeParseErrorDiscardsQueuedRows) {
-  if (::vector_otel::core::kEmitBatchSize <= 1) {
-    GTEST_SKIP() << "requires VECTOR_OTEL_EMIT_BATCH_SIZE > 1";
-  }
-  ASSERT_EQ(luaL_dostring(L_, R"(
-    batch_emit_calls = 0
-    function batch_emit(event) batch_emit_calls = batch_emit_calls + 1 end
-  )"),
-            LUA_OK);
-  lua_getglobal(L_, "batch_emit");
-  const int emit_idx = lua_gettop(L_);
-
-  // One complete record (fewer than the batch size) is queued, then a missing comma makes the
-  // parser fail mid-array.
-  const std::string json =
-      R"({"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"1","body":{"stringValue":"a"}} {"x":1}]}]}]})";
-  auto res = ProcessLogs(L_, json, emit_idx);
-  lua_pop(L_, 1);
-  EXPECT_FALSE(res.success);
-  EXPECT_EQ(res.emitted_count, 0);
-  lua_getglobal(L_, "batch_emit_calls");
-  EXPECT_EQ(lua_tointeger(L_, -1), 0);
-  lua_pop(L_, 1);
-}
-
 // Pins deliberate design: ResourceAttributes is built once per resource and shared by reference
 // by every record of that resource (see README "Emitted Tables Are Shared").
 TEST_F(LogsExtractorTest, ResourceAttributesTableIsSharedAcrossRecordsOfOneResource) {

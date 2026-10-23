@@ -105,7 +105,6 @@ int DispatchProcess(lua_State* L, ModuleKind module, Signal signal, const Signal
   InitOperationContext(ctx, L, module, signal, lua_upvalueindex(1));
   ctx.input_index = 1;
   ctx.emit_index = 2;
-  ctx.batch_size = kEmitBatchSize;
 
   {
     ActiveExtractionGuard guard;  // nothing below can unwind this frame with a longjmp
@@ -139,7 +138,6 @@ extractors::ExtractionResult RunCompat(lua_State* L, ModuleKind module, Signal s
     OperationContext ctx;
     InitOperationContext(ctx, nullptr, module, signal, 0);
     ctx.dry_run = true;
-    ctx.batch_size = kEmitBatchSize;
     ActiveExtractionGuard guard;
     RunExtraction(ctx, fns, true, raw_json);
     return ResultOf(ctx);
@@ -159,7 +157,6 @@ extractors::ExtractionResult RunCompat(lua_State* L, ModuleKind module, Signal s
   InitOperationContext(ctx, L, module, signal, lua_gettop(L));  // the anchor on top of the stack
   ctx.input_index = is_json ? emit_abs : input_abs;
   ctx.emit_index = emit_abs;
-  ctx.batch_size = kEmitBatchSize;
   {
     ActiveExtractionGuard guard;
     if (is_json) {
