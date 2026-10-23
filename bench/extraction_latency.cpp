@@ -31,11 +31,13 @@
 #include "vector_otel/core/process_runner.hpp"
 namespace bench_cfg {
 constexpr std::size_t kMaxPayload = vector_otel::core::kMaxPayloadBytes;
+constexpr std::size_t kMaxRecords = vector_otel::core::kMaxIncomingRecords;
 constexpr int kBatch = 1;
 }  // namespace bench_cfg
 #else
 namespace bench_cfg {
 constexpr std::size_t kMaxPayload = 0;
+constexpr std::size_t kMaxRecords = 2048;
 constexpr int kBatch = 0;
 }  // namespace bench_cfg
 #endif
@@ -65,12 +67,13 @@ struct Options {
 };
 
 void Usage(std::FILE* out) {
-  std::fputs(
+  std::fprintf(
+      out,
       "usage: vector_otel_latency_bench [options]\n"
       "  --module otel|native      module under test (default otel)\n"
       "  --signal logs|traces|metrics\n"
       "  --mode json|table         input form (default json)\n"
-      "  --records N               records per call, 1..2048 (default 64)\n"
+      "  --records N               records per call, 1..%zu (default 64)\n"
       "  --bytes B                 approximate payload size in bytes (pads the tag; default: "
       "none)\n"
       "  --iterations N            timed calls (default 1000)\n"
@@ -81,7 +84,7 @@ void Usage(std::FILE* out) {
       "  --format json|csv         output format (default json)\n"
       "  --allow-reject            allow payloads above the configured limit (measures rejection)\n"
       "  --help\n",
-      out);
+      bench_cfg::kMaxRecords);
 }
 
 [[noreturn]] void Fail(const char* what, const char* detail) {
@@ -131,7 +134,8 @@ Options Parse(int argc, char** argv) {
       if (v != "json" && v != "table") Fail("--mode must be json or table", v.c_str());
       o.table = v == "table";
     } else if (a == "--records") {
-      o.records = static_cast<int>(ParseInt("--records", value(), 1, 2048));
+      o.records = static_cast<int>(
+          ParseInt("--records", value(), 1, static_cast<long>(bench_cfg::kMaxRecords)));
     } else if (a == "--bytes") {
       o.want_bytes = static_cast<std::size_t>(ParseInt("--bytes", value(), 1, 1L << 30));
     } else if (a == "--iterations") {
@@ -298,33 +302,35 @@ int main(int argc, char** argv) {
 
   if (o.csv) {
     std::printf(
-        "module,signal,mode,records,payload_bytes,seed,sha,arch,max_payload_bytes,emit_batch_size,"
+        "module,signal,mode,records,payload_bytes,seed,sha,arch,max_payload_bytes,"
+        "max_batch_records,emit_batch_size,"
         "iterations,errors,callbacks,rows,cold_first_call_ns,mean_ns,p50_ns,p95_ns,p99_ns,"
         "p99_9_ns,max_ns,rows_per_sec,payload_mib_per_sec\n");
     std::printf(
-        "%s,%s,%s,%d,%zu,%llu,%s,%s,%zu,%d,%d,%ld,%ld,%lld,%lld,%.0f,%.0f,%.0f,%.0f,%.0f,%lld,%.0f,"
-        "%.3f\n",
+        "%s,%s,%s,%d,%zu,%llu,%s,%s,%zu,%zu,%d,%d,%ld,%ld,%lld,%lld,%.0f,%.0f,%.0f,%.0f,%.0f,%lld,"
+        "%.0f,%.3f\n",
         o.native ? "native" : "otel", kSignalNames[o.signal], o.table ? "table" : "json", o.records,
         payload_bytes, static_cast<unsigned long long>(o.seed), o.sha.c_str(), arch,
-        bench_cfg::kMaxPayload, bench_cfg::kBatch, o.iterations, timed_errors, timed_callbacks,
-        timed_delivered, static_cast<long long>(cold_ns), mean_ns, Quantile(samples, 0.50),
-        Quantile(samples, 0.95), Quantile(samples, 0.99), Quantile(samples, 0.999),
-        static_cast<long long>(samples.back()), rows_per_sec, mb_per_sec);
+        bench_cfg::kMaxPayload, bench_cfg::kMaxRecords, bench_cfg::kBatch, o.iterations,
+        timed_errors, timed_callbacks, timed_delivered, static_cast<long long>(cold_ns), mean_ns,
+        Quantile(samples, 0.50), Quantile(samples, 0.95), Quantile(samples, 0.99),
+        Quantile(samples, 0.999), static_cast<long long>(samples.back()), rows_per_sec, mb_per_sec);
   } else {
     std::printf(
         "{\"module\":\"%s\",\"signal\":\"%s\",\"mode\":\"%s\",\"records\":%d,"
         "\"payload_bytes\":%zu,\"seed\":%llu,\"sha\":\"%s\",\"compiler\":\"%s\",\"arch\":\"%s\","
-        "\"max_payload_bytes\":%zu,\"emit_batch_size\":%d,\"iterations\":%d,\"errors\":%ld,"
-        "\"callbacks\":%ld,\"rows\":%lld,\"cold_first_call_ns\":%lld,"
+        "\"max_payload_bytes\":%zu,\"max_batch_records\":%zu,\"emit_batch_size\":%d,"
+        "\"iterations\":%d,\"errors\":%ld,\"callbacks\":%ld,\"rows\":%lld,"
+        "\"cold_first_call_ns\":%lld,"
         "\"latency_ns\":{\"mean\":%.0f,\"p50\":%.0f,\"p95\":%.0f,\"p99\":%.0f,\"p99_9\":%.0f,"
         "\"max\":%lld},\"rows_per_sec\":%.0f,\"payload_mib_per_sec\":%.3f,"
         "\"allocations\":null}\n",
         o.native ? "native" : "otel", kSignalNames[o.signal], o.table ? "table" : "json", o.records,
         payload_bytes, static_cast<unsigned long long>(o.seed), o.sha.c_str(), compiler, arch,
-        bench_cfg::kMaxPayload, bench_cfg::kBatch, o.iterations, timed_errors, timed_callbacks,
-        timed_delivered, static_cast<long long>(cold_ns), mean_ns, Quantile(samples, 0.50),
-        Quantile(samples, 0.95), Quantile(samples, 0.99), Quantile(samples, 0.999),
-        static_cast<long long>(samples.back()), rows_per_sec, mb_per_sec);
+        bench_cfg::kMaxPayload, bench_cfg::kMaxRecords, bench_cfg::kBatch, o.iterations,
+        timed_errors, timed_callbacks, timed_delivered, static_cast<long long>(cold_ns), mean_ns,
+        Quantile(samples, 0.50), Quantile(samples, 0.95), Quantile(samples, 0.99),
+        Quantile(samples, 0.999), static_cast<long long>(samples.back()), rows_per_sec, mb_per_sec);
   }
   lua_close(L);
   return (timed_errors == 0 && timed_delivered == static_cast<long long>(o.records) * o.iterations)
