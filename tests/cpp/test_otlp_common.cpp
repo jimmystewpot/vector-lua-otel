@@ -2145,5 +2145,102 @@ TEST_F(OtlpCommonTest, SerializeExemplarsJson_PreservesInt64PrecisionOnGenericVa
       R"([{"FilteredAttributes":{},"TimeUnix":"","Value":9007199254740993,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":9007199254740993,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":12.5,"SpanId":"","TraceId":""},{"FilteredAttributes":{},"TimeUnix":"","Value":12.5,"SpanId":"","TraceId":""}])");
 }
 
+TEST_F(OtlpCommonTest, ExtractOtelBodyViewVariants) {
+  auto json = R"({
+    "raw_str": "simple log",
+    "str_wrapped": { "stringValue": "hello" },
+    "snake_str_wrapped": { "string_value": "hello snake" },
+    "kv_wrapped": {
+      "kvlistValue": {
+        "values": [
+          { "key": "body", "value": { "stringValue": "value" } }
+        ]
+      }
+    },
+    "nested_kv": {
+      "kvlistValue": {
+        "values": [
+          {
+            "key": "outer",
+            "value": {
+              "kvlistValue": {
+                "values": [
+                  { "key": "inner", "value": { "intValue": "42" } }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "arr_wrapped": {
+      "arrayValue": {
+        "values": [
+          { "stringValue": "item1" },
+          { "intValue": "2" }
+        ]
+      }
+    },
+    "int_wrapped": { "intValue": "123" },
+    "bool_wrapped": { "boolValue": true },
+    "double_wrapped": { "doubleValue": 3.14 },
+    "bytes_wrapped": { "bytesValue": "AQID" },
+    "plain_obj": { "custom": "data", "status": 200 },
+    "null_val": null
+  })"_padded;
+
+  auto doc = parser_.iterate(json);
+  auto obj = doc.get_object().value();
+
+  {
+    auto val = obj["raw_str"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "simple log");
+  }
+  {
+    auto val = obj["str_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "hello");
+  }
+  {
+    auto val = obj["snake_str_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "hello snake");
+  }
+  {
+    auto val = obj["kv_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), R"({"body":"value"})");
+  }
+  {
+    auto val = obj["nested_kv"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), R"({"outer":{"inner":42}})");
+  }
+  {
+    auto val = obj["arr_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), R"(["item1",2])");
+  }
+  {
+    auto val = obj["int_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "123");
+  }
+  {
+    auto val = obj["bool_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "true");
+  }
+  {
+    auto val = obj["double_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "3.14");
+  }
+  {
+    auto val = obj["bytes_wrapped"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), R"("AQID")");
+  }
+  {
+    auto val = obj["plain_obj"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), R"({"custom":"data","status":200})");
+  }
+  {
+    auto val = obj["null_val"].value();
+    EXPECT_EQ(ExtractOtelBodyView(val, writer_), "");
+  }
+}
+
 }  // namespace
 }  // namespace vector_otel::core

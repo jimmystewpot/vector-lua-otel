@@ -1211,6 +1211,29 @@ void WriteAnyValueJson(FastJsonWriter& writer, simdjson::ondemand::value& val, i
   (void)WriteAnyValueJsonImpl(writer, val, depth, nullptr);
 }
 
+std::string_view ExtractOtelBodyView(simdjson::ondemand::value& body_val, FastJsonWriter& writer) {
+  auto type_res = body_val.type();
+  if (type_res.error() != simdjson::SUCCESS) {
+    return "";
+  }
+  const auto type = type_res.value();
+  if (type == simdjson::ondemand::json_type::null) {
+    return "";
+  }
+
+  writer.Reset();
+  std::string_view scalar_str;
+  try {
+    const bool is_scalar_str = WriteAnyValueJsonImpl(writer, body_val, 0, &scalar_str);
+    if (is_scalar_str) {
+      return scalar_str;
+    }
+  } catch (...) {
+    return "";
+  }
+  return writer.Str();
+}
+
 void WriteAttributesEntriesJson(FastJsonWriter& writer, simdjson::ondemand::value& attrs_val,
                                 std::string_view* out_service_name) {
   auto type_res = attrs_val.type();
