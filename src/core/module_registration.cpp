@@ -117,8 +117,17 @@ void Rollback(lua_State* L, int journal) {
     lua_rawset(L, -3);
     lua_pop(L, 1);
   }
-  // A new registry target is installed last, so failure leaves the old slot
-  // untouched. No fallible work follows its successful installation.
+  // A return hook can raise after Publish installs a new registry table but
+  // before its protected call reports success. Restore the original slot too;
+  // its key and old value are already rooted and this raw write cannot grow it.
+  lua_rawgeti(L, journal, kNewRegistry);
+  const bool restore_registry = lua_toboolean(L, -1);
+  lua_pop(L, 1);
+  if (restore_registry) {
+    lua_rawgeti(L, journal, kRegistryKey);
+    lua_rawgeti(L, journal, kOldRegistry);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+  }
 }
 }  // namespace
 
