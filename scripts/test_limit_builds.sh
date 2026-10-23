@@ -205,13 +205,7 @@ for limit in "${INVALID_RECORD_LIMITS[@]}"; do
   dir="${SCRATCH}/bad-rec-${limit:-empty}"
   echo "== R='${limit}' (must be rejected) =="
   if configure "${dir}" "-DVECTOR_OTEL_MAX_BATCH_RECORDS=${limit}"; then
-    # An empty value falls back to the default (cache entry unset); every other value is fatal.
-    if [[ -z "${limit}" ]] && grep -q "kMaxIncomingRecords = ${DEFAULT_R};" \
-      "${dir}/generated/vector_otel/core/config.hpp"; then
-      pass "R='' falls back to the default ${DEFAULT_R}"
-    else
-      fail "R='${limit}' was accepted"
-    fi
+    fail "R='${limit}' was accepted"
   elif grep -q "VECTOR_OTEL_MAX_BATCH_RECORDS" "${dir}.log"; then
     pass "R='${limit}' rejected with a diagnostic"
   else
