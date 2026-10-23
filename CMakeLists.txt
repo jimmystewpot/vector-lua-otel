@@ -69,6 +69,7 @@ add_library(vector_otel_core STATIC
   src/core/staged_row.cpp
   src/core/admission.cpp
   src/core/process_runner.cpp
+  src/core/module_registration.cpp
   src/extractors/logs_extractor.cpp
   src/extractors/traces_extractor.cpp
   src/extractors/metrics_extractor.cpp
