@@ -27,23 +27,23 @@ constexpr int InvocationIndex(AnchorSlot slot) noexcept {
 }  // namespace
 
 std::size_t FormatPayloadLimitText(char* buffer, std::size_t capacity) noexcept {
-  const int n = std::snprintf(buffer, capacity, "payload exceeds %zu-byte uncompressed JSON limit",
-                              static_cast<std::size_t>(kMaxPayloadBytes));
-  if (n < 0) {
-    buffer[0] = '\0';
+  if (capacity == 0) {
     return 0;
   }
-  return static_cast<std::size_t>(n) < capacity ? static_cast<std::size_t>(n) : capacity - 1;
+  const int n = std::snprintf(buffer, capacity, "payload exceeds %zu-byte uncompressed JSON limit",
+                              static_cast<std::size_t>(kMaxPayloadBytes));
+  const auto un = static_cast<std::size_t>(n);
+  return un < capacity ? un : capacity - 1;
 }
 
 std::size_t FormatRecordLimitText(char* buffer, std::size_t capacity) noexcept {
-  const int n = std::snprintf(buffer, capacity, "event exceeds %zu-record limit",
-                              static_cast<std::size_t>(kMaxIncomingRecords));
-  if (n < 0) {
-    buffer[0] = '\0';
+  if (capacity == 0) {
     return 0;
   }
-  return static_cast<std::size_t>(n) < capacity ? static_cast<std::size_t>(n) : capacity - 1;
+  const int n = std::snprintf(buffer, capacity, "event exceeds %zu-record limit",
+                              static_cast<std::size_t>(kMaxIncomingRecords));
+  const auto un = static_cast<std::size_t>(n);
+  return un < capacity ? un : capacity - 1;
 }
 
 namespace {

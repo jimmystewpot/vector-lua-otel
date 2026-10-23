@@ -8,6 +8,7 @@
 
 #include "simdjson.h"
 #include "vector_otel/core/config.hpp"
+#include "vector_otel/core/module_state.hpp"
 
 namespace vector_otel::core {
 namespace {
@@ -26,6 +27,41 @@ TEST(ExtractionLimitsTest, CompiledValuesMatchConfiguration) {
 TEST(ExtractionLimitsTest, PaddingReserveCoversSimdjsonPaddingWithoutOverflow) {
   EXPECT_GE(kPayloadPaddingBytes, static_cast<std::size_t>(simdjson::SIMDJSON_PADDING));
   EXPECT_LE(kMaxPayloadBytes, static_cast<std::size_t>(-1) - kPayloadPaddingBytes);
+}
+
+TEST(ExtractionLimitsTest, FormatRecordLimitTextBehaviors) {
+  char buf[96];
+  const std::size_t len = FormatRecordLimitText(buf, sizeof(buf));
+  EXPECT_GT(len, 0u);
+  EXPECT_LT(len, sizeof(buf));
+  EXPECT_NE(std::string_view(buf, len).find("record limit"), std::string_view::npos);
+
+  // Truncation when capacity is smaller than formatted text
+  char small_buf[10];
+  const std::size_t truncated_len = FormatRecordLimitText(small_buf, sizeof(small_buf));
+  EXPECT_EQ(truncated_len, sizeof(small_buf) - 1);
+  EXPECT_EQ(small_buf[sizeof(small_buf) - 1], '\0');
+
+  // Zero capacity edge case
+  EXPECT_EQ(FormatRecordLimitText(buf, 0), 0u);
+}
+
+TEST(ExtractionLimitsTest, FormatPayloadLimitTextBehaviors) {
+  char buf[96];
+  const std::size_t len = FormatPayloadLimitText(buf, sizeof(buf));
+  EXPECT_GT(len, 0u);
+  EXPECT_LT(len, sizeof(buf));
+  EXPECT_NE(std::string_view(buf, len).find("byte uncompressed JSON limit"),
+            std::string_view::npos);
+
+  // Truncation when capacity is smaller than formatted text
+  char small_buf[10];
+  const std::size_t truncated_len = FormatPayloadLimitText(small_buf, sizeof(small_buf));
+  EXPECT_EQ(truncated_len, sizeof(small_buf) - 1);
+  EXPECT_EQ(small_buf[sizeof(small_buf) - 1], '\0');
+
+  // Zero capacity edge case
+  EXPECT_EQ(FormatPayloadLimitText(buf, 0), 0u);
 }
 
 }  // namespace
