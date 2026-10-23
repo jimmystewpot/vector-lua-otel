@@ -32,12 +32,15 @@
 namespace bench_cfg {
 constexpr std::size_t kMaxPayload = vector_otel::core::kMaxPayloadBytes;
 constexpr std::size_t kMaxRecords = vector_otel::core::kMaxIncomingRecords;
+constexpr int kDefaultRecords =
+    static_cast<int>(kMaxRecords > 0 ? std::min<std::size_t>(64, kMaxRecords) : 64);
 constexpr int kBatch = 1;
 }  // namespace bench_cfg
 #else
 namespace bench_cfg {
 constexpr std::size_t kMaxPayload = 0;
 constexpr std::size_t kMaxRecords = 2048;
+constexpr int kDefaultRecords = 64;
 constexpr int kBatch = 0;
 }  // namespace bench_cfg
 #endif
@@ -55,7 +58,7 @@ struct Options {
   bool native = false;
   int signal = 0;
   bool table = false;
-  int records = 64;
+  int records = bench_cfg::kDefaultRecords;
   int iterations = 1000;
   int warmup = 100;
   std::uint64_t seed = 1;
@@ -73,7 +76,7 @@ void Usage(std::FILE* out) {
       "  --module otel|native      module under test (default otel)\n"
       "  --signal logs|traces|metrics\n"
       "  --mode json|table         input form (default json)\n"
-      "  --records N               records per call, 1..%zu (default 64)\n"
+      "  --records N               records per call, 1..%zu (default %d)\n"
       "  --bytes B                 approximate payload size in bytes (pads the tag; default: "
       "none)\n"
       "  --iterations N            timed calls (default 1000)\n"
@@ -84,7 +87,7 @@ void Usage(std::FILE* out) {
       "  --format json|csv         output format (default json)\n"
       "  --allow-reject            allow payloads above the configured limit (measures rejection)\n"
       "  --help\n",
-      bench_cfg::kMaxRecords);
+      bench_cfg::kMaxRecords, bench_cfg::kDefaultRecords);
 }
 
 [[noreturn]] void Fail(const char* what, const char* detail) {
@@ -158,6 +161,10 @@ Options Parse(int argc, char** argv) {
       Usage(stderr);
       Fail("unknown option", a.c_str());
     }
+  }
+  if (bench_cfg::kMaxRecords > 0 && o.records > static_cast<int>(bench_cfg::kMaxRecords)) {
+    Fail("--records exceeds max configured batch records",
+         std::to_string(bench_cfg::kMaxRecords).c_str());
   }
   return o;
 }
