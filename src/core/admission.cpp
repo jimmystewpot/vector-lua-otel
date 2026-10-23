@@ -222,6 +222,60 @@ void CountOtlpJson(od::document& doc, const Layout& layout, Walk& w) noexcept {
   });
 }
 
+// Count candidate records in a single native JSON object: iterate every field once,
+// checking every wrapper occurrence and taking the maximum of their record counts.
+// Wrapper objects count as 1; wrapper arrays count their object elements.
+// Does not recursively expand nested wrappers (depth-one only).
+std::size_t CountNativeObjectJson(od::object& obj, const Layout& layout) noexcept {
+  std::size_t max_candidates = 1;  // single event fallback
+
+  for (auto field_result : obj) {
+    od::field field;
+    if (std::move(field_result).get(field) != simdjson::SUCCESS) {
+      break;
+    }
+    std::string_view key;
+    if (field.unescaped_key().get(key) != simdjson::SUCCESS) {
+      break;
+    }
+
+    // Check if this key matches any native wrapper for the current signal.
+    bool is_wrapper = false;
+    for (const ReadKey& wrapper : layout.native_wrappers) {
+      if (wrapper.present() && key == wrapper.c_str()) {
+        is_wrapper = true;
+        break;
+      }
+    }
+
+    if (!is_wrapper) {
+      continue;
+    }
+
+    od::value value = std::move(field.value());
+    od::json_type type{};
+    if (value.type().get(type) != simdjson::SUCCESS) {
+      break;
+    }
+
+    std::size_t wrapper_candidates = 0;
+    if (type == od::json_type::array) {
+      Walk sub;
+      CountObjects(value, sub);
+      wrapper_candidates = sub.n;
+    } else if (type == od::json_type::object) {
+      // Wrapper object itself counts as one candidate.
+      wrapper_candidates = 1;
+    }
+    // Non-array, non-object wrappers contribute zero.
+
+    max_candidates = std::max<std::size_t>(max_candidates, wrapper_candidates);
+    if (max_candidates > kMaxIncomingRecords) return max_candidates;
+  }
+
+  return max_candidates;
+}
+
 void CountNativeJson(od::document& doc, const Layout& layout, Walk& w) noexcept {
   od::json_type type{};
   if (doc.type().get(type) != simdjson::SUCCESS) {
@@ -229,8 +283,30 @@ void CountNativeJson(od::document& doc, const Layout& layout, Walk& w) noexcept 
   }
   if (type == od::json_type::array) {
     od::array arr;
-    if (doc.get_array().get(arr) == simdjson::SUCCESS) {
-      CountObjectsInArray(arr, w);
+    if (doc.get_array().get(arr) != simdjson::SUCCESS) {
+      return;
+    }
+    // For root arrays, apply the per-object logic to each element and sum the maxima.
+    for (auto element : arr) {
+      if (w.over) {
+        return;
+      }
+      if (element.error() != simdjson::SUCCESS) {
+        return;
+      }
+      od::json_type elem_type{};
+      if (element.type().get(elem_type) != simdjson::SUCCESS) {
+        return;
+      }
+      if (elem_type != od::json_type::object) {
+        continue;  // skip non-object elements
+      }
+      od::object elem_obj;
+      if (element.get_object().get(elem_obj) != simdjson::SUCCESS) {
+        continue;  // skip elements that fail to parse as objects
+      }
+      std::size_t obj_candidates = CountNativeObjectJson(elem_obj, layout);
+      w.Add(obj_candidates);
     }
     return;
   }
@@ -241,27 +317,7 @@ void CountNativeJson(od::document& doc, const Layout& layout, Walk& w) noexcept 
   if (doc.get_object().get(root) != simdjson::SUCCESS) {
     return;
   }
-  // A single event is one candidate; a wrapper holding an array replaces that with its members.
-  std::size_t candidates = 1;
-  for (const ReadKey& wrapper : layout.native_wrappers) {
-    od::value value;
-    if (!wrapper.present() || !FieldOf(root, wrapper.c_str(), nullptr, value)) {
-      continue;
-    }
-    od::json_type wrapper_type{};
-    if (value.type().get(wrapper_type) != simdjson::SUCCESS) {
-      break;
-    }
-    if (wrapper_type == od::json_type::array) {
-      Walk sub;
-      CountObjects(value, sub);
-      candidates = std::max<std::size_t>(1, sub.n);
-      break;
-    }
-    if (wrapper_type == od::json_type::object) {
-      break;
-    }
-  }
+  std::size_t candidates = CountNativeObjectJson(root, layout);
   w.Add(candidates);
 }
 
