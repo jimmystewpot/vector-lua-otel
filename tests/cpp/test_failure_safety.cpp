@@ -2214,6 +2214,60 @@ INSTANTIATE_TEST_SUITE_P(OtelSignals, FailureSafetyOtelTest,
                                   info.param->name;
                          });
 
+TEST(NativeTableAdmissionRegression, NonNilPrimaryHasSameProcessResultWithIgnoredSecondary) {
+  for (const char* signal : {"traces", "metrics"}) {
+    const std::string primary = std::string(signal) == "metrics" ? "metric" : "log";
+    const std::string secondary = std::string(signal) == "metrics" ? "log" : "trace";
+    for (const char* value : {"{}", "false", "42", "'text'"}) {
+      SCOPED_TRACE(std::string(signal) + " primary=" + value);
+      const std::string only = "return {" + primary + "=" + value + "}";
+      const std::string with_secondary =
+          "local rows={} for i=1,2049 do rows[i]={name='m',gauge={value=1}} end return {" +
+          primary + "=" + value + "," + secondary + "=rows}";
+      RawState first;
+      RawState second;
+      ProcRecorder a;
+      ProcRecorder b;
+      const auto expected = CallProcess(first, true, signal, TablePayload(only), a);
+      const auto actual = CallProcess(second, true, signal, TablePayload(with_secondary), b);
+      EXPECT_EQ(actual.status, expected.status);
+      EXPECT_EQ(actual.nresults, expected.nresults);
+      EXPECT_EQ(actual.first_nil, expected.first_nil);
+      EXPECT_EQ(actual.count, expected.count);
+      EXPECT_EQ(actual.error, expected.error);
+      EXPECT_EQ(b.rows, a.rows);
+      EXPECT_EQ(actual.error.find("2048-record limit"), std::string::npos);
+    }
+  }
+}
+
+TEST(NativeTableAdmissionRegression, AbsentPrimarySecondaryRespectsRecordBoundary) {
+  for (const char* signal : {"traces", "metrics"}) {
+    for (int count : {2048, 2049}) {
+      SCOPED_TRACE(std::string(signal) + " rows=" + std::to_string(count));
+      const bool metric = std::string(signal) == "metrics";
+      const std::string row = metric ? "{name='m',gauge={value=1}}" : NativeSpanLua(0, 0);
+      const std::string chunk = "local rows={} for i=1," + std::to_string(count) +
+                                " do rows[i]=" + row + " end return {" +
+                                (metric ? "log" : "trace") + "=rows}";
+      RawState state;
+      ProcRecorder rec;
+      const auto result = CallProcess(state, true, signal, TablePayload(chunk), rec);
+      ASSERT_EQ(result.status, LUA_OK);
+      if (count == 2048) {
+        EXPECT_EQ(result.nresults, 2) << result.error;
+        EXPECT_EQ(result.count, 2048);
+        EXPECT_EQ(rec.rows, 2048);
+      } else {
+        EXPECT_TRUE(result.first_nil);
+        EXPECT_EQ(result.error, "event exceeds 2048-record limit");
+        EXPECT_EQ(result.count, 0);
+        EXPECT_EQ(rec.rows, 0);
+      }
+    }
+  }
+}
+
 TEST(NativeJsonAdmissionRegression, ExpandedWrappersRejectBeforeAnyCallback) {
   for (const char* signal : {"logs", "traces", "metrics"}) {
     const std::string primary = std::string(signal) == "metrics" ? "metric" : "log";

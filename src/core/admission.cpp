@@ -444,10 +444,9 @@ void CountNativeTable(lua_State* L, int root, const Layout& layout, Walk& w) {
     return;
   }
   const int top = lua_gettop(L);
-  for (const ReadKey& wrapper : layout.native_wrappers) {
-    if (!wrapper.present() || !GetTableFieldRaw(L, root, wrapper)) {
-      continue;
-    }
+  // Match extraction's first-non-nil wrapper selection without retrying a
+  // secondary wrapper after an empty or scalar primary.
+  if (GetTableFieldRaw(L, root, layout.native_wrappers[0], layout.native_wrappers[1])) {
     const int value = lua_gettop(L);
     if (lua_istable(L, value)) {
       if (lua_rawlen(L, value) > 0) {
