@@ -529,6 +529,7 @@ int LoadedTarget(lua_State* L, bool global) {
 struct RollbackObservation {
   LuaFaultAllocator* allocator = nullptr;
   std::size_t attempts = 0;
+  std::size_t attempts_after = 0;
   bool allocated = false;
   int calls = 0;
   int partial = 0;
@@ -537,7 +538,8 @@ thread_local RollbackObservation* rollback_observation = nullptr;
 void ObserveRollback(lua_State* L, int journal, bool before) {
   auto& observation = *rollback_observation;
   if (!before) {
-    observation.allocated |= observation.allocator->stats().attempts != observation.attempts;
+    observation.attempts_after = observation.allocator->stats().attempts;
+    observation.allocated |= observation.attempts_after != observation.attempts;
     return;
   }
   ++observation.calls;
@@ -784,7 +786,6 @@ TEST(ModuleRegistration, ReturnHookFailureRestoresRegistrySlotAndAllowsRetry) {
         lua_sethook(L, FailAfterRegistryPublication, LUA_MASKRET, 0);
         const int status = lua_pcall(L, 0, 1, 0);
         lua_sethook(L, nullptr, 0, 0);
-        const auto stats = state.alloc().stats();
         state.alloc().ClearPlan();
         publication_return_hook = nullptr;
         tls_registration_rollback_observer = nullptr;
@@ -796,7 +797,10 @@ TEST(ModuleRegistration, ReturnHookFailureRestoresRegistrySlotAndAllowsRetry) {
         lua_pop(L, 2);
         EXPECT_EQ(observation.calls, 1);
         EXPECT_FALSE(observation.allocated);
-        if (deny) EXPECT_EQ(stats.attempts, 0u);
+        // Measure the rollback itself, not Lua's surrounding error recovery.
+        // Lua 5.4.4 may attempt to resize its stack while lua_pcall unwinds;
+        // those runtime requests are outside the observed rollback interval.
+        if (deny) EXPECT_EQ(observation.attempts_after, observation.attempts);
         lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
         if (old_registry == LUA_REFNIL)
           lua_pushnil(L);
