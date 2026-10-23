@@ -18,6 +18,7 @@
 #include "fault_allocator.hpp"
 #include "operation_fixtures.hpp"
 #include "vector_otel/core/config.hpp"
+#include "vector_otel/core/module_runner.hpp"
 #include "vector_otel/core/module_state.hpp"
 #include "vector_otel/core/operation_context.hpp"
 #include "vector_otel/core/protected_lua.hpp"
@@ -490,6 +491,370 @@ TEST(FailureSafetyTest, PersistentOomAfterAcquisitionRestoresTheSameState) {
   EXPECT_TRUE(failed_after_first_acquisition)
       << "the sweep never failed after an object was anchored";
   EXPECT_TRUE(eventually_succeeded);
+}
+
+}  // namespace
+
+namespace {
+struct LoaderCase {
+  const char* module;
+  const char* name;
+  lua_CFunction open;
+};
+extern "C" int luaopen_vector_otel_metrics(lua_State*);
+extern "C" int luaopen_vector_native_logs(lua_State*);
+extern "C" int luaopen_vector_native_traces(lua_State*);
+const LoaderCase kLoaders[] = {
+    {"vector_otel", "vector_otel", luaopen_vector_otel},
+    {"vector_native", "vector_native", luaopen_vector_native},
+    {"vector_otel", "vector_otel.logs", luaopen_vector_otel_logs},
+    {"vector_otel", "vector_otel.traces", luaopen_vector_otel_traces},
+    {"vector_otel", "vector_otel.metrics", luaopen_vector_otel_metrics},
+    {"vector_native", "vector_native.logs", luaopen_vector_native_logs},
+    {"vector_native", "vector_native.traces", luaopen_vector_native_traces},
+    {"vector_native", "vector_native.metrics", luaopen_vector_native_metrics},
+};
+
+int LoadedTarget(lua_State* L, bool global) {
+  if (global) {
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "loaded");
+    lua_remove(L, -2);
+  } else {
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+  }
+  return lua_gettop(L);
+}
+
+struct RollbackObservation {
+  LuaFaultAllocator* allocator = nullptr;
+  std::size_t attempts = 0;
+  bool allocated = false;
+  int calls = 0;
+  int partial = 0;
+};
+thread_local RollbackObservation* rollback_observation = nullptr;
+void ObserveRollback(lua_State* L, int journal, bool before) {
+  auto& observation = *rollback_observation;
+  if (!before) {
+    observation.allocated |= observation.allocator->stats().attempts != observation.attempts;
+    return;
+  }
+  ++observation.calls;
+  observation.attempts = observation.allocator->stats().attempts;
+  // Fixed journal layout is internal to this fault-target instrumentation.
+  lua_rawgeti(L, journal, 6);
+  const int count = static_cast<int>(lua_tointeger(L, -1));
+  lua_pop(L, 1);
+  for (int i = 0; i < count; ++i) {
+    const int slot = 7 + i * 4;
+    lua_rawgeti(L, journal, slot);
+    lua_rawgeti(L, journal, slot + 1);
+    lua_rawget(L, -2);
+    lua_rawgeti(L, journal, slot + 2);
+    if (!lua_rawequal(L, -1, -2)) ++observation.partial;
+    lua_pop(L, 3);
+  }
+}
+
+TEST(ModuleRegistration, AllLoadersRollbackAndRetryUnderPersistentAndWindowOom) {
+  for (const auto& loader : kLoaders) {
+    for (bool distinct : {false, true}) {
+      for (LuaFaultMode mode : {LuaFaultMode::kPersistent, LuaFaultMode::kWindow}) {
+        bool success = false;
+        int failures = 0;
+        int rollback_calls = 0;
+        int partial_writes = 0;
+        for (std::size_t skip = 0; skip < 256; ++skip) {
+          SCOPED_TRACE(std::string(loader.name) + " skip=" + std::to_string(skip) +
+                       " distinct=" + std::to_string(distinct));
+          RawState state;
+          lua_State* L = state.L();
+          luaL_openlibs(L);
+          if (distinct) {
+            lua_getglobal(L, "package");
+            lua_newtable(L);
+            lua_setfield(L, -2, "loaded");
+            lua_pop(L, 1);
+          }
+          const std::string names[] = {loader.module, std::string(loader.module) + ".logs",
+                                       std::string(loader.module) + ".traces",
+                                       std::string(loader.module) + ".metrics"};
+          int snapshots[2][4]{};
+          const void* identities[2]{};
+          for (int target = 0; target < 2; ++target) {
+            const int table = LoadedTarget(L, target == 1);
+            identities[target] = lua_topointer(L, table);
+            // Cover absent, false and object old values, not merely existence.
+            lua_pushboolean(L, false);
+            lua_setfield(L, table, names[1].c_str());
+            lua_newtable(L);
+            lua_setfield(L, table, names[2].c_str());
+            for (int i = 0; i < 4; ++i) {
+              lua_getfield(L, table, names[i].c_str());
+              snapshots[target][i] = luaL_ref(L, LUA_REGISTRYINDEX);
+            }
+            lua_pop(L, 1);
+          }
+          // Aliased targets were seeded twice, so recapture after both seeds.
+          for (int target = 0; target < 2; ++target) {
+            const int table = LoadedTarget(L, target == 1);
+            for (int i = 0; i < 4; ++i) {
+              luaL_unref(L, LUA_REGISTRYINDEX, snapshots[target][i]);
+              lua_getfield(L, table, names[i].c_str());
+              snapshots[target][i] = luaL_ref(L, LUA_REGISTRYINDEX);
+            }
+            lua_pop(L, 1);
+          }
+          lua_pushcfunction(L, loader.open);
+          RollbackObservation observation;
+          observation.allocator = &state.alloc();
+          rollback_observation = &observation;
+          tls_registration_rollback_observer = ObserveRollback;
+          state.alloc().SetPlan(mode, skip, 8);
+          const int status = lua_pcall(L, 0, 1, 0);
+          const auto stats = state.alloc().stats();
+          state.alloc().ClearPlan();
+          tls_registration_rollback_observer = nullptr;
+          rollback_observation = nullptr;
+          EXPECT_FALSE(observation.allocated);
+          rollback_calls += observation.calls;
+          partial_writes += observation.partial;
+          if (status != LUA_OK) {
+            ++failures;
+            EXPECT_EQ(status, LUA_ERRMEM);
+            lua_pop(L, 1);
+            for (int target = 0; target < 2; ++target) {
+              const int table = LoadedTarget(L, target == 1);
+              ASSERT_EQ(lua_topointer(L, table), identities[target]);
+              for (int i = 0; i < 4; ++i) {
+                lua_getfield(L, table, names[i].c_str());
+                if (snapshots[target][i] == LUA_REFNIL)
+                  lua_pushnil(L);
+                else
+                  lua_rawgeti(L, LUA_REGISTRYINDEX, snapshots[target][i]);
+                EXPECT_TRUE(lua_rawequal(L, -1, -2)) << names[i];
+                lua_pop(L, 2);
+              }
+              lua_pop(L, 1);
+            }
+            // Same state, recovered allocator: complete anchor remains reusable.
+            lua_pushcfunction(L, loader.open);
+            ASSERT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK);
+            ASSERT_TRUE(lua_istable(L, -1));
+            lua_pop(L, 1);
+          } else {
+            ASSERT_TRUE(lua_istable(L, -1));
+            lua_pop(L, 1);
+            success = stats.denied == 0;
+          }
+          EXPECT_EQ(lua_gettop(L), 0);
+          if (success) break;
+        }
+        EXPECT_GT(failures, 0);
+        EXPECT_TRUE(success);
+        if (distinct && std::strcmp(loader.name, loader.module) == 0) EXPECT_GT(rollback_calls, 0);
+        if (distinct && std::strcmp(loader.name, loader.module) == 0) EXPECT_GT(partial_writes, 0);
+      }
+    }
+  }
+}
+
+int RegisterTestBatch(lua_State* L) {
+  // Values are already rooted in arguments, no C++ owner crosses a Lua raise.
+  const ModuleRegistration entries[] = {{"transaction.first", 1},
+                                        {"transaction.second", 2},
+                                        {"transaction.third", 3},
+                                        {"transaction.fourth", 4}};
+  RegisterModulesInPackageLoaded(L, entries, 4);
+  return 0;
+}
+
+TEST(ModuleRegistration, MissingRegistryAndGlobalPackageCompatibility) {
+  for (bool package : {false, true}) {
+    bool success = false;
+    for (std::size_t skip = 0; skip < 128; ++skip) {
+      RawState state;
+      lua_State* L = state.L();
+      if (package) luaL_openlibs(L);
+      lua_pushnil(L);
+      lua_setfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+      lua_pushcfunction(L, RegisterTestBatch);
+      for (int i = 0; i < 4; ++i) lua_newtable(L);
+      state.alloc().SetPlan(LuaFaultMode::kPersistent, skip);
+      const int status = lua_pcall(L, 4, 0, 0);
+      const auto stats = state.alloc().stats();
+      state.alloc().ClearPlan();
+      if (status != LUA_OK) {
+        lua_pop(L, 1);
+        lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+        EXPECT_TRUE(lua_isnil(L, -1));
+        lua_pop(L, 1);
+        if (package) {
+          const int table = LoadedTarget(L, true);
+          lua_getfield(L, table, "transaction.first");
+          EXPECT_TRUE(lua_isnil(L, -1));
+          lua_pop(L, 2);
+        }
+      } else
+        success = stats.denied == 0;
+      if (success) break;
+    }
+    EXPECT_TRUE(success);
+  }
+}
+struct PublicationReturnHook {
+  const char* watched_name = nullptr;
+  LuaFaultAllocator* allocator = nullptr;
+  int error_ref = LUA_NOREF;
+  bool deny_rollback_allocations = false;
+  bool fired = false;
+};
+thread_local PublicationReturnHook* publication_return_hook = nullptr;
+
+void FailAfterRegistryPublication(lua_State* L, lua_Debug* debug) {
+  auto* hook = publication_return_hook;
+  if (!hook || debug->event != LUA_HOOKRET) return;
+  lua_pushliteral(L, LUA_LOADED_TABLE);
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  bool published = false;
+  if (lua_istable(L, -1)) {
+    lua_pushstring(L, hook->watched_name);
+    lua_rawget(L, -2);
+    published = lua_istable(L, -1);
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+  if (!published) return;
+  hook->fired = true;
+  lua_sethook(L, nullptr, 0, 0);
+  // The original error is rooted before enabling allocation denial.
+  lua_rawgeti(L, LUA_REGISTRYINDEX, hook->error_ref);
+  if (hook->deny_rollback_allocations) hook->allocator->SetPlan(LuaFaultMode::kPersistent, 0);
+  lua_error(L);
+}
+
+TEST(ModuleRegistration, ReturnHookFailureRestoresRegistrySlotAndAllowsRetry) {
+  for (const auto& loader : kLoaders) {
+    for (int prior = 0; prior < 4; ++prior) {
+      for (bool deny : {false, true}) {
+        SCOPED_TRACE(std::string(loader.name) + " prior=" + std::to_string(prior) +
+                     " deny=" + std::to_string(deny));
+        RawState state;
+        lua_State* L = state.L();
+        luaL_openlibs(L);
+        const std::string names[] = {loader.module, std::string(loader.module) + ".logs",
+                                     std::string(loader.module) + ".traces",
+                                     std::string(loader.module) + ".metrics"};
+        const int public_table = LoadedTarget(L, true);
+        const void* public_identity = lua_topointer(L, public_table);
+        int snapshots[4]{};
+        for (int i = 0; i < 4; ++i) {
+          if (std::strcmp(names[i].c_str(), loader.name) == 0)
+            lua_pushnil(L);
+          else if (i % 2 == 0)
+            lua_newtable(L);
+          else
+            lua_pushboolean(L, false);
+          lua_pushvalue(L, -1);
+          lua_setfield(L, public_table, names[i].c_str());
+          snapshots[i] = luaL_ref(L, LUA_REGISTRYINDEX);
+        }
+        if (prior == 0)
+          lua_pushnil(L);
+        else if (prior == 1)
+          lua_pushboolean(L, false);
+        else if (prior == 2)
+          lua_pushliteral(L, "original registry sentinel");
+        else
+          lua_pushvalue(L, public_table);
+        lua_pushvalue(L, -1);
+        const int old_registry = luaL_ref(L, LUA_REGISTRYINDEX);
+        lua_setfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+        lua_pop(L, 1);
+        lua_pushliteral(L, "injected publication return-hook error");
+        const int error_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+        PublicationReturnHook hook{loader.name, &state.alloc(), error_ref, deny, false};
+        RollbackObservation observation;
+        observation.allocator = &state.alloc();
+        rollback_observation = &observation;
+        tls_registration_rollback_observer = ObserveRollback;
+        publication_return_hook = &hook;
+        lua_pushcfunction(L, loader.open);
+        lua_sethook(L, FailAfterRegistryPublication, LUA_MASKRET, 0);
+        const int status = lua_pcall(L, 0, 1, 0);
+        lua_sethook(L, nullptr, 0, 0);
+        const auto stats = state.alloc().stats();
+        state.alloc().ClearPlan();
+        publication_return_hook = nullptr;
+        tls_registration_rollback_observer = nullptr;
+        rollback_observation = nullptr;
+        ASSERT_TRUE(hook.fired);
+        ASSERT_EQ(status, LUA_ERRRUN);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, error_ref);
+        EXPECT_TRUE(lua_rawequal(L, -1, -2));
+        lua_pop(L, 2);
+        EXPECT_EQ(observation.calls, 1);
+        EXPECT_FALSE(observation.allocated);
+        if (deny) EXPECT_EQ(stats.attempts, 0u);
+        lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+        if (old_registry == LUA_REFNIL)
+          lua_pushnil(L);
+        else
+          lua_rawgeti(L, LUA_REGISTRYINDEX, old_registry);
+        EXPECT_TRUE(lua_rawequal(L, -1, -2));
+        lua_pop(L, 2);
+        const int loaded = LoadedTarget(L, true);
+        EXPECT_EQ(lua_topointer(L, loaded), public_identity);
+        for (int i = 0; i < 4; ++i) {
+          lua_getfield(L, loaded, names[i].c_str());
+          if (snapshots[i] == LUA_REFNIL)
+            lua_pushnil(L);
+          else
+            lua_rawgeti(L, LUA_REGISTRYINDEX, snapshots[i]);
+          EXPECT_TRUE(lua_rawequal(L, -1, -2)) << names[i];
+          lua_pop(L, 2);
+        }
+        lua_pop(L, 1);
+        EXPECT_EQ(lua_gettop(L), 0);
+        lua_pushcfunction(L, loader.open);
+        ASSERT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK);
+        EXPECT_TRUE(lua_istable(L, -1));
+        lua_pop(L, 1);
+        EXPECT_EQ(lua_gettop(L), 0);
+      }
+    }
+  }
+}
+
+TEST(ModuleRegistration, RequireUsesPublishedTablesWithoutMetamethods) {
+  for (const char* module : {"vector_otel", "vector_native"}) {
+    RawState state;
+    lua_State* L = state.L();
+    luaL_openlibs(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    lua_pushcfunction(
+        L, std::strcmp(module, "vector_otel") == 0 ? luaopen_vector_otel : luaopen_vector_native);
+    lua_setfield(L, -2, module);
+    lua_pop(L, 2);
+    const std::string chunk =
+        "local m=require('" + std::string(module) + "'); assert(m==require('" + module +
+        "')); assert(m.logs==require('" + module + ".logs')); assert(m.traces==require('" + module +
+        ".traces')); assert(m.metrics==require('" + module + ".metrics')); return true";
+    ASSERT_EQ(luaL_loadstring(L, chunk.c_str()), LUA_OK);
+    ASSERT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK) << lua_tostring(L, -1);
+    EXPECT_TRUE(lua_toboolean(L, -1));
+  }
+  RawState state;
+  lua_State* L = state.L();
+  luaL_openlibs(L);
+  ASSERT_EQ(
+      luaL_dostring(
+          L, "setmetatable(package.loaded,{__newindex=function() error('metamethod called') end})"),
+      LUA_OK);
+  lua_pushcfunction(L, luaopen_vector_otel);
+  EXPECT_EQ(lua_pcall(L, 0, 1, 0), LUA_OK) << lua_tostring(L, -1);
 }
 
 }  // namespace

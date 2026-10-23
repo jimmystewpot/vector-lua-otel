@@ -72,17 +72,27 @@ int luaopen_vector_otel(lua_State* L) {
   lua_pushstring(L, "0.3.0");
   lua_setfield(L, -2, "_VERSION");
 
-  luaopen_vector_otel_logs(L);
-  lua_setfield(L, -2, "logs");
-
-  luaopen_vector_otel_traces(L);
-  lua_setfield(L, -2, "traces");
-
-  luaopen_vector_otel_metrics(L);
-  lua_setfield(L, -2, "metrics");
-
-  core::RegisterInPackageLoaded(L, "vector_otel", -1);
-
+  core::OpenSignalTable(L, core::ModuleKind::Otel, kLogsFuncs);
+  const int logs = lua_gettop(L);
+  core::OpenSignalTable(L, core::ModuleKind::Otel, kTracesFuncs);
+  const int traces = lua_gettop(L);
+  core::OpenSignalTable(L, core::ModuleKind::Otel, kMetricsFuncs);
+  const int metrics = lua_gettop(L);
+  const int parent = logs - 1;
+  lua_pushvalue(L, logs);
+  lua_setfield(L, parent, "logs");
+  lua_pushvalue(L, traces);
+  lua_setfield(L, parent, "traces");
+  lua_pushvalue(L, metrics);
+  lua_setfield(L, parent, "metrics");
+  const vector_otel::core::ModuleRegistration registrations[] = {
+      {"vector_otel", parent},
+      {"vector_otel.logs", logs},
+      {"vector_otel.traces", traces},
+      {"vector_otel.metrics", metrics},
+  };
+  vector_otel::core::RegisterModulesInPackageLoaded(L, registrations, 4);
+  lua_settop(L, parent);
   return 1;
 }
 

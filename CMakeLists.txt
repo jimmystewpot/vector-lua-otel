@@ -69,6 +69,7 @@ add_library(vector_otel_core STATIC
   src/core/staged_row.cpp
   src/core/admission.cpp
   src/core/process_runner.cpp
+  src/core/module_registration.cpp
   src/extractors/logs_extractor.cpp
   src/extractors/traces_extractor.cpp
   src/extractors/metrics_extractor.cpp
@@ -184,7 +185,11 @@ if(NOT ENABLE_SANITIZERS AND NOT ENABLE_TSAN)
     ${LUA_LIBRARIES}
     GTest::gtest
   )
-  target_compile_definitions(vector_otel_fault_tests PRIVATE VECTOR_OTEL_UNCHECKED_READ_KEYS)
+  # Compile the registration unit here with fault-only observation; its static
+  # archive counterpart is not pulled in when this target already defines it.
+  target_sources(vector_otel_fault_tests PRIVATE src/core/module_registration.cpp)
+  target_compile_definitions(vector_otel_fault_tests PRIVATE
+    VECTOR_OTEL_UNCHECKED_READ_KEYS VECTOR_OTEL_TEST_REGISTRATION_OBSERVER)
   add_test(NAME vector_otel_fault_tests COMMAND vector_otel_fault_tests)
 endif()
 

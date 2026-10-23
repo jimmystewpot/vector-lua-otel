@@ -498,6 +498,120 @@ TEST(AdmissionTest, NativeTableSingleArrayAndWrapperNormalization) {
   }
 }
 
+// Regression: native table wrapper selection must match extractor behavior (first non-nil).
+// Non-nil primary (even if empty/scalar) must block secondary fallback.
+// Only test signals with two wrappers (Traces and Metrics).
+TEST(AdmissionTest, NativeTablePrimaryNonNilBlocksSecondary) {
+  struct TwoWrapperCase {
+    Signal sig;
+    const char* primary;
+    const char* secondary;
+  };
+  const TwoWrapperCase cases[] = {
+      {Signal::Traces, "log", "trace"},    // Traces: primary log, secondary trace
+      {Signal::Metrics, "metric", "log"},  // Metrics: primary metric, secondary log
+  };
+  for (const auto& c : cases) {
+    const std::string tag = "signal " + std::to_string(static_cast<int>(c.sig));
+
+    // Primary is empty table, secondary is oversized array.
+    // Admission retains a root candidate (1), not the ignored secondary (2049).
+    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
+                            NativeTableArray(2049) + "return {" + std::string(c.primary) + "={}, " +
+                                std::string(c.secondary) + "=r(N)}"),
+                   1, tag + " primary empty blocks secondary array");
+
+    // Primary is false, secondary is oversized array.
+    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
+                            NativeTableArray(2049) + "return {" + std::string(c.primary) +
+                                "=false, " + std::string(c.secondary) + "=r(N)}"),
+                   1, tag + " primary false blocks secondary array");
+
+    // Primary is a number, secondary is oversized array.
+    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
+                            NativeTableArray(2049) + "return {" + std::string(c.primary) + "=42, " +
+                                std::string(c.secondary) + "=r(N)}"),
+                   1, tag + " primary number blocks secondary array");
+
+    // Primary is a string, secondary is oversized array.
+    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
+                            NativeTableArray(2049) + "return {" + std::string(c.primary) +
+                                "='text', " + std::string(c.secondary) + "=r(N)}"),
+                   1, tag + " primary string blocks secondary array");
+  }
+}
+
+// Regression: nil or absent primary must allow secondary selection.
+// Only test signals with two wrappers (Traces and Metrics).
+TEST(AdmissionTest, NativeTableNilPrimaryUsesSecondary) {
+  struct TwoWrapperCase {
+    Signal sig;
+    const char* primary;
+    const char* secondary;
+  };
+  const TwoWrapperCase cases[] = {
+      {Signal::Traces, "log", "trace"},    // Traces: primary log, secondary trace
+      {Signal::Metrics, "metric", "log"},  // Metrics: primary metric, secondary log
+  };
+  for (const auto& c : cases) {
+    const std::string tag = "signal " + std::to_string(static_cast<int>(c.sig));
+
+    // Primary is nil, secondary is valid 2048-element array.
+    ExpectAccepted(RunTable(ModuleKind::Native, c.sig,
+                            NativeTableArray(2048) + "return {" + std::string(c.primary) +
+                                "=nil, " + std::string(c.secondary) + "=r(N)}"),
+                   2048, tag + " primary nil uses secondary 2048");
+
+    // Primary is absent (no wrapper field), secondary is valid 2048-element array.
+    ExpectAccepted(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(2048) + "return {" + std::string(c.secondary) + "=r(N)}"),
+        2048, tag + " primary absent uses secondary 2048");
+
+    // Primary is nil, secondary is oversized 2049-element array.
+    ExpectRecordLimit(RunTable(ModuleKind::Native, c.sig,
+                               NativeTableArray(2049) + "return {" + std::string(c.primary) +
+                                   "=nil, " + std::string(c.secondary) + "=r(N)}"),
+                      tag + " primary nil secondary 2049 rejected");
+
+    // Primary is absent, secondary is oversized 2049-element array.
+    ExpectRecordLimit(
+        RunTable(ModuleKind::Native, c.sig,
+                 NativeTableArray(2049) + "return {" + std::string(c.secondary) + "=r(N)}"),
+        tag + " primary absent secondary 2049 rejected");
+  }
+}
+
+// Regression: primary array wins over secondary, even when secondary is oversized.
+TEST(AdmissionTest, NativeTablePrimaryArrayWins) {
+  for (const NativeNames& nn : kNative) {
+    const Signal sig = nn.signal;
+    const std::string tag = "signal " + std::to_string(static_cast<int>(sig));
+    for (const char* wrapper : nn.wrappers) {
+      if (wrapper == nullptr) continue;
+      const std::string w = std::string(wrapper) + " = ";
+
+      // Primary is valid 2048-element array, secondary is oversized 2049-element array.
+      ExpectAccepted(RunTable(ModuleKind::Native, sig,
+                              NativeTableArray(2049) + NativeTableArray(2048) + "return {" + w +
+                                  "r(2048), secondary = r(2049)}"),
+                     2048, tag + " primary array 2048 wins over secondary");
+
+      // Primary is valid single-element array, secondary is oversized array.
+      ExpectAccepted(RunTable(ModuleKind::Native, sig,
+                              NativeTableArray(2049) + "return {" + w +
+                                  "{{message = 'x'}}, secondary = r(2049)}"),
+                     1, tag + " primary array 1 wins over secondary");
+
+      // Primary is single nonempty table (not array), secondary is oversized array.
+      ExpectAccepted(RunTable(ModuleKind::Native, sig,
+                              NativeTableArray(2049) + "return {" + w +
+                                  "{message = 'x'}, secondary = r(2049)}"),
+                     1, tag + " primary single table wins over secondary");
+    }
+  }
+}
+
 TEST(AdmissionTest, NativeMetricEventIsOneRecordWhateverItsBucketCount) {
   const std::string buckets = Repeat("1", 2049);
   ExpectAccepted(RunJson(ModuleKind::Native, Signal::Metrics,
@@ -757,5 +871,69 @@ TEST(AdmissionTest, PreparationFailureIsAMemoryErrorAndRetryable) {
   EXPECT_TRUE(parser.IsPrepared());
 }
 
+// ---- Native JSON admission regression tests (Task 1) ----------------------------------------
+
+TEST(AdmissionTest, NativeJsonRootArrayExpandsWrappers) {
+  // Root array with wrapper holding 2048 records should be admitted.
+  const std::string wrapped_2048 = "[{\"log\":" + Repeat("{}", 2048) + "}]";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, wrapped_2048), 2048,
+                 "root array with wrapper expanding 2048");
+
+  // Same with 2049 should be rejected.
+  const std::string wrapped_2049 = "[{\"log\":" + Repeat("{}", 2049) + "}]";
+  ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Logs, wrapped_2049),
+                    "root array with wrapper expanding 2049");
+}
+
+TEST(AdmissionTest, NativeJsonCompetingWrappersUseMaximum) {
+  // Two wrappers: first 100, second 2048. Should admit by maximum.
+  const std::string comp1 =
+      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2048) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp1), 2048,
+                 "competing wrappers: maximum not sum");
+
+  // Reverse order: 2048 first, then 100.
+  const std::string comp2 =
+      "{\"trace\":" + Repeat("{}", 2048) + ",\"log\":" + Repeat("{}", 100) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp2), 2048,
+                 "competing wrappers reversed");
+
+  // Two 2048 wrappers should admit.
+  const std::string comp3 =
+      "{\"log\":" + Repeat("{}", 2048) + ",\"trace\":" + Repeat("{}", 2048) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Traces, comp3), 2048, "two 2048 wrappers");
+
+  // One wrapper 2049 should reject (maximum of alternatives).
+  const std::string comp4 =
+      "{\"log\":" + Repeat("{}", 100) + ",\"trace\":" + Repeat("{}", 2049) + "}";
+  ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Traces, comp4),
+                    "competing wrappers with one at 2049");
+}
+
+TEST(AdmissionTest, NativeJsonCountsDuplicateWrappers) {
+  // When iterating through all fields (not using find_field), duplicate keys are visited.
+  // Our counter sees all occurrences and takes the maximum bound.
+  const std::string dup1 = "{\"log\":" + Repeat("{}", 100) + ",\"log\":" + Repeat("{}", 2048) + "}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, dup1), 2048,
+                 "duplicate log wrappers: iterate all, use maximum");
+
+  // Any oversized duplicate must reject, even when followed by a smaller one.
+  const std::string dup2 = "{\"log\":" + Repeat("{}", 2049) + ",\"log\":" + Repeat("{}", 100) + "}";
+  ExpectRecordLimit(RunJson(ModuleKind::Native, Signal::Logs, dup2),
+                    "duplicate log wrapper at 2049");
+}
+
+TEST(AdmissionTest, NativeJsonDoesNotRecursivelyExpandInnerWrappers) {
+  // Nested wrapper: outer object with inner wrapper counts as 1 (no recursive expansion).
+  const std::string nested1 = "{\"log\":{\"log\":" + Repeat("{}", 2048) + "}}";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, nested1), 1,
+                 "nested wrapper counts as one");
+
+  // Root array with nested wrappers.
+  const std::string nested2 =
+      "[{\"log\":{\"log\":" + Repeat("{}", 1000) + "}},{\"log\":" + Repeat("{}", 1048) + "}]";
+  ExpectAccepted(RunJson(ModuleKind::Native, Signal::Logs, nested2), 1049,
+                 "root array with nested wrappers");
+}
 }  // namespace
 }  // namespace vector_otel::core
